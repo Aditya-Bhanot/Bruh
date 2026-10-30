@@ -1,0 +1,164 @@
+{
+  "kolokolnia_kill": {
+    "sounds": [
+      "releon:other/kill_effect/kolokolnia_kill"
+    ]
+  },
+  "moan1": {
+    "sounds": [
+      "releon:hit_sounds/moan1"
+    ]
+  },
+  "moan2": {
+    "sounds": [
+      "releon:hit_sounds/moan2"
+    ]
+  },
+  "moan3": {
+    "sounds": [
+      "releon:hit_sounds/moan3"
+    ]
+  },
+  "moan4": {
+    "sounds": [
+      "releon:hit_sounds/moan4"
+    ]
+  },
+  "module_disable": {
+    "sounds": [
+      "releon:module_sounds/off"
+    ]
+  },
+  "module_enable": {
+    "sounds": [
+      "releon:module_sounds/on"
+    ]
+  },
+  "off": {
+    "sounds": [
+      "releon:module_sounds/off2"
+    ]
+  },
+  "on": {
+    "sounds": [
+      "releon:module_sounds/on2"
+    ]
+  },
+  "crime": {
+    "sounds": [
+      "releon:hit_sounds/crime"
+    ]
+  },
+  "frag_effect_echo_main": {
+    "sounds": [
+      "releon:charmsfxpack/echocharmmain"
+    ]
+  },
+  "frag_effect_knock_main": {
+    "sounds": [
+      "releon:charmsfxpack/knockcharmmain"
+    ]
+  },
+  "frag_effect_pulse": {
+    "sounds": [
+      "releon:charmsfxpack/pulsecharmdistant0",
+      "releon:charmsfxpack/pulsecharmdistant1",
+      "releon:charmsfxpack/pulsecharmdistant2",
+      "releon:charmsfxpack/pulsecharmdistant3",
+      "releon:charmsfxpack/pulsecharmdistant4"
+    ]
+  },
+  "frag_effect_sparks_collision": {
+    "sounds": [
+      "releon:charmsfxpack/sparkscollisionneared"
+    ]
+  },
+  "metallic": {
+    "sounds": [
+      "releon:hit_sounds/metallic"
+    ]
+  },
+  "welcome": {
+    "sounds": [
+      "releon:other/notification/notif"
+    ]
+  },
+  "module_enable_type2": {
+    "sounds": [
+      "releon:module_sounds/on1"
+    ]
+  },
+  "module_disable_type2": {
+    "sounds": [
+      "releon:module_sounds/off1"
+    ]
+  },
+  "mine": {
+    "sounds": [
+      "releon:other/auto_mine/mine"
+    ]
+  },
+  "accountswitch": {
+    "sounds": [
+      "releon:alt_manager/accountswitch"
+    ]
+  },
+  "searchtyping": {
+    "sounds": [
+      "releon:clickgui/searchtyping"
+    ]
+  },
+  "slider": {
+    "sounds": [
+      "releon:clickgui/slider"
+    ]
+  },
+  "switchcategory": {
+    "sounds": [
+      "releon:clickgui/switchcategory"
+    ]
+  },
+  "no-settings": {
+    "sounds": [
+      "releon:clickgui/no-settings"
+    ]
+  },
+  "buttonclick": {
+    "sounds": [
+      "releon:clickgui/buttonclick"
+    ]
+  },
+  "unknowncommand": {
+    "sounds": [
+      "releon:commands/unknowncommand"
+    ]
+  },
+  "entity.ribbit.ambient": {
+    "sounds": [
+      "releon:entity/ribbit_ambient1",
+      "releon:entity/ribbit_ambient2",
+      "releon:entity/ribbit_ambient3",
+      "releon:entity/ribbit_ambient4",
+      "releon:entity/ribbit_ambient5"
+    ]
+  },
+  "entity.ribbit.step": {
+    "sounds": [
+      "releon:entity/ribbit_step1",
+      "releon:entity/ribbit_step2"
+    ]
+  },
+  "entity.ribbit.hurt": {
+    "sounds": [
+      "releon:entity/ribbit_hurt1",
+      "releon:entity/ribbit_hurt2",
+      "releon:entity/ribbit_hurt3"
+    ]
+  },
+  "entity.ribbit.death": {
+    "sounds": [
+      "releon:entity/ribbit_death1",
+      "releon:entity/ribbit_death2"
+    ]
+  }
+}
