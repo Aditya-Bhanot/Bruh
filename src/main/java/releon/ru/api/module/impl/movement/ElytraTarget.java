@@ -1,24 +1,15 @@
 package releon.ru.api.module.impl.movement;
 
-import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.util.Mth;
-import net.minecraft.world.InteractionHand;
 import net.minecraft.world.effect.MobEffects;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
-import net.minecraft.world.entity.Mob;
-import net.minecraft.world.entity.animal.Animal;
-import net.minecraft.world.entity.decoration.ArmorStand;
-import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
-import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.phys.AABB;
-import net.minecraft.world.phys.BlockHitResult;
-import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import releon.ru.api.events.annotation.SubscribeEvent;
 import releon.ru.api.events.impl.InputEvent;
@@ -26,28 +17,39 @@ import releon.ru.api.events.impl.PlayerTravelEvent;
 import releon.ru.api.events.impl.TickEvent;
 import releon.ru.api.module.Module;
 import releon.ru.api.module.ModuleCategory;
-import releon.ru.api.module.impl.combat.AntiBot;
 import releon.ru.api.module.impl.combat.MaceTarget;
 import releon.ru.api.module.impl.combat.MaceTarget.CombatStateManager;
 import releon.ru.api.module.impl.combat.aura.util.StopWatch;
 import releon.ru.api.settings.impl.BooleanSetting;
 import releon.ru.api.settings.impl.NumberSetting;
+import releon.ru.manager.ActionManager;
+import releon.ru.manager.ActionManager.ActionPriority;
 import releon.ru.utils.inventory.lookup.InventoryUtils;
-import releon.ru.utils.repository.friend.FriendUtils;
 
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 
+/**
+ * Split-Priority AutoElytra Controller:
+ * - Priority 1 (Highest): AUTO_ELYTRA_UNEQUIP (Flight Cancel / Chestplate Swap)
+ *     Trigger: When target distance < 4.5m and v_y < -0.1 while wearing an Elytra.
+ *     Action: Overrides the AutoMace lock, immediately disables the flight state, and executes the 2-tick chestplate swap.
+ * - Priority 3 (Lowest): AUTO_ELYTRA_EQUIP (Flight Deploy)
+ *     Trigger: Wind Charge upward velocity (v_y > 0.6) -> post-apex legal glide transition.
+ *     Action: Only executes if AutoMace is completely idle.
+ */
 public final class ElytraTarget extends Module {
     private static ElytraTarget instance;
     public static boolean shouldElytraTarget;
 
-    private static final int MIN_TICKS_BETWEEN_SWAP_STEPS = 2;
-    private static final long MIN_STEP_DELAY_MS = 100L;
+    // 1. Split-Priority Mutex Thresholds
+    private static final double PRIORITY_1_UNEQUIP_TARGET_DIST = 4.5D;
+    private static final double PRIORITY_1_UNEQUIP_MAX_VEL_Y = -0.1D;
+    private static final double PRIORITY_3_EQUIP_WIND_CHARGE_VEL_Y = 0.6D;
+
     private static final long WIND_CHARGE_SETTLE_DELAY_MS = 250L;
     private static final float MIN_LEGAL_FALL_DISTANCE = 0.25F;
     private static final double MAX_LEGAL_GLIDE_VELOCITY_Y = -0.08D;
-    private static final double MACE_PRIORITY_MUTEX_DISTANCE = 3.5D;
 
     private static final List<Item> CHESTPLATES = List.of(
             Items.NETHERITE_CHESTPLATE,
@@ -67,25 +69,19 @@ public final class ElytraTarget extends Module {
     private final NumberSetting reequipDelayMs = register(new NumberSetting(
             "Reequip Delay (ms)", "Delay in milliseconds before re-equipping the elytra after dropping.", 217.0D, 0.0D, 1000.0D, 1.0D));
     private final BooleanSetting automaceSync = register(new BooleanSetting(
-            "Automace Sync", "Synchronize elytra drop and re-equip timing with AutoMace.", true));
+            "Automace Sync", "Synchronize elytra unequip/equip priorities with AutoMace via ActionManager.", true));
     private final BooleanSetting disableOnGround = register(new BooleanSetting(
             "Disable on Ground", "Swap to chestplate and reset flight state when touching the ground.", true));
     private final BooleanSetting clickSim = register(new BooleanSetting(
-            "ClickSim", "Simulate client click input during legit slotbar armor swaps.", true));
+            "ClickSim", "Simulate client click input during consolidated slotbar armor swaps.", true));
     private final NumberSetting heightDiff = register(new NumberSetting(
             "Height Diff", "Required vertical height difference above target to initiate chestplate drop.", 7.0D, 0.0D, 50.0D, 0.1D));
     private final NumberSetting heightRange = register(new NumberSetting(
             "Height Range", "Maximum target distance within which height drop triggers.", 8.4D, 1.0D, 30.0D, 0.1D));
     private final NumberSetting macePreHitRange = register(new NumberSetting(
-            "Mace Pre-Hit Range", "Pre-impact distance threshold to unequip elytra into chestplate before a mace hit.", 2.5D, 0.5D, 10.0D, 0.1D));
+            "Mace Pre-Hit Range", "Pre-impact distance threshold (< 4.5m default) to unequip elytra before a mace hit.", 4.5D, 0.5D, 10.0D, 0.1D));
     private final NumberSetting minDropDist = register(new NumberSetting(
             "Min Drop Dist", "Minimum drop distance required for chestplate drop and smash preparation.", 1.5D, 0.0D, 20.0D, 0.1D));
-
-    private enum SafeSlotbarSwapStage {
-        IDLE,
-        STEP_1_WAIT_AFTER_SELECT,
-        STEP_2_WAIT_AFTER_USE
-    }
 
     public enum CombatFlightState {
         STATE_1_FLIGHT,
@@ -93,18 +89,13 @@ public final class ElytraTarget extends Module {
         STATE_3_RECOVERY
     }
 
-    private final StopWatch stepDelayTimer = new StopWatch();
     private final StopWatch swapCommitmentTimer = new StopWatch();
     private final StopWatch glideWindowTimer = new StopWatch();
 
-    private SafeSlotbarSwapStage swapStage = SafeSlotbarSwapStage.IDLE;
     private CombatFlightState flightState = CombatFlightState.STATE_1_FLIGHT;
-    private int targetArmorHotbarSlot = -1;
-    private int savedOriginalSlot = -1;
-    private int stageStartTick = -1;
     private int lastElytraEquipCompletedTick = -1;
-    private boolean swappingToElytra = false;
     private boolean jumpPulseToggle = false;
+    private boolean forceCancelFlightInput = false;
 
     private long lastWindChargeOrBlastTimeMs = 0L;
     private boolean wasWindChargeOnCooldown = false;
@@ -112,12 +103,11 @@ public final class ElytraTarget extends Module {
     private boolean equipAfterWindChargeApexPending = false;
     private double prevTickVelY = 0.0D;
     private double airbornePeakY = Double.NaN;
-    private int lastTargetScanTick = -1;
     private int lastProcessedMovementTick = -1;
     private LivingEntity cachedTarget = null;
 
     public ElytraTarget() {
-        super("AutoElytra", "Lightweight anti-cheat safe Elytra swapper.", ModuleCategory.MOVEMENT);
+        super("AutoElytra", "Split-priority ActionManager Elytra controller (Priority 1 Unequip / Priority 3 Equip).", ModuleCategory.MOVEMENT);
         instance = this;
     }
 
@@ -130,7 +120,7 @@ public final class ElytraTarget extends Module {
     }
 
     public boolean isSwapLocked() {
-        return swapStage != SafeSlotbarSwapStage.IDLE || CombatStateManager.isElytraAscentLocked();
+        return ActionManager.getInstance().isSwapInProgress() || CombatStateManager.isElytraAscentLocked();
     }
 
     @Override
@@ -142,10 +132,15 @@ public final class ElytraTarget extends Module {
     @Override
     protected void onDisable() {
         shouldElytraTarget = false;
-        CombatStateManager.releaseElytraLock();
+        ActionManager.getInstance().releaseLock(ActionPriority.AUTO_ELYTRA_UNEQUIP, "AutoElytra_UNEQUIP");
+        ActionManager.getInstance().releaseLock(ActionPriority.AUTO_ELYTRA_EQUIP, "AutoElytra_EQUIP");
         resetInternalState();
     }
 
+    /**
+     * Priority 1 (Highest): AutoElytra_UNEQUIP (Flight Cancel / Chestplate Swap).
+     * Overrides the AutoMace lock to immediately cancel flight state and execute the 2-tick chestplate swap.
+     */
     public boolean ensureUnequippedBeforeMaceAttack(LivingEntity target) {
         if (!isEnabled() || mc.player == null || mc.screen != null) {
             return false;
@@ -154,21 +149,18 @@ public final class ElytraTarget extends Module {
             return false;
         }
         if (!InventoryUtils.isElytraEquipped()) {
-            return swapStage == SafeSlotbarSwapStage.IDLE;
+            forceCancelFlightInput = false;
+            return !ActionManager.getInstance().isSwapInProgress();
         }
-        if (CombatStateManager.isMaceSmashLocked() || isTargetInsideMacePriorityMutex(target)) {
-            return false;
-        }
-        if (swapStage == SafeSlotbarSwapStage.IDLE && canStartNewArmorSwap()) {
-            if (startSafeSlotbarArmorSwap(false)) {
-                flightState = CombatFlightState.STATE_2_SMASH_WINDOW;
-            }
+        if (requestPriority1ChestplateUnequip()) {
+            flightState = CombatFlightState.STATE_2_SMASH_WINDOW;
         }
         return false;
     }
 
     public void enterState3RecoveryLock() {
         flightState = CombatFlightState.STATE_3_RECOVERY;
+        forceCancelFlightInput = false;
         swapCommitmentTimer.reset();
     }
 
@@ -191,7 +183,8 @@ public final class ElytraTarget extends Module {
             return;
         }
         if (mc.player == null || mc.level == null) {
-            CombatStateManager.releaseElytraLock();
+            ActionManager.getInstance().releaseLock(ActionPriority.AUTO_ELYTRA_UNEQUIP, "AutoElytra_UNEQUIP");
+            ActionManager.getInstance().releaseLock(ActionPriority.AUTO_ELYTRA_EQUIP, "AutoElytra_EQUIP");
             resetInternalState();
             return;
         }
@@ -201,9 +194,20 @@ public final class ElytraTarget extends Module {
     }
 
     private void runAutoElytraCycle() {
+        ActionManager actionManager = ActionManager.getInstance();
+        actionManager.ensureTickSynchronized(mc);
         updateWindChargeAndPhysicsTracking();
 
         if (mc.screen != null) {
+            return;
+        }
+
+        if (!InventoryUtils.isElytraEquipped()) {
+            forceCancelFlightInput = false;
+            actionManager.releaseLock(ActionPriority.AUTO_ELYTRA_UNEQUIP, "AutoElytra_UNEQUIP");
+        }
+
+        if (actionManager.isSwapInProgress()) {
             return;
         }
 
@@ -211,73 +215,132 @@ public final class ElytraTarget extends Module {
         boolean maceActive = autoMace != null && autoMace.isEnabled();
         LivingEntity maceTarget = maceActive ? autoMace.getActiveTarget() : null;
 
-        if (CombatStateManager.isMaceSmashLocked()
-                || (maceActive && autoMace.isMidSlamSequence())
-                || isTargetInsideMacePriorityMutex(maceTarget)) {
-            if (swapStage != SafeSlotbarSwapStage.IDLE) {
-                abortSwapForMacePriorityMutex();
-            }
-            return;
-        }
-
-        if (swapStage != SafeSlotbarSwapStage.IDLE) {
-            advanceSafeSlotbarSwapStateMachine();
-            return;
-        }
-
-        if (mc.player.onGround()) {
-            if (disableOnGround.getValue() && InventoryUtils.isElytraEquipped() && canStartNewArmorSwap()) {
-                startSafeSlotbarArmorSwap(false);
-            }
-            flightState = CombatFlightState.STATE_1_FLIGHT;
-            equipAfterWindChargeApexPending = false;
-            return;
-        }
-
-        if (!canStartNewArmorSwap()) {
-            return;
-        }
-
-        if (equipAfterWindChargeApexPending && isLegalVanillaFallFlyingState()) {
-            equipAfterWindChargeApexPending = false;
-            flightState = CombatFlightState.STATE_1_FLIGHT;
-            if (!InventoryUtils.isElytraEquipped()) {
-                if (startSafeSlotbarArmorSwap(true)) {
-                    return;
-                }
-            } else {
-                glideWindowTimer.reset();
-                return;
-            }
-        }
-
-        if (automaceSync.getValue() && !maceActive) {
-            return;
-        }
         if (maceTarget != null && maceTarget.isAlive() && !isWhitelistedFriend(maceTarget)) {
             cachedTarget = maceTarget;
-        } else if (lastTargetScanTick != mc.player.tickCount) {
-            lastTargetScanTick = mc.player.tickCount;
-            cachedTarget = findCombatTargetZeroAlloc();
+        } else {
+            double searchRange = Math.max(heightRange.getValue(), macePreHitRange.getValue()) + 6.0D;
+            cachedTarget = actionManager.getNearestVisibleTarget(mc, searchRange, true);
         }
 
-        if (cachedTarget != null && isWhitelistedFriend(cachedTarget)) {
-            cachedTarget = null;
-        }
+        double velY = mc.player.getDeltaMovement().y;
 
-        if (isTargetInsideMacePriorityMutex(cachedTarget)) {
-            return;
-        }
-
-        if (flightState == CombatFlightState.STATE_1_FLIGHT && InventoryUtils.isElytraEquipped()) {
-            if (mc.player.getDeltaMovement().y < 0.0D
+        // =========================================================================================
+        // PRIORITY 1 (HIGHEST): AutoElytra_UNEQUIP (Flight Cancel / Chestplate Swap)
+        // Trigger: Target distance < 4.5m (or configured pre-hit range) AND v_y < -0.1 while wearing Elytra.
+        // Action: Overrides AutoMace_STRIKE lock, immediately disables flight state, and executes 2-tick chestplate swap.
+        // =========================================================================================
+        if (InventoryUtils.isElytraEquipped() && !mc.player.onGround()) {
+            if (velY < PRIORITY_1_UNEQUIP_MAX_VEL_Y
                     && cachedTarget != null
-                    && shouldDropToChestplateForSmash(cachedTarget)) {
-                if (startSafeSlotbarArmorSwap(false)) {
+                    && shouldTriggerPriority1Unequip(cachedTarget)) {
+                if (requestPriority1ChestplateUnequip()) {
                     flightState = CombatFlightState.STATE_2_SMASH_WINDOW;
+                    return;
                 }
             }
         }
+
+        // Ground Handling: Unequip Elytra into Chestplate when grounded
+        if (mc.player.onGround()) {
+            forceCancelFlightInput = false;
+            if (disableOnGround.getValue() && InventoryUtils.isElytraEquipped() && canStartPriority3Equip()) {
+                requestPriority1ChestplateUnequip();
+            }
+            flightState = CombatFlightState.STATE_1_FLIGHT;
+            equipAfterWindChargeApexPending = false;
+            return;
+        }
+
+        // =========================================================================================
+        // PRIORITY 3 (LOWEST): AutoElytra_EQUIP (Flight Deploy)
+        // Trigger: Wind Charge upward velocity spike (v_y > 0.6) -> post-apex legal glide transition.
+        // Action: ONLY executes if AutoMace is completely idle!
+        // =========================================================================================
+        boolean autoMaceCompletelyIdle = !maceActive || !autoMace.isMidSlamSequence();
+        if (autoMaceCompletelyIdle
+                && !actionManager.isBlockedByHigherPriority(ActionPriority.AUTO_ELYTRA_EQUIP)
+                && canStartPriority3Equip()) {
+            if (equipAfterWindChargeApexPending && isLegalVanillaFallFlyingState()) {
+                equipAfterWindChargeApexPending = false;
+                flightState = CombatFlightState.STATE_1_FLIGHT;
+                if (!InventoryUtils.isElytraEquipped()) {
+                    requestPriority3ElytraEquip();
+                } else {
+                    glideWindowTimer.reset();
+                }
+            }
+        }
+    }
+
+    /**
+     * Priority 1 (Highest): AutoElytra_UNEQUIP.
+     * Preempts Priority 2 (AutoMace_STRIKE), cancels flight input immediately, and executes the 2-tick chestplate swap.
+     */
+    private boolean requestPriority1ChestplateUnequip() {
+        if (mc.player == null || mc.screen != null) {
+            return false;
+        }
+        if (mc.player.swinging || mc.player.attackAnim > 0.0F || isManualItemUseActive()) {
+            return false;
+        }
+        int chestplateSlot = findChestplateInHotbarOnly();
+        if (chestplateSlot == -1) {
+            return false;
+        }
+
+        forceCancelFlightInput = true;
+        int originalSlot = mc.player.getInventory().getSelectedSlot();
+
+        boolean accepted = ActionManager.getInstance().submitConsolidatedSwap(
+                mc,
+                ActionPriority.AUTO_ELYTRA_UNEQUIP,
+                "AutoElytra_UNEQUIP",
+                chestplateSlot,
+                originalSlot,
+                true,
+                clickSim.getValue(),
+                null
+        );
+
+        if (accepted) {
+            swapCommitmentTimer.reset();
+        }
+        return accepted;
+    }
+
+    /**
+     * Priority 3 (Lowest): AutoElytra_EQUIP.
+     * Only executes when AutoMace is completely idle.
+     */
+    private boolean requestPriority3ElytraEquip() {
+        if (mc.player == null || mc.screen != null) {
+            return false;
+        }
+        int elytraSlot = findElytraInHotbarOnly();
+        if (elytraSlot == -1) {
+            return false;
+        }
+        int originalSlot = mc.player.getInventory().getSelectedSlot();
+
+        boolean accepted = ActionManager.getInstance().submitConsolidatedSwap(
+                mc,
+                ActionPriority.AUTO_ELYTRA_EQUIP,
+                "AutoElytra_EQUIP",
+                elytraSlot,
+                originalSlot,
+                true,
+                clickSim.getValue(),
+                null
+        );
+
+        if (accepted) {
+            forceCancelFlightInput = false;
+            swapCommitmentTimer.reset();
+            lastElytraEquipCompletedTick = mc.player.tickCount + 2;
+            glideWindowTimer.reset();
+            jumpPulseToggle = false;
+        }
+        return accepted;
     }
 
     private void updateWindChargeAndPhysicsTracking() {
@@ -289,8 +352,6 @@ public final class ElytraTarget extends Module {
         boolean windCooling = mc.player.getCooldowns().isOnCooldown(Items.WIND_CHARGE.getDefaultInstance());
         if (windCooling && !wasWindChargeOnCooldown) {
             lastWindChargeOrBlastTimeMs = now;
-            windChargeAscentDetected = true;
-            equipAfterWindChargeApexPending = true;
         }
         wasWindChargeOnCooldown = windCooling;
 
@@ -306,8 +367,11 @@ public final class ElytraTarget extends Module {
             if (Double.isNaN(airbornePeakY) || currentY > airbornePeakY) {
                 airbornePeakY = currentY;
             }
-            if (velY > 0.42D && (velY - prevTickVelY) > 0.25D) {
-                lastWindChargeOrBlastTimeMs = now;
+            // Priority 3 Trigger: Wind Charge upward velocity (v_y > 0.6)
+            if (velY > PRIORITY_3_EQUIP_WIND_CHARGE_VEL_Y) {
+                if (!windChargeAscentDetected || (velY - prevTickVelY) > 0.25D) {
+                    lastWindChargeOrBlastTimeMs = now;
+                }
                 windChargeAscentDetected = true;
                 equipAfterWindChargeApexPending = true;
             }
@@ -338,109 +402,6 @@ public final class ElytraTarget extends Module {
         return System.currentTimeMillis() - lastWindChargeOrBlastTimeMs >= WIND_CHARGE_SETTLE_DELAY_MS;
     }
 
-    private boolean startSafeSlotbarArmorSwap(boolean toElytra) {
-        if (mc.player == null || mc.screen != null || CombatStateManager.isMaceSmashLocked()) {
-            return false;
-        }
-
-        int armorSlot = toElytra ? findElytraInHotbarOnly() : findChestplateInHotbarOnly();
-        if (armorSlot == -1 || !CombatStateManager.tryAcquireElytraAscentLock()) {
-            return false;
-        }
-
-        savedOriginalSlot = mc.player.getInventory().getSelectedSlot();
-        targetArmorHotbarSlot = armorSlot;
-        swappingToElytra = toElytra;
-        stageStartTick = mc.player.tickCount;
-
-        mc.player.getInventory().setSelectedSlot(targetArmorHotbarSlot);
-        stepDelayTimer.reset();
-        swapStage = SafeSlotbarSwapStage.STEP_1_WAIT_AFTER_SELECT;
-        return true;
-    }
-
-    private void advanceSafeSlotbarSwapStateMachine() {
-        if (mc.player == null || mc.gameMode == null) {
-            CombatStateManager.releaseElytraLock();
-            swapStage = SafeSlotbarSwapStage.IDLE;
-            return;
-        }
-
-        if (mc.player.swinging || mc.player.attackAnim > 0.0F || mc.player.hurtTime > 0) {
-            return;
-        }
-
-        switch (swapStage) {
-            case STEP_1_WAIT_AFTER_SELECT -> {
-                if (mc.player.tickCount - stageStartTick < MIN_TICKS_BETWEEN_SWAP_STEPS
-                        || !stepDelayTimer.finished(MIN_STEP_DELAY_MS)) {
-                    return;
-                }
-
-                if (targetArmorHotbarSlot >= 0 && targetArmorHotbarSlot <= 8) {
-                    if (mc.player.getInventory().getSelectedSlot() != targetArmorHotbarSlot) {
-                        mc.player.getInventory().setSelectedSlot(targetArmorHotbarSlot);
-                        stageStartTick = mc.player.tickCount;
-                        stepDelayTimer.reset();
-                        return;
-                    }
-
-                    if (clickSim.getValue() && mc.options != null) {
-                        KeyMapping.click(mc.options.keyUse.getDefaultKey());
-                    }
-                    mc.gameMode.useItem(mc.player, InteractionHand.MAIN_HAND);
-                    mc.player.swing(InteractionHand.MAIN_HAND);
-                }
-
-                stageStartTick = mc.player.tickCount;
-                stepDelayTimer.reset();
-                swapStage = SafeSlotbarSwapStage.STEP_2_WAIT_AFTER_USE;
-            }
-
-            case STEP_2_WAIT_AFTER_USE -> {
-                if (mc.player.tickCount - stageStartTick < MIN_TICKS_BETWEEN_SWAP_STEPS
-                        || !stepDelayTimer.finished(MIN_STEP_DELAY_MS)) {
-                    return;
-                }
-
-                if (savedOriginalSlot >= 0 && savedOriginalSlot <= 8
-                        && mc.player.getInventory().getSelectedSlot() != savedOriginalSlot) {
-                    mc.player.getInventory().setSelectedSlot(savedOriginalSlot);
-                }
-
-                if (swappingToElytra) {
-                    lastElytraEquipCompletedTick = mc.player.tickCount;
-                    glideWindowTimer.reset();
-                    jumpPulseToggle = false;
-                }
-
-                savedOriginalSlot = -1;
-                targetArmorHotbarSlot = -1;
-                stageStartTick = -1;
-                swapCommitmentTimer.reset();
-                swapStage = SafeSlotbarSwapStage.IDLE;
-                CombatStateManager.releaseElytraLock();
-            }
-
-            default -> {
-                swapStage = SafeSlotbarSwapStage.IDLE;
-                CombatStateManager.releaseElytraLock();
-            }
-        }
-    }
-
-    private void abortSwapForMacePriorityMutex() {
-        if (mc.player != null && savedOriginalSlot >= 0 && savedOriginalSlot <= 8
-                && mc.player.getInventory().getSelectedSlot() != savedOriginalSlot) {
-            mc.player.getInventory().setSelectedSlot(savedOriginalSlot);
-        }
-        savedOriginalSlot = -1;
-        targetArmorHotbarSlot = -1;
-        stageStartTick = -1;
-        swapStage = SafeSlotbarSwapStage.IDLE;
-        CombatStateManager.releaseElytraLock();
-    }
-
     @SubscribeEvent
     private void onInput(InputEvent event) {
         if (!isEnabled() || mc.player == null || mc.screen != null) {
@@ -448,8 +409,14 @@ public final class ElytraTarget extends Module {
             return;
         }
 
+        if (forceCancelFlightInput) {
+            event.setJumping(false);
+            jumpPulseToggle = false;
+            return;
+        }
+
         if (flightState == CombatFlightState.STATE_1_FLIGHT
-                && swapStage == SafeSlotbarSwapStage.IDLE
+                && !ActionManager.getInstance().isSwapInProgress()
                 && InventoryUtils.isElytraEquipped()
                 && InventoryUtils.isElytraUsable()
                 && mc.player.tickCount > lastElytraEquipCompletedTick
@@ -465,25 +432,12 @@ public final class ElytraTarget extends Module {
         }
     }
 
-    private boolean isTargetInsideMacePriorityMutex(LivingEntity target) {
-        if (mc.player == null || target == null || !target.isAlive()) {
+    private boolean canStartPriority3Equip() {
+        if (mc.player == null || mc.screen != null) {
             return false;
         }
-        if (mc.player.onGround() || mc.player.getDeltaMovement().y >= 0.0D) {
-            return false;
-        }
-        double eyeX = mc.player.getX();
-        double eyeY = mc.player.getEyeY();
-        double eyeZ = mc.player.getZ();
-        AABB box = target.getBoundingBox();
-        double dx = eyeX - Mth.clamp(eyeX, box.minX, box.maxX);
-        double dy = eyeY - Mth.clamp(eyeY, box.minY, box.maxY);
-        double dz = eyeZ - Mth.clamp(eyeZ, box.minZ, box.maxZ);
-        return (dx * dx + dy * dy + dz * dz) < (MACE_PRIORITY_MUTEX_DISTANCE * MACE_PRIORITY_MUTEX_DISTANCE);
-    }
-
-    private boolean canStartNewArmorSwap() {
-        if (mc.player == null || mc.screen != null || CombatStateManager.isMaceSmashLocked()) {
+        if (ActionManager.getInstance().isBlockedByHigherPriority(ActionPriority.AUTO_ELYTRA_EQUIP)
+                || ActionManager.getInstance().isSwapInProgress()) {
             return false;
         }
         if (mc.player.swinging || mc.player.attackAnim > 0.0F || mc.player.hurtTime > 0) {
@@ -517,14 +471,7 @@ public final class ElytraTarget extends Module {
     }
 
     public static boolean isWhitelistedFriend(Entity entity) {
-        if (!(entity instanceof Player player)) {
-            return false;
-        }
-        if (FriendUtils.isFriend(player.getName().getString())) {
-            return true;
-        }
-        Minecraft client = Minecraft.getInstance();
-        return client.player != null && client.player.isAlliedTo(player);
+        return ActionManager.isWhitelistedFriend(Minecraft.getInstance(), entity);
     }
 
     private int findElytraInHotbarOnly() {
@@ -555,16 +502,21 @@ public final class ElytraTarget extends Module {
         return -1;
     }
 
-    private boolean shouldDropToChestplateForSmash(LivingEntity target) {
+    /**
+     * Priority 1 (AutoElytra_UNEQUIP) Trigger Check:
+     * Fires immediately when target distance < 4.5m (or configured pre-hit range) and v_y < -0.1,
+     * overriding AutoMace so the Chestplate is equipped before the smash strike.
+     */
+    private boolean shouldTriggerPriority1Unequip(LivingEntity target) {
         if (mc.player == null || target == null || isWhitelistedFriend(target)) {
             return false;
         }
-        if (findChestplateInHotbarOnly() == -1 || !hasLineOfSight(target)) {
+        if (findChestplateInHotbarOnly() == -1 || !ActionManager.hasLineOfSight(mc, target)) {
             return false;
         }
 
         Vec3 playerVel = mc.player.getDeltaMovement();
-        if (playerVel.y >= -0.05D) {
+        if (playerVel.y >= PRIORITY_1_UNEQUIP_MAX_VEL_Y) {
             return false;
         }
 
@@ -578,23 +530,16 @@ public final class ElytraTarget extends Module {
         double dz = eyeZ - Mth.clamp(eyeZ, box.minZ, box.maxZ);
         double eyeToBoxDist = Math.sqrt(dx * dx + dy * dy + dz * dz);
 
-        if (eyeToBoxDist < MACE_PRIORITY_MUTEX_DISTANCE) {
-            return false;
+        double unequipTriggerRadius = Math.max(PRIORITY_1_UNEQUIP_TARGET_DIST, macePreHitRange.getValue());
+        if (eyeToBoxDist < unequipTriggerRadius) {
+            return true;
         }
 
         double verticalAltitudeOverTarget = mc.player.getY() - target.getY();
-        double descentSpeed = Math.max(0.05D, -playerVel.y);
-        double totalSpeed = Math.sqrt(playerVel.x * playerVel.x + playerVel.z * playerVel.z + descentSpeed * descentSpeed);
-
         boolean hasSmashHeight = getEffectiveFallDistance() >= minDropDist.getValue()
                 || verticalAltitudeOverTarget >= minDropDist.getValue();
         if (!hasSmashHeight || verticalAltitudeOverTarget < 0.35D) {
             return false;
-        }
-
-        double preHitLead = Math.max(MACE_PRIORITY_MUTEX_DISTANCE + 1.0D, macePreHitRange.getValue() + minDropDist.getValue() + totalSpeed * 4.5D);
-        if (eyeToBoxDist <= preHitLead) {
-            return true;
         }
 
         double horizontalDist = Math.hypot(mc.player.getX() - target.getX(), mc.player.getZ() - target.getZ());
@@ -615,75 +560,6 @@ public final class ElytraTarget extends Module {
         return ThreadLocalRandom.current().nextDouble(minRand, maxRand);
     }
 
-    private boolean hasLineOfSight(LivingEntity target) {
-        if (mc.player == null || mc.level == null || target == null) {
-            return false;
-        }
-        if (mc.player.hasLineOfSight(target)) {
-            return true;
-        }
-        Vec3 eyePos = mc.player.getEyePosition(1.0F);
-        Vec3 targetCenter = target.getBoundingBox().getCenter();
-        BlockHitResult hit = mc.level.clip(new ClipContext(
-                eyePos,
-                targetCenter,
-                ClipContext.Block.COLLIDER,
-                ClipContext.Fluid.NONE,
-                mc.player
-        ));
-        return hit.getType() == HitResult.Type.MISS;
-    }
-
-    private LivingEntity findCombatTargetZeroAlloc() {
-        if (mc.player == null || mc.level == null) {
-            return null;
-        }
-        double maxSearchRange = Math.max(heightRange.getValue(), macePreHitRange.getValue()) + 6.0D;
-        double maxRangeSqr = maxSearchRange * maxSearchRange;
-        double eyeX = mc.player.getX();
-        double eyeY = mc.player.getEyeY();
-        double eyeZ = mc.player.getZ();
-
-        LivingEntity best = null;
-        double bestDistSqr = Double.MAX_VALUE;
-
-        for (Entity entity : mc.level.entitiesForRendering()) {
-            if (!(entity instanceof LivingEntity living)) {
-                continue;
-            }
-            if (living == mc.player || !living.isAlive() || living.getHealth() <= 0.0F) {
-                continue;
-            }
-            if (living instanceof ArmorStand) {
-                continue;
-            }
-            if (living instanceof Player player) {
-                if (AntiBot.shouldIgnore(player) || isWhitelistedFriend(player)) {
-                    continue;
-                }
-            } else if (!(living instanceof Mob) && !(living instanceof Animal)) {
-                continue;
-            }
-
-            AABB box = living.getBoundingBox();
-            double dx = eyeX - Mth.clamp(eyeX, box.minX, box.maxX);
-            double dy = eyeY - Mth.clamp(eyeY, box.minY, box.maxY);
-            double dz = eyeZ - Mth.clamp(eyeZ, box.minZ, box.maxZ);
-            double distSqr = dx * dx + dy * dy + dz * dz;
-
-            if (distSqr > maxRangeSqr || distSqr >= bestDistSqr) {
-                continue;
-            }
-            if (!hasLineOfSight(living)) {
-                continue;
-            }
-
-            bestDistSqr = distSqr;
-            best = living;
-        }
-        return best;
-    }
-
     private double getEffectiveFallDistance() {
         if (mc.player == null) {
             return 0.0D;
@@ -694,21 +570,16 @@ public final class ElytraTarget extends Module {
     }
 
     private void resetInternalState() {
-        swapStage = SafeSlotbarSwapStage.IDLE;
         flightState = CombatFlightState.STATE_1_FLIGHT;
-        targetArmorHotbarSlot = -1;
-        savedOriginalSlot = -1;
-        stageStartTick = -1;
         lastElytraEquipCompletedTick = -1;
-        swappingToElytra = false;
         jumpPulseToggle = false;
+        forceCancelFlightInput = false;
         lastWindChargeOrBlastTimeMs = 0L;
         wasWindChargeOnCooldown = false;
         windChargeAscentDetected = false;
         equipAfterWindChargeApexPending = false;
         prevTickVelY = 0.0D;
         airbornePeakY = Double.NaN;
-        lastTargetScanTick = -1;
         lastProcessedMovementTick = -1;
         cachedTarget = null;
     }

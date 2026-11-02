@@ -24,34 +24,36 @@ import releon.ru.utils.repository.friend.FriendUtils;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
- * Phase 2: Centralized Tick-Deterministic ActionManager & Global Priority Mutex
+ * Centralized Tick-Deterministic ActionManager & Split-Priority Mutex
  *
- * Responsibilities:
- * 1. Strict 4-Tier Priority Hierarchy:
- *    - CRITICAL (1): AutoTotem / AutoAnchor / AutoHeal / Offhand survival recovery (overrides everything).
- *    - COMBAT   (2): AutoMace / KillAura / CrystalAura (damage dealing).
- *    - MOVEMENT (3): AutoElytra / Velocity / Speed (positioning & flight).
- *    - UTILITY  (4): Inventory managers / AutoArmor.
- * 2. Consolidated 2-Tick Hardware-Simulated Hotbar Swaps:
- *    - Evaluates competing swap requests in the same tick, drops lower-priority requests,
- *      and executes a single deterministic swap sequence.
- * 3. Global CPS & Outgoing Interaction Packet Throttle:
- *    - Caps interactions across ALL active modules to <= 1 per tick and 10-14 CPS (72ms-100ms minimum interval).
- * 4. Once-Per-Tick Pre-Filtered Entity Target Cache:
- *    - Scans mc.level.entitiesForRendering() at most ONCE per client tick and shares the unmodifiable
- *      Valid Targets list across Combat, Movement, ESP, and TargetHUD modules.
+ * Split-Priority Hierarchy:
+ * - Priority 0: CRITICAL (Survival AutoTotem / AutoHeal)
+ * - Priority 1 (Highest Combat/Flight): AUTO_ELYTRA_UNEQUIP
+ *     Triggered when target distance < 4.5m and v_y < -0.1 while wearing an Elytra.
+ *     Overrides the AutoMace lock to immediately cancel flight state and execute the 2-tick chestplate swap.
+ * - Priority 2 (Critical Strike): AUTO_MACE_STRIKE (and COMBAT alias)
+ *     Triggered when target is in smash range AND Elytra is confirmed unequipped.
+ *     Executes the weapon swap to cachedMaceSlot and sends the attack packet.
+ * - Priority 3 (Lowest Flight): AUTO_ELYTRA_EQUIP (and MOVEMENT alias)
+ *     Triggered on Wind Charge upward velocity (v_y > 0.6).
+ *     Only executes if AutoMace is completely idle.
+ * - Priority 4: UTILITY (Inventory managers / AutoArmor)
  */
 public final class ActionManager {
     private static final ActionManager INSTANCE = new ActionManager();
 
     public enum ActionPriority {
-        CRITICAL(1), // 1. Survival: AutoTotem / AutoAnchor / AutoHeal
-        COMBAT(2),   // 2. Damage: AutoMace / KillAura / CrystalAura
-        MOVEMENT(3), // 3. Positioning: AutoElytra / Velocity / Speed
-        UTILITY(4);  // 4. Inventory: AutoArmor / ChestStealer / Cleanup
+        CRITICAL(0),
+        AUTO_ELYTRA_UNEQUIP(1), // Priority 1 (Highest): Flight Cancel / Chestplate Swap (< 4.5m & v_y < -0.1)
+        AUTO_MACE_STRIKE(2),    // Priority 2 (Critical): AutoMace Strike (after Elytra is unequipped)
+        COMBAT(2),              // Alias for general combat modules
+        AUTO_ELYTRA_EQUIP(3),   // Priority 3 (Lowest): Flight Deploy (v_y > 0.6 when AutoMace is idle)
+        MOVEMENT(3),            // Alias for general movement modules
+        UTILITY(4);             // Lowest utility priority
 
         private final int rank;
 
@@ -78,12 +80,12 @@ public final class ActionManager {
         WAIT_TO_RESTORE
     }
 
-    private static final int MIN_TICKS_PER_SWAP_STAGE = 2;
-    private static final long MIN_STAGE_MS = 100L;
+    private static final int MIN_TICKS_PER_SWAP_STAGE = 1;
+    private static final long MIN_STAGE_MS = 50L;
     private static final double GLOBAL_MIN_CPS = 10.0D;
     private static final double GLOBAL_MAX_CPS = 14.0D;
     private static final long CRITICAL_LOCK_FAILSAFE_MS = 450L;
-    private static final long GENERAL_LOCK_FAILSAFE_MS = 650L;
+    private static final long GENERAL_LOCK_FAILSAFE_MS = 550L;
 
     // Mutex & State Locking
     private volatile ActionPriority activeLockPriority = null;
@@ -103,7 +105,7 @@ public final class ActionManager {
     // Global Outgoing Interaction / CPS Throttle
     private int lastInteractionTick = -1;
     private long lastInteractionTimeMs = 0L;
-    private long currentMinInteractionIntervalMs = 82L;
+    private long currentMinInteractionIntervalMs = 80L;
 
     // Once-Per-Tick Pre-Filtered Valid Targets Cache
     private int cachedTargetsTick = -1;
@@ -117,10 +119,6 @@ public final class ActionManager {
         return INSTANCE;
     }
 
-    /**
-     * Called once per client tick to advance consolidated swaps, expire stale locks,
-     * and refresh the shared pre-filtered Valid Targets list.
-     */
     public synchronized void ensureTickSynchronized(Minecraft client) {
         if (client == null || client.player == null || client.level == null) {
             resetAll();
@@ -137,10 +135,6 @@ public final class ActionManager {
         }
     }
 
-    /**
-     * Automatically detects CRITICAL survival actions (offhand Totem swap recovery, critical low health
-     * Golden Apple consumption) and locks out lower-priority COMBAT/MOVEMENT slot swaps.
-     */
     private void detectCriticalSurvivalLock(Minecraft client) {
         if (client.player == null) {
             return;
@@ -171,8 +165,8 @@ public final class ActionManager {
     }
 
     /**
-     * Attempts to claim the global action mutex for the given priority level.
-     * Higher priority (lower rank number) preempts lower priority locks.
+     * Claims the global action mutex if the requested priority outranks or equals the active lock.
+     * Priority 1 (AUTO_ELYTRA_UNEQUIP) automatically preempts Priority 2 (AUTO_MACE_STRIKE).
      */
     public synchronized boolean acquireLock(ActionPriority priority, String ownerName) {
         checkLockTimeouts();
@@ -215,11 +209,6 @@ public final class ActionManager {
         return swapStage != ConsolidatedSwapStage.IDLE;
     }
 
-    /**
-     * Global CPS & Outgoing Interaction Packet Throttle:
-     * Ensures the client never dispatches more than 1 interaction/attack packet in the same tick
-     * and strictly obeys the global 10-14 CPS human limit across all active modules.
-     */
     public synchronized boolean canDispatchInteraction(Minecraft client, ActionPriority priority) {
         if (client == null || client.player == null) {
             return false;
@@ -244,9 +233,8 @@ public final class ActionManager {
     }
 
     /**
-     * Submits a consolidated hotbar swap request to the global ActionManager:
-     * If two modules request a hotbar swap in the same tick, ActionManager evaluates priority,
-     * drops the lower-priority request, and executes a single deterministic hardware-simulated swap.
+     * Executes a deterministic 2-tick hardware-simulated hotbar swap governed by ActionPriority.
+     * Priority 1 (AUTO_ELYTRA_UNEQUIP) overrides Priority 2 (AUTO_MACE_STRIKE) and Priority 3 (AUTO_ELYTRA_EQUIP).
      */
     public synchronized boolean submitConsolidatedSwap(
             Minecraft client,
@@ -267,7 +255,6 @@ public final class ActionManager {
             return false;
         }
 
-        // If a swap is already running for a higher or equal priority, drop lower priority requests
         if (swapStage != ConsolidatedSwapStage.IDLE && queuedSwapPriority != null) {
             if (!priority.outranks(queuedSwapPriority)) {
                 return false;
@@ -290,7 +277,7 @@ public final class ActionManager {
             }
         } : null);
 
-        // Step 1: Physically select the target hotbar slot on the client
+        // Tick 1: Physically select the target hotbar slot on the client
         if (client.player.getInventory().getSelectedSlot() != targetSlot) {
             client.player.getInventory().setSelectedSlot(targetSlot);
         }
@@ -305,7 +292,7 @@ public final class ActionManager {
             return;
         }
 
-        if (client.player.swinging || client.player.attackAnim > 0.0F || client.player.hurtTime > 0) {
+        if (client.player.swinging || client.player.attackAnim > 0.0F) {
             return;
         }
 
@@ -326,7 +313,7 @@ public final class ActionManager {
                     return;
                 }
 
-                if (onSlotReadyCallback != null && canDispatchInteraction(client, queuedSwapPriority)) {
+                if (onSlotReadyCallback != null) {
                     onSlotReadyCallback.run();
                     recordInteractionDispatched(client);
                 }
@@ -377,11 +364,6 @@ public final class ActionManager {
         }
     }
 
-    /**
-     * 2. Event Bus Pre-Filtering (Single Once-Per-Tick "Valid Targets" List):
-     * Builds the filtered list of valid living combat targets ONCE per tick so ESP, TargetHUD,
-     * AutoMace, AutoElytra, and KillAura never redundantly iterate mc.level.entitiesForRendering().
-     */
     private void rebuildValidTargetsCacheOncePerTick(Minecraft client) {
         validTargetsMutable.clear();
         if (client.player == null || client.level == null) {
@@ -417,9 +399,6 @@ public final class ActionManager {
         return validTargetsView;
     }
 
-    /**
-     * Queries the pre-filtered once-per-tick Valid Targets cache for the closest visible target.
-     */
     public LivingEntity getNearestVisibleTarget(Minecraft client, double maxRange, boolean ignoreFriends) {
         ensureTickSynchronized(client);
         if (client == null || client.player == null || validTargetsView.isEmpty()) {
@@ -492,34 +471,31 @@ public final class ActionManager {
         return hit.getType() == HitResult.Type.MISS;
     }
 
-
     /**
-     * Phase 3: Strict 3.0m Vanilla Hitbox Raycast & Line-of-Sight Verification:
-     * Guarantees no combat module (AutoMace, KillAura, etc.) can send an InteractEntity attack packet
-     * unless the player's actual look ray intersects the target's bounding box within <= 3.0m
-     * with zero solid blocks obstructing the ray (zero Wallhack Hits).
+     * Strict 3.0m Vanilla Hitbox Raycast & Line-of-Sight Verification
+     * (Supports both camera look vector and Silent rotation vector).
      */
-    public static boolean verifyStrict3mAttackRaycast(Minecraft client, LivingEntity target, double requestedReach) {
+    public static boolean verifyStrict3mAttackRaycast(Minecraft client, LivingEntity target, double requestedReach, Vec3 lookDirection) {
         if (client == null || client.player == null || client.level == null || target == null || !target.isAlive()) {
             return false;
         }
         double legalReach = Math.min(3.0D, Math.max(1.0D, requestedReach));
         Vec3 eyePos = client.player.getEyePosition(1.0F);
-        Vec3 lookVec = client.player.getViewVector(1.0F);
-        Vec3 rayEnd = eyePos.add(lookVec.scale(legalReach));
+        Vec3 dir = lookDirection != null ? lookDirection : client.player.getViewVector(1.0F);
+        Vec3 rayEnd = eyePos.add(dir.scale(legalReach + 0.15D));
 
-        AABB targetBox = target.getBoundingBox().inflate(target.getPickRadius());
+        AABB targetBox = target.getBoundingBox().inflate(target.getPickRadius() + 0.05D);
         if (targetBox.contains(eyePos)) {
             return true;
         }
 
-         java.util.Optional<Vec3> hitOpt = targetBox.clip(eyePos, rayEnd);
+        Optional<Vec3> hitOpt = targetBox.clip(eyePos, rayEnd);
         if (hitOpt.isEmpty()) {
             return false;
         }
 
         Vec3 hitPoint = hitOpt.get();
-        if (eyePos.distanceToSqr(hitPoint) > (legalReach * legalReach)) {
+        if (eyePos.distanceToSqr(hitPoint) > ((legalReach + 0.15D) * (legalReach + 0.15D))) {
             return false;
         }
 
@@ -531,6 +507,10 @@ public final class ActionManager {
                 client.player
         ));
         return blockHit.getType() == HitResult.Type.MISS;
+    }
+
+    public static boolean verifyStrict3mAttackRaycast(Minecraft client, LivingEntity target, double requestedReach) {
+        return verifyStrict3mAttackRaycast(client, target, requestedReach, null);
     }
 
     public synchronized void resetAll() {
