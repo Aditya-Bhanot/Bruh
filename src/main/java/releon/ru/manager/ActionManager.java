@@ -492,6 +492,47 @@ public final class ActionManager {
         return hit.getType() == HitResult.Type.MISS;
     }
 
+
+    /**
+     * Phase 3: Strict 3.0m Vanilla Hitbox Raycast & Line-of-Sight Verification:
+     * Guarantees no combat module (AutoMace, KillAura, etc.) can send an InteractEntity attack packet
+     * unless the player's actual look ray intersects the target's bounding box within <= 3.0m
+     * with zero solid blocks obstructing the ray (zero Wallhack Hits).
+     */
+    public static boolean verifyStrict3mAttackRaycast(Minecraft client, LivingEntity target, double requestedReach) {
+        if (client == null || client.player == null || client.level == null || target == null || !target.isAlive()) {
+            return false;
+        }
+        double legalReach = Math.min(3.0D, Math.max(1.0D, requestedReach));
+        Vec3 eyePos = client.player.getEyePosition(1.0F);
+        Vec3 lookVec = client.player.getViewVector(1.0F);
+        Vec3 rayEnd = eyePos.add(lookVec.scale(legalReach));
+
+        AABB targetBox = target.getBoundingBox().inflate(target.getPickRadius());
+        if (targetBox.contains(eyePos)) {
+            return true;
+        }
+
+         java.util.Optional<Vec3> hitOpt = targetBox.clip(eyePos, rayEnd);
+        if (hitOpt.isEmpty()) {
+            return false;
+        }
+
+        Vec3 hitPoint = hitOpt.get();
+        if (eyePos.distanceToSqr(hitPoint) > (legalReach * legalReach)) {
+            return false;
+        }
+
+        BlockHitResult blockHit = client.level.clip(new ClipContext(
+                eyePos,
+                hitPoint,
+                ClipContext.Block.COLLIDER,
+                ClipContext.Fluid.NONE,
+                client.player
+        ));
+        return blockHit.getType() == HitResult.Type.MISS;
+    }
+
     public synchronized void resetAll() {
         activeLockPriority = null;
         activeLockOwnerName = "";

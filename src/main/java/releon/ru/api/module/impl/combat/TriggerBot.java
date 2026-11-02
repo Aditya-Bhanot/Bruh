@@ -37,7 +37,7 @@ public class TriggerBot extends Module {
     public LivingEntity target;
     private int sprintSuppressUntilTick = -1;
 
-    private final NumberSetting attackRange = register(new NumberSetting("Attack Range", "Attack distance to the target.", 3.0D, 1.0D, 6.0D, 0.1D));
+    private final NumberSetting attackRange = register(new NumberSetting("Attack Range", "Attack distance to the target.", 3.0D, 1.0D, 3.0D, 0.1D));
     private final NumberSetting attackDelay = register(new NumberSetting("Attack Delay", "Minimum delay between attacks.", 0.0D, 0.0D, 1000.0D, 10.0D));
     private final MultiModeSetting targetType = register(new MultiModeSetting("Targets", "Target type filter.", new String[]{"Players", "Friends", "Mobs", "Animals", "Invisible", "Armor Stands"}, "Players", "Mobs", "Animals"));
     private final MultiModeSetting attackSetting = register(new MultiModeSetting("Options", "Attack options.", new String[]{"Only Critical", "Break Shield", "Release Shield", "Pause While Using", "Ignore Walls", "Hit Chance"}, "Only Critical", "Break Shield"));

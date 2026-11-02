@@ -215,12 +215,10 @@ public final class ModuleManager {
         register(new Velocity());
 
         register(new AutoSprint());
-        register(new Fly());
         register(new ElytraTarget());
         register(new NoWeb());
         register(new NoSlow());
         register(new InventoryMove());
-        register(new Spider());
         register(new Speed());
         register(new Strafe());
         register(new SuperFireWork());

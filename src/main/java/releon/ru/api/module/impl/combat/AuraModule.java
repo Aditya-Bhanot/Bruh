@@ -56,7 +56,7 @@ public class AuraModule extends Module {
             "Mode",
             "Aura rotation mode.",
             "Matrix",
-            "Matrix", "Snap", "FunTime", "SpookyTime", "SPAngle", "Legit", "AimAssist"
+            "Matrix", "FunTime", "SpookyTime", "SPAngle", "Legit", "AimAssist"
     ));
 
     public final NumberSetting timeOnTick = register(new NumberSetting("Snap Hold", "How long Snap keeps target after hit.", 50.0, 1.0, 300.0, 1.0));
