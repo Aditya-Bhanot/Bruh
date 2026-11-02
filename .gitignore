@@ -1,0 +1,23 @@
+# Build artifacts & binaries
+build/
+bin/
+out/
+target/
+*.class
+*.jar
+*.war
+*.ear
+*.apk
+*.aar
+
+# Gradle caches
+.gradle/
+gradle-app.setting
+
+# IDE & OS cache files
+.idea/
+*.iml
+.vscode/
+.DS_Store
+*.log
+*.tmp
