@@ -1,9 +1,9 @@
 {
 	"schemaVersion": 1,
-	"id": "releon-tech",
+	"id": "attrium",
 	"version": "${version}",
-	"name": "Releon-Tech",
-	"description": "This is an example description! Tell everyone what your mod is about!",
+	"name": "Attrium client",
+	"description": "In alpha version rightnow dont try on good anticheat server",
 	"authors": [
 		"Me!"
 	],
