@@ -10,20 +10,25 @@ import net.minecraft.util.Mth;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.Mob;
+import net.minecraft.world.entity.animal.Animal;
+import net.minecraft.world.entity.decoration.ArmorStand;
+import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.AxeItem;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
-import net.minecraft.world.item.TridentItem;
 import net.minecraft.world.item.enchantment.Enchantment;
 import net.minecraft.world.item.enchantment.ItemEnchantments;
+import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import releon.ru.api.events.annotation.SubscribeEvent;
 import releon.ru.api.events.impl.DrawEvent;
 import releon.ru.api.events.impl.PlayerTravelEvent;
 import releon.ru.api.events.impl.RotationUpdateEvent;
-import releon.ru.api.events.impl.WorldRenderEvent;
 import releon.ru.api.events.types.EventPhase;
 import releon.ru.api.module.Module;
 import releon.ru.api.module.ModuleCategory;
@@ -39,39 +44,582 @@ import releon.ru.api.module.impl.movement.ElytraTarget;
 import releon.ru.api.settings.impl.BooleanSetting;
 import releon.ru.api.settings.impl.ModeSetting;
 import releon.ru.api.settings.impl.NumberSetting;
-import releon.ru.manager.ActionManager;
-import releon.ru.manager.ActionManager.ActionPriority;
 import releon.ru.utils.inventory.lookup.InventoryUtils;
-import releon.ru.utils.render.Render3D;
+import releon.ru.utils.repository.friend.FriendUtils;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.ThreadLocalRandom;
 
 /**
- * Updated AutoMace Controller:
- * 1. Split-Priority Mutex Integration:
- *    - Yields to Priority 1 (AUTO_ELYTRA_UNEQUIP) whenever the player is wearing an Elytra (< 4.5m & v_y < -0.1)
- *      so AutoElytra can cancel flight and swap to a Chestplate first without combat deadlocks.
- *    - Claims Priority 2 (AUTO_MACE_STRIKE) once the Elytra is confirmed unequipped and target is in smash range.
- * 2. Dynamic 4Hz Mace Auto-Caching (No Manual Slot Configuration):
- *    - Scans hotbar slots 0-8 at 4Hz (every 5 ticks), parses DataComponents.ENCHANTMENTS for Density and Breach,
- *      and caches cachedMaceSlot automatically. Remains dormant if no Mace is present.
- * 3. Restored Aim Mode Selector ("Legit", "Strict", "Silent"):
- *    - "Legit": Distance-scaled PD deceleration + 20% inner hitbox deadzone + GCD quantization.
- *    - "Strict": Instant mathematical center-locking onto (X, Y + Height/2, Z).
- *    - "Silent": Server-side rotation synchronization via AngleConnection.INSTANCE.rotateTo(...).
+ * Hotbar-Safe & High-Speed Handoff AutoMace Controller:
+ * 1. Hotbar Item-Holding Fix (Event-Driven / Change-Driven Slot Caching):
+ *    - Removed the continuous 4Hz background hotbar scanning loop completely.
+ *    - Updates cachedMaceSlot, cachedAxeSlot, and cachedSwordSlot ONLY when hotbar contents change
+ *      and strictly skips indexing if (player.isUsingItem() || actionManager.isLocked()).
+ *    - Only restores savedHotbarSlot if AutoMace actually switched the player's slot during a strike,
+ *      eliminating held-item flickering and weapon-holding desync.
+ * 2. High-Speed Elytra Unequip & Zero-Delay Handoff:
+ *    - Pre-emptively triggers Tick 0 Chestplate selection the instant target distance < 4.5m and v_y < -0.1,
+ *      completes the Chestplate swap + weapon handoff on Tick 1, and immediately transitions to AutoMace strike.
+ * 3. Preserved Aim Assist & Rotation Math:
+ *    - Keeps "Legit" (PD + 20% inner deadzone + GCD), "Strict", and "Silent" rotation math 100% untouched.
  */
 public class MaceTarget extends Module {
     private static MaceTarget instance;
 
-    private static final int TARGET_WIREFRAME_COLOR = 0xAA5EF2D6;
     private static final double INNER_20_PERCENT_HALF_RATIO = 0.10D;
     private static final double MIN_FAR_ROTATION_DEG_PER_TICK = 40.0D;
     private static final double MAX_FAR_ROTATION_DEG_PER_TICK = 60.0D;
     private static final double PD_DECELERATION_CONE_DEGREES = 32.0D;
     private static final double PRIORITY_1_ELYTRA_UNEQUIP_DIST = 4.5D;
-    private static final int HOTBAR_SCAN_INTERVAL_TICKS = 5; // 4Hz (every 5 ticks at 20 TPS)
     private static final int MIN_TICKS_BETWEEN_MACE_STEPS = 1;
+
+    /**
+     * Embedded Split-Priority ActionManager with Fast 2-Tick Unequip & Active Hand Protection.
+     */
+    public static final class ActionManager {
+        private static final ActionManager INSTANCE = new ActionManager();
+
+        public enum ActionPriority {
+            CRITICAL(0),
+            AUTO_ELYTRA_UNEQUIP(1), // Priority 1 (Highest): High-speed 2-tick Chestplate unequip (< 4.5m & v_y < -0.1)
+            AUTO_MACE_STRIKE(2),    // Priority 2 (Critical): AutoMace Strike (zero-delay handoff after unequip)
+            COMBAT(2),
+            AUTO_ELYTRA_EQUIP(3),   // Priority 3 (Lowest): Flight Deploy (v_y > 0.6 when AutoMace is idle)
+            MOVEMENT(3),
+            UTILITY(4);
+
+            private final int rank;
+
+            ActionPriority(int rank) {
+                this.rank = rank;
+            }
+
+            public boolean outranks(ActionPriority other) {
+                return other == null || this.rank < other.rank;
+            }
+
+            public boolean outranksOrEquals(ActionPriority other) {
+                return other == null || this.rank <= other.rank;
+            }
+        }
+
+        private enum ConsolidatedSwapStage {
+            IDLE,
+            FAST_TICK_1_EQUIP_AND_HANDOFF, // Optimized 2-tick unequip: right-click + restore + unlock on Tick 1
+            WAIT_TO_INTERACT,
+            WAIT_TO_RESTORE
+        }
+
+        private static final int MIN_TICKS_PER_SWAP_STAGE = 1;
+        private static final long MIN_STAGE_MS = 45L;
+        private static final double GLOBAL_MIN_CPS = 10.0D;
+        private static final double GLOBAL_MAX_CPS = 14.0D;
+        private static final long CRITICAL_LOCK_FAILSAFE_MS = 450L;
+        private static final long GENERAL_LOCK_FAILSAFE_MS = 500L;
+
+        private volatile ActionPriority activeLockPriority = null;
+        private volatile String activeLockOwnerName = "";
+        private volatile long lockAcquiredAtMs = 0L;
+
+        private ConsolidatedSwapStage swapStage = ConsolidatedSwapStage.IDLE;
+        private ActionPriority queuedSwapPriority = null;
+        private int targetHotbarSlot = -1;
+        private int restoreHotbarSlot = -1;
+        private int stageStartTick = -1;
+        private long stageStartTimeMs = 0L;
+        private boolean simulateUseClick = false;
+        private Runnable onSlotReadyCallback = null;
+
+        private int lastInteractionTick = -1;
+        private long lastInteractionTimeMs = 0L;
+        private long currentMinInteractionIntervalMs = 78L;
+
+        private int cachedTargetsTick = -1;
+        private final List<LivingEntity> validTargetsMutable = new ArrayList<>(32);
+        private List<LivingEntity> validTargetsView = Collections.emptyList();
+
+        private ActionManager() {
+        }
+
+        public static ActionManager getInstance() {
+            return INSTANCE;
+        }
+
+        public boolean isLocked() {
+            checkLockTimeouts();
+            return activeLockPriority != null || swapStage != ConsolidatedSwapStage.IDLE;
+        }
+
+        public synchronized void ensureTickSynchronized(Minecraft client) {
+            if (client == null || client.player == null || client.level == null) {
+                resetAll();
+                return;
+            }
+
+            checkLockTimeouts();
+            detectCriticalSurvivalLock(client);
+
+            if (cachedTargetsTick != client.player.tickCount) {
+                cachedTargetsTick = client.player.tickCount;
+                rebuildValidTargetsCacheOncePerTick(client);
+                advanceConsolidatedSwapMachine(client);
+            }
+        }
+
+        private void detectCriticalSurvivalLock(Minecraft client) {
+            if (client.player == null) {
+                return;
+            }
+            boolean criticalHealthEating = (client.player.getHealth() + client.player.getAbsorptionAmount() <= 8.0F)
+                    && client.player.isUsingItem()
+                    && (client.player.getUseItem().has(DataComponents.FOOD)
+                    || client.player.getUseItem().getItem() == Items.GOLDEN_APPLE
+                    || client.player.getUseItem().getItem() == Items.ENCHANTED_GOLDEN_APPLE);
+
+            if (criticalHealthEating) {
+                acquireLock(ActionPriority.CRITICAL, "SurvivalAutoHeal");
+            } else if (activeLockPriority == ActionPriority.CRITICAL && "SurvivalAutoHeal".equals(activeLockOwnerName)) {
+                releaseLock(ActionPriority.CRITICAL, "SurvivalAutoHeal");
+            }
+        }
+
+        private void checkLockTimeouts() {
+            if (activeLockPriority == null) {
+                return;
+            }
+            long elapsed = System.currentTimeMillis() - lockAcquiredAtMs;
+            long limit = activeLockPriority == ActionPriority.CRITICAL ? CRITICAL_LOCK_FAILSAFE_MS : GENERAL_LOCK_FAILSAFE_MS;
+            if (elapsed > limit && swapStage == ConsolidatedSwapStage.IDLE) {
+                activeLockPriority = null;
+                activeLockOwnerName = "";
+            }
+        }
+
+        public synchronized boolean acquireLock(ActionPriority priority, String ownerName) {
+            checkLockTimeouts();
+            if (activeLockPriority != null && !priority.outranksOrEquals(activeLockPriority)) {
+                return false;
+            }
+            if (activeLockPriority != null && priority.outranks(activeLockPriority) && swapStage != ConsolidatedSwapStage.IDLE) {
+                abortActiveConsolidatedSwap(Minecraft.getInstance());
+            }
+            activeLockPriority = priority;
+            activeLockOwnerName = ownerName != null ? ownerName : priority.name();
+            lockAcquiredAtMs = System.currentTimeMillis();
+            return true;
+        }
+
+        public synchronized void releaseLock(ActionPriority priority, String ownerName) {
+            if (activeLockPriority == priority
+                    && (ownerName == null || ownerName.isEmpty() || ownerName.equals(activeLockOwnerName))) {
+                if (swapStage == ConsolidatedSwapStage.IDLE) {
+                    activeLockPriority = null;
+                    activeLockOwnerName = "";
+                }
+            }
+        }
+
+        public boolean isBlockedByHigherPriority(ActionPriority requesterPriority) {
+            checkLockTimeouts();
+            if (activeLockPriority == null) {
+                return false;
+            }
+            return activeLockPriority.outranks(requesterPriority);
+        }
+
+        public ActionPriority getActiveLockPriority() {
+            checkLockTimeouts();
+            return activeLockPriority;
+        }
+
+        public boolean isSwapInProgress() {
+            return swapStage != ConsolidatedSwapStage.IDLE;
+        }
+
+        public synchronized boolean canDispatchInteraction(Minecraft client, ActionPriority priority) {
+            if (client == null || client.player == null) {
+                return false;
+            }
+            if (isBlockedByHigherPriority(priority)) {
+                return false;
+            }
+            if (client.player.tickCount == lastInteractionTick) {
+                return false;
+            }
+            long now = System.currentTimeMillis();
+            return (now - lastInteractionTimeMs) >= currentMinInteractionIntervalMs;
+        }
+
+        public synchronized void recordInteractionDispatched(Minecraft client) {
+            if (client != null && client.player != null) {
+                lastInteractionTick = client.player.tickCount;
+            }
+            lastInteractionTimeMs = System.currentTimeMillis();
+            double cps = ThreadLocalRandom.current().nextDouble(GLOBAL_MIN_CPS, GLOBAL_MAX_CPS);
+            currentMinInteractionIntervalMs = Math.round(1000.0D / cps);
+        }
+
+        /**
+         * Section 2: Optimized 2-Tick High-Speed Elytra Unequip Pipeline & Zero-Delay Handoff:
+         * - Tick 0 (Immediate): Physical hotbar selector changes to the Chestplate slot.
+         * - Tick 1 (Next Tick): Right-clicks to swap the Chestplate onto the body, restores/hands off
+         *   the hotbar slot, and immediately releases the lock so AutoMace strikes with zero dead frames.
+         */
+        public synchronized boolean submitFastTwoTickUnequip(
+                Minecraft client,
+                int chestplateSlot,
+                int handoffSlot,
+                Runnable onUnequipComplete
+        ) {
+            if (client == null || client.player == null || chestplateSlot < 0 || chestplateSlot > 8) {
+                return false;
+            }
+            ensureTickSynchronized(client);
+
+            if (isBlockedByHigherPriority(ActionPriority.AUTO_ELYTRA_UNEQUIP)) {
+                return false;
+            }
+            if (swapStage == ConsolidatedSwapStage.FAST_TICK_1_EQUIP_AND_HANDOFF) {
+                return false;
+            }
+
+            acquireLock(ActionPriority.AUTO_ELYTRA_UNEQUIP, "AutoElytra_UNEQUIP");
+            this.queuedSwapPriority = ActionPriority.AUTO_ELYTRA_UNEQUIP;
+            this.targetHotbarSlot = chestplateSlot;
+            this.restoreHotbarSlot = (handoffSlot >= 0 && handoffSlot <= 8 && handoffSlot != chestplateSlot)
+                    ? handoffSlot
+                    : client.player.getInventory().getSelectedSlot();
+            this.simulateUseClick = true;
+            this.onSlotReadyCallback = onUnequipComplete;
+
+            // Tick 0: Immediately select the Chestplate slot on the physical hotbar
+            if (client.player.getInventory().getSelectedSlot() != chestplateSlot) {
+                client.player.getInventory().setSelectedSlot(chestplateSlot);
+            }
+            this.stageStartTick = client.player.tickCount;
+            this.stageStartTimeMs = System.currentTimeMillis();
+            this.swapStage = ConsolidatedSwapStage.FAST_TICK_1_EQUIP_AND_HANDOFF;
+            return true;
+        }
+
+        public synchronized boolean submitConsolidatedSwap(
+                Minecraft client,
+                ActionPriority priority,
+                String ownerName,
+                int targetSlot,
+                int restoreSlot,
+                boolean rightClickUseOnEquip,
+                boolean clickSim,
+                Runnable onSlotReady
+        ) {
+            if (client == null || client.player == null || targetSlot < 0 || targetSlot > 8) {
+                return false;
+            }
+            ensureTickSynchronized(client);
+
+            if (isBlockedByHigherPriority(priority)) {
+                return false;
+            }
+
+            if (swapStage != ConsolidatedSwapStage.IDLE && queuedSwapPriority != null) {
+                if (!priority.outranks(queuedSwapPriority)) {
+                    return false;
+                }
+                abortActiveConsolidatedSwap(client);
+            }
+
+            acquireLock(priority, ownerName);
+            this.queuedSwapPriority = priority;
+            this.targetHotbarSlot = targetSlot;
+            this.restoreHotbarSlot = restoreSlot;
+            this.simulateUseClick = clickSim && rightClickUseOnEquip;
+            this.onSlotReadyCallback = onSlotReady != null ? onSlotReady : (rightClickUseOnEquip ? () -> {
+                if (client.gameMode != null && client.player != null) {
+                    if (this.simulateUseClick && client.options != null) {
+                        KeyMapping.click(client.options.keyUse.getDefaultKey());
+                    }
+                    client.gameMode.useItem(client.player, InteractionHand.MAIN_HAND);
+                    client.player.swing(InteractionHand.MAIN_HAND);
+                }
+            } : null);
+
+            if (client.player.getInventory().getSelectedSlot() != targetSlot) {
+                client.player.getInventory().setSelectedSlot(targetSlot);
+            }
+            this.stageStartTick = client.player.tickCount;
+            this.stageStartTimeMs = System.currentTimeMillis();
+            this.swapStage = ConsolidatedSwapStage.WAIT_TO_INTERACT;
+            return true;
+        }
+
+        private void advanceConsolidatedSwapMachine(Minecraft client) {
+            if (swapStage == ConsolidatedSwapStage.IDLE || client.player == null) {
+                return;
+            }
+
+            if (client.player.swinging || client.player.attackAnim > 0.0F) {
+                return;
+            }
+
+            long now = System.currentTimeMillis();
+            int ticksElapsed = client.player.tickCount - stageStartTick;
+            long msElapsed = now - stageStartTimeMs;
+
+            switch (swapStage) {
+                case FAST_TICK_1_EQUIP_AND_HANDOFF -> {
+                    // Tick 1 of Optimized 2-Tick Unequip: Wait exactly 1 tick after Tick 0 selection
+                    if (ticksElapsed < 1) {
+                        return;
+                    }
+                    if (targetHotbarSlot >= 0 && targetHotbarSlot <= 8
+                            && client.player.getInventory().getSelectedSlot() != targetHotbarSlot) {
+                        client.player.getInventory().setSelectedSlot(targetHotbarSlot);
+                    }
+
+                    if (client.gameMode != null) {
+                        if (client.options != null) {
+                            KeyMapping.click(client.options.keyUse.getDefaultKey());
+                        }
+                        client.gameMode.useItem(client.player, InteractionHand.MAIN_HAND);
+                        client.player.swing(InteractionHand.MAIN_HAND);
+                    }
+
+                    // Immediately restore/pre-select weapon slot and hand off control to AutoMace on Tick 1
+                    if (restoreHotbarSlot >= 0 && restoreHotbarSlot <= 8
+                            && client.player.getInventory().getSelectedSlot() != restoreHotbarSlot) {
+                        client.player.getInventory().setSelectedSlot(restoreHotbarSlot);
+                    }
+
+                    Runnable callback = onSlotReadyCallback;
+                    completeConsolidatedSwap();
+                    if (callback != null) {
+                        callback.run();
+                    }
+                }
+
+                case WAIT_TO_INTERACT -> {
+                    if (ticksElapsed < MIN_TICKS_PER_SWAP_STAGE || msElapsed < MIN_STAGE_MS) {
+                        return;
+                    }
+                    if (targetHotbarSlot >= 0 && targetHotbarSlot <= 8
+                            && client.player.getInventory().getSelectedSlot() != targetHotbarSlot) {
+                        client.player.getInventory().setSelectedSlot(targetHotbarSlot);
+                        stageStartTick = client.player.tickCount;
+                        stageStartTimeMs = now;
+                        return;
+                    }
+
+                    if (onSlotReadyCallback != null) {
+                        onSlotReadyCallback.run();
+                        recordInteractionDispatched(client);
+                    }
+
+                    if (restoreHotbarSlot >= 0 && restoreHotbarSlot <= 8) {
+                        stageStartTick = client.player.tickCount;
+                        stageStartTimeMs = now;
+                        swapStage = ConsolidatedSwapStage.WAIT_TO_RESTORE;
+                    } else {
+                        completeConsolidatedSwap();
+                    }
+                }
+
+                case WAIT_TO_RESTORE -> {
+                    if (ticksElapsed < MIN_TICKS_PER_SWAP_STAGE || msElapsed < MIN_STAGE_MS) {
+                        return;
+                    }
+                    if (restoreHotbarSlot >= 0 && restoreHotbarSlot <= 8
+                            && client.player.getInventory().getSelectedSlot() != restoreHotbarSlot) {
+                        client.player.getInventory().setSelectedSlot(restoreHotbarSlot);
+                    }
+                    completeConsolidatedSwap();
+                }
+
+                default -> completeConsolidatedSwap();
+            }
+        }
+
+        private void abortActiveConsolidatedSwap(Minecraft client) {
+            if (client != null && client.player != null && restoreHotbarSlot >= 0 && restoreHotbarSlot <= 8
+                    && client.player.getInventory().getSelectedSlot() != restoreHotbarSlot) {
+                client.player.getInventory().setSelectedSlot(restoreHotbarSlot);
+            }
+            completeConsolidatedSwap();
+        }
+
+        private void completeConsolidatedSwap() {
+            ActionPriority finishedPriority = queuedSwapPriority;
+            swapStage = ConsolidatedSwapStage.IDLE;
+            queuedSwapPriority = null;
+            targetHotbarSlot = -1;
+            restoreHotbarSlot = -1;
+            stageStartTick = -1;
+            onSlotReadyCallback = null;
+            if (finishedPriority != null && activeLockPriority == finishedPriority) {
+                activeLockPriority = null;
+                activeLockOwnerName = "";
+            }
+        }
+
+        private void rebuildValidTargetsCacheOncePerTick(Minecraft client) {
+            validTargetsMutable.clear();
+            if (client.player == null || client.level == null) {
+                validTargetsView = Collections.emptyList();
+                return;
+            }
+
+            for (Entity entity : client.level.entitiesForRendering()) {
+                if (!(entity instanceof LivingEntity living)) {
+                    continue;
+                }
+                if (living == client.player || !living.isAlive() || living.getHealth() <= 0.0F) {
+                    continue;
+                }
+                if (living instanceof ArmorStand) {
+                    continue;
+                }
+                if (living instanceof Player player) {
+                    if (AntiBot.shouldIgnore(player)) {
+                        continue;
+                    }
+                } else if (!(living instanceof Mob) && !(living instanceof Animal)) {
+                    continue;
+                }
+                validTargetsMutable.add(living);
+            }
+
+            validTargetsView = Collections.unmodifiableList(validTargetsMutable);
+        }
+
+        public List<LivingEntity> getValidTargets(Minecraft client) {
+            ensureTickSynchronized(client);
+            return validTargetsView;
+        }
+
+        public LivingEntity getNearestVisibleTarget(Minecraft client, double maxRange, boolean ignoreFriends) {
+            ensureTickSynchronized(client);
+            if (client == null || client.player == null || validTargetsView.isEmpty()) {
+                return null;
+            }
+
+            double maxRangeSqr = maxRange * maxRange;
+            double eyeX = client.player.getX();
+            double eyeY = client.player.getEyeY();
+            double eyeZ = client.player.getZ();
+
+            LivingEntity best = null;
+            double bestDistSqr = Double.MAX_VALUE;
+
+            for (int i = 0, size = validTargetsView.size(); i < size; i++) {
+                LivingEntity candidate = validTargetsView.get(i);
+                if (!candidate.isAlive()) {
+                    continue;
+                }
+                if (ignoreFriends && isWhitelistedFriend(client, candidate)) {
+                    continue;
+                }
+
+                AABB box = candidate.getBoundingBox();
+                double dx = eyeX - Mth.clamp(eyeX, box.minX, box.maxX);
+                double dy = eyeY - Mth.clamp(eyeY, box.minY, box.maxY);
+                double dz = eyeZ - Mth.clamp(eyeZ, box.minZ, box.maxZ);
+                double distSqr = dx * dx + dy * dy + dz * dz;
+
+                if (distSqr > maxRangeSqr || distSqr >= bestDistSqr) {
+                    continue;
+                }
+                if (!hasLineOfSight(client, candidate)) {
+                    continue;
+                }
+
+                bestDistSqr = distSqr;
+                best = candidate;
+            }
+
+            return best;
+        }
+
+        public static boolean isWhitelistedFriend(Minecraft client, Entity entity) {
+            if (!(entity instanceof Player player)) {
+                return false;
+            }
+            if (FriendUtils.isFriend(player.getName().getString())) {
+                return true;
+            }
+            return client != null && client.player != null && client.player.isAlliedTo(player);
+        }
+
+        public static boolean hasLineOfSight(Minecraft client, LivingEntity target) {
+            if (client == null || client.player == null || client.level == null || target == null) {
+                return false;
+            }
+            if (client.player.hasLineOfSight(target)) {
+                return true;
+            }
+            Vec3 eyePos = client.player.getEyePosition(1.0F);
+            Vec3 center = target.getBoundingBox().getCenter();
+            BlockHitResult hit = client.level.clip(new ClipContext(
+                    eyePos,
+                    center,
+                    ClipContext.Block.COLLIDER,
+                    ClipContext.Fluid.NONE,
+                    client.player
+            ));
+            return hit.getType() == HitResult.Type.MISS;
+        }
+
+        public static boolean verifyStrict3mAttackRaycast(Minecraft client, LivingEntity target, double requestedReach, Vec3 lookDirection) {
+            if (client == null || client.player == null || client.level == null || target == null || !target.isAlive()) {
+                return false;
+            }
+            double legalReach = Math.min(3.0D, Math.max(1.0D, requestedReach));
+            Vec3 eyePos = client.player.getEyePosition(1.0F);
+            Vec3 dir = lookDirection != null ? lookDirection : client.player.getViewVector(1.0F);
+            Vec3 rayEnd = eyePos.add(dir.scale(legalReach + 0.15D));
+
+            AABB targetBox = target.getBoundingBox().inflate(target.getPickRadius() + 0.05D);
+            if (targetBox.contains(eyePos)) {
+                return true;
+            }
+
+            Optional<Vec3> hitOpt = targetBox.clip(eyePos, rayEnd);
+            if (hitOpt.isEmpty()) {
+                return false;
+            }
+
+            Vec3 hitPoint = hitOpt.get();
+            if (eyePos.distanceToSqr(hitPoint) > ((legalReach + 0.15D) * (legalReach + 0.15D))) {
+                return false;
+            }
+
+            BlockHitResult blockHit = client.level.clip(new ClipContext(
+                    eyePos,
+                    hitPoint,
+                    ClipContext.Block.COLLIDER,
+                    ClipContext.Fluid.NONE,
+                    client.player
+            ));
+            return blockHit.getType() == HitResult.Type.MISS;
+        }
+
+        public synchronized void resetAll() {
+            activeLockPriority = null;
+            activeLockOwnerName = "";
+            lockAcquiredAtMs = 0L;
+            swapStage = ConsolidatedSwapStage.IDLE;
+            queuedSwapPriority = null;
+            targetHotbarSlot = -1;
+            restoreHotbarSlot = -1;
+            stageStartTick = -1;
+            onSlotReadyCallback = null;
+            cachedTargetsTick = -1;
+            validTargetsMutable.clear();
+            validTargetsView = Collections.emptyList();
+        }
+    }
 
     /**
      * Bridge adapter delegating to the Split-Priority ActionManager.
@@ -81,29 +629,30 @@ public class MaceTarget extends Module {
         }
 
         public static void acquireMaceSmashLock() {
-            ActionManager.getInstance().acquireLock(ActionPriority.AUTO_MACE_STRIKE, "AutoMace_STRIKE");
+            ActionManager.getInstance().acquireLock(ActionManager.ActionPriority.AUTO_MACE_STRIKE, "AutoMace_STRIKE");
         }
 
         public static void releaseMaceSmashLock() {
-            ActionManager.getInstance().releaseLock(ActionPriority.AUTO_MACE_STRIKE, "AutoMace_STRIKE");
+            ActionManager.getInstance().releaseLock(ActionManager.ActionPriority.AUTO_MACE_STRIKE, "AutoMace_STRIKE");
         }
 
         public static boolean tryAcquireElytraAscentLock() {
-            return ActionManager.getInstance().acquireLock(ActionPriority.AUTO_ELYTRA_EQUIP, "AutoElytra_EQUIP");
+            return ActionManager.getInstance().acquireLock(ActionManager.ActionPriority.AUTO_ELYTRA_EQUIP, "AutoElytra_EQUIP");
         }
 
         public static void releaseElytraLock() {
-            ActionManager.getInstance().releaseLock(ActionPriority.AUTO_ELYTRA_UNEQUIP, "AutoElytra_UNEQUIP");
-            ActionManager.getInstance().releaseLock(ActionPriority.AUTO_ELYTRA_EQUIP, "AutoElytra_EQUIP");
+            ActionManager.getInstance().releaseLock(ActionManager.ActionPriority.AUTO_ELYTRA_UNEQUIP, "AutoElytra_UNEQUIP");
+            ActionManager.getInstance().releaseLock(ActionManager.ActionPriority.AUTO_ELYTRA_EQUIP, "AutoElytra_EQUIP");
         }
 
         public static boolean isMaceSmashLocked() {
-            return ActionManager.getInstance().getActiveLockPriority() == ActionPriority.AUTO_MACE_STRIKE;
+            return ActionManager.getInstance().getActiveLockPriority() == ActionManager.ActionPriority.AUTO_MACE_STRIKE;
         }
 
         public static boolean isElytraAscentLocked() {
-            ActionPriority active = ActionManager.getInstance().getActiveLockPriority();
-            return active == ActionPriority.AUTO_ELYTRA_UNEQUIP || active == ActionPriority.AUTO_ELYTRA_EQUIP;
+            ActionManager.ActionPriority active = ActionManager.getInstance().getActiveLockPriority();
+            return active == ActionManager.ActionPriority.AUTO_ELYTRA_UNEQUIP
+                    || active == ActionManager.ActionPriority.AUTO_ELYTRA_EQUIP;
         }
 
         public static void reset() {
@@ -111,31 +660,28 @@ public class MaceTarget extends Module {
         }
     }
 
-    // Core Targeting & Swing Settings (Manual Slot Sliders Removed -> Dynamic 4Hz Auto-Cache)
+    // Essential Core PvP Settings Only
     private final NumberSetting swingRange = register(new NumberSetting(
             "Swing Range", "Maximum distance to swing and attack with the mace (capped at 3.0m vanilla reach).", 3.0D, 1.0D, 3.0D, 0.05D));
     private final NumberSetting aimRange = register(new NumberSetting(
             "Aim Range", "Maximum range to acquire and track targets.", 10.0D, 1.0D, 20.0D, 0.1D));
     private final NumberSetting maceFov = register(new NumberSetting(
             "Mace FOV", "Field of view cone in degrees for target acquisition.", 360.0D, 1.0D, 360.0D, 1.0D));
-    private final NumberSetting aimInAir = register(new NumberSetting(
-            "Aim In Air", "Minimum fall distance required before airborne aiming begins.", 0.0D, 0.0D, 10.0D, 0.1D));
 
     private final BooleanSetting autoSwitch = register(new BooleanSetting(
             "Auto Switch", "Automatically switch hotbar slot to the dynamically cached mace.", true));
     private final BooleanSetting swapBack = register(new BooleanSetting(
             "Swap Back", "Restore previous weapon slot after attacking.", true));
 
-    // Restored Aim Mode GUI Selector ("Legit", "Strict", "Silent")
     private final ModeSetting aimMode = register(new ModeSetting(
             "Aim Mode", "Tracking algorithm: Legit (PD + 20% deadzone), Strict (instant center lock), or Silent.", "Legit", "Legit", "Strict", "Silent"));
-
     private final NumberSetting aimSpeed = register(new NumberSetting(
             "Aim Speed", "Angular rotation speed during distance-scaled PD deceleration.", 50.0D, 1.0D, 100.0D, 0.5D));
     private final NumberSetting aimSmooth = register(new NumberSetting(
             "Aim Smooth", "Smoothing derivative damping factor applied to rotation interpolation.", 0.00D, 0.00D, 10.00D, 0.01D));
+
     private final NumberSetting minFallDist = register(new NumberSetting(
-            "Min Fall Dist", "Minimum fall distance required to trigger a mace slam.", 1.5D, 0.0D, 20.0D, 0.1D));
+            "Min Fall Dist", "Minimum fall distance required to trigger aiming and mace slam.", 1.5D, 0.0D, 20.0D, 0.1D));
     private final NumberSetting cooldownMs = register(new NumberSetting(
             "Cooldown (ms)", "Minimum cooldown in milliseconds between slam sequences.", 125.0D, 0.0D, 1000.0D, 5.0D));
     private final NumberSetting maceSwapDelayMs = register(new NumberSetting(
@@ -143,18 +689,8 @@ public class MaceTarget extends Module {
 
     private final BooleanSetting stunSlam = register(new BooleanSetting(
             "Stun Slam", "Break target shield with an axe before executing the mace slam.", true));
-    private final BooleanSetting properStunslam = register(new BooleanSetting(
-            "ProperStunslam", "Verify target is actively blocking with a shield before stun-slamming.", false));
-    private final BooleanSetting onlyOnNonGlide = register(new BooleanSetting(
-            "Only On NonGlide", "Only aim and attack when not actively gliding with an Elytra.", false));
-    private final BooleanSetting weaponOnly = register(new BooleanSetting(
-            "Weapon Only", "Only activate targeting and attacks while holding a weapon.", false));
-    private final BooleanSetting clickSim = register(new BooleanSetting(
-            "ClickSim", "Simulate client mouse click and hand swing during attacks.", true));
     private final BooleanSetting ignoreFriends = register(new BooleanSetting(
             "Ignore Friends", "Ignore players registered in the friend list.", true));
-    private final BooleanSetting targetEsp = register(new BooleanSetting(
-            "Target ESP", "Render a minimal single-pass wireframe outline on the active target.", true));
 
     private enum SmashSequenceState {
         IDLE,
@@ -173,15 +709,16 @@ public class MaceTarget extends Module {
     private int stateCommittedTick = -1;
     private int savedHotbarSlot = -1;
     private int targetMaceSlot = -1;
+    private boolean didSwitchHotbarSlot = false;
     private int lastTargetScanTick = -1;
     private double airbornePeakY = Double.NaN;
     private boolean silentRotationActive = false;
 
-    // 2. Dynamic 4Hz Mace Auto-Caching State
+    // 1. Event-Driven / Change-Driven Weapon Slot Cache (Zero 4Hz Timer Loop)
     private int cachedMaceSlot = -1;
     private int cachedAxeSlot = -1;
     private int cachedSwordSlot = -1;
-    private int lastInventoryScanTick = -100;
+    private int lastHotbarContentsHash = 0;
 
     // Proportional-Derivative (PD) Distance-Scaled Deceleration State
     private double prevYawError = 0.0D;
@@ -190,7 +727,7 @@ public class MaceTarget extends Module {
     private long lastSmoothFrameNs = 0L;
 
     public MaceTarget() {
-        super("AutoMace", "Split-priority PD/Strict/Silent aim assist with 4Hz dynamic enchantment Mace caching.", ModuleCategory.COMBAT);
+        super("AutoMace", "Hotbar-safe PD/Strict/Silent aim assist with zero-delay Elytra handoff.", ModuleCategory.COMBAT);
         instance = this;
     }
 
@@ -211,12 +748,14 @@ public class MaceTarget extends Module {
     }
 
     public int getPreferredMaceHotbarSlot() {
+        refreshSlotCacheOnInventoryChange(Minecraft.getInstance());
         return cachedMaceSlot;
     }
 
     @Override
     protected void onEnable() {
         resetAllStates();
+        refreshSlotCacheOnInventoryChange(Minecraft.getInstance());
     }
 
     @Override
@@ -239,7 +778,8 @@ public class MaceTarget extends Module {
         }
 
         ActionManager.getInstance().ensureTickSynchronized(client);
-        updateDynamicMaceCacheAt4Hz(client, false);
+        // Only updates cache if hotbar item contents changed AND player is not using an item or locked
+        refreshSlotCacheOnInventoryChange(client);
 
         if (isGroundedOrAscendingLockout(client)) {
             releaseCameraAndClearTargetLock();
@@ -307,7 +847,6 @@ public class MaceTarget extends Module {
         }
 
         ActionManager.getInstance().ensureTickSynchronized(client);
-        updateDynamicMaceCacheAt4Hz(client, false);
 
         if (event.getPhase() == EventPhase.PRE) {
             updateAirbornePeak(client);
@@ -330,7 +869,6 @@ public class MaceTarget extends Module {
             return;
         }
 
-        // If no Mace is present in hotbar (cachedMaceSlot == -1) and not holding a Mace, remain completely dormant
         if (!canEngageModule(client)) {
             if (smashState != SmashSequenceState.IDLE) {
                 transitionToSwapBackRestore(client);
@@ -356,6 +894,7 @@ public class MaceTarget extends Module {
             return;
         }
 
+        // Pre-emptive Tick 0 Elytra unequip trigger & Split-Priority lock management
         updateSplitPriorityCombatLock(client, target);
 
         if (!shouldAimAtTarget(client)) {
@@ -383,7 +922,6 @@ public class MaceTarget extends Module {
             suspendSilentRotation();
             applyStrictCenterLockAim(client, target);
         } else {
-            // "Legit" mode (default)
             suspendSilentRotation();
             long nowNs = System.nanoTime();
             if (lastSmoothFrameNs == 0L || nowNs - lastSmoothFrameNs > 22_000_000L) {
@@ -394,8 +932,7 @@ public class MaceTarget extends Module {
     }
 
     private void runPostRotationPhase(Minecraft client) {
-        // Yield immediately if Priority 0 (CRITICAL) or Priority 1 (AUTO_ELYTRA_UNEQUIP) holds the ActionManager lock
-        if (ActionManager.getInstance().isBlockedByHigherPriority(ActionPriority.AUTO_MACE_STRIKE)) {
+        if (ActionManager.getInstance().isBlockedByHigherPriority(ActionManager.ActionPriority.AUTO_MACE_STRIKE)) {
             return;
         }
 
@@ -426,25 +963,37 @@ public class MaceTarget extends Module {
     }
 
     /**
-     * 2. Dynamic 4Hz Mace Auto-Caching (Fabric 1.21.11 DataComponents.ENCHANTMENTS):
-     * - Scans hotbar slots 0-8 every 5 ticks (4Hz) or on demand before a strike.
-     * - Checks stack.getItem() == Items.MACE.
-     * - Parses DataComponents.ENCHANTMENTS for Enchantments.DENSITY and Enchantments.BREACH.
-     * - Stores the slot index of the highest-level Density/Breach Mace in cachedMaceSlot.
+     * 1. Hotbar Item-Holding Fix (Event-Driven / Change-Driven Slot Caching):
+     * - No continuous 4Hz timer loop.
+     * - Active Hand Protection: Immediately returns if (player.isUsingItem() || actionManager.isLocked() || player.swinging).
+     * - Only re-evaluates DataComponents.ENCHANTMENTS when the hotbar's item contents hash actually changes!
      */
-    private void updateDynamicMaceCacheAt4Hz(Minecraft client, boolean forceImmediate) {
-        if (client.player == null) {
-            cachedMaceSlot = -1;
-            cachedAxeSlot = -1;
-            cachedSwordSlot = -1;
+    public void refreshSlotCacheOnInventoryChange(Minecraft client) {
+        if (client == null || client.player == null) {
+            return;
+        }
+        // Active Hand Protection: Never scan or touch cached indices while using items, swinging, or locked
+        if (client.player.isUsingItem()
+                || client.player.swinging
+                || client.player.attackAnim > 0.0F
+                || ActionManager.getInstance().isLocked()) {
             return;
         }
 
-        int currentTick = client.player.tickCount;
-        if (!forceImmediate && (currentTick - lastInventoryScanTick) < HOTBAR_SCAN_INTERVAL_TICKS) {
+        int currentHash = 1;
+        for (int slot = 0; slot < 9; slot++) {
+            ItemStack stack = client.player.getInventory().getItem(slot);
+            if (stack.isEmpty()) {
+                currentHash = 31 * currentHash;
+            } else {
+                currentHash = 31 * currentHash + System.identityHashCode(stack.getItem()) + stack.getCount();
+            }
+        }
+
+        if (currentHash == lastHotbarContentsHash) {
             return;
         }
-        lastInventoryScanTick = currentTick;
+        lastHotbarContentsHash = currentHash;
 
         int bestMaceSlot = -1;
         int bestMaceScore = Integer.MIN_VALUE;
@@ -475,9 +1024,6 @@ public class MaceTarget extends Module {
         cachedSwordSlot = foundSwordSlot;
     }
 
-    /**
-     * Parses DataComponents.ENCHANTMENTS on a Mace ItemStack and scores its Density and Breach levels.
-     */
     private int scoreMaceEnchantments(ItemStack stack) {
         ItemEnchantments enchantments = stack.getOrDefault(DataComponents.ENCHANTMENTS, ItemEnchantments.EMPTY);
         int densityLevel = 0;
@@ -501,11 +1047,11 @@ public class MaceTarget extends Module {
     }
 
     /**
-     * 1. Split-Priority Mutex Lock Management:
-     * - If the player is still wearing an Elytra (< 4.5m & v_y < -0.1), AutoMace does NOT claim the lock—it
-     *   yields to Priority 1 (AUTO_ELYTRA_UNEQUIP) so AutoElytra can swap the Chestplate on first.
-     * - Once the Elytra is confirmed unequipped (!InventoryUtils.isElytraEquipped()) and the target is within
-     *   smash range, AutoMace claims Priority 2 (AUTO_MACE_STRIKE).
+     * 2. Pre-emptive Slot Pre-selection (< 4.5m & v_y < -0.1) & Zero-Delay Handoff:
+     * - The moment target distance < 4.5m and v_y < -0.1 while wearing an Elytra, immediately triggers
+     *   AutoElytra's Tick 0 Chestplate selection.
+     * - The millisecond the 2-tick unequip completes on Tick 1 (isReadyForZeroDelayMaceHandoff()),
+     *   AutoMace claims AUTO_MACE_STRIKE with zero dead frames.
      */
     private void updateSplitPriorityCombatLock(Minecraft client, LivingEntity targetEntity) {
         if (client.player == null || targetEntity == null || isGroundedOrAscendingLockout(client)) {
@@ -517,20 +1063,19 @@ public class MaceTarget extends Module {
 
         double currentDist = getPrecisionDistanceToTarget(client, targetEntity);
         double velY = client.player.getDeltaMovement().y;
+        ElytraTarget autoElytra = ElytraTarget.getInstance();
+        boolean elytraReadyForHandoff = (autoElytra == null || !autoElytra.isEnabled())
+                ? !InventoryUtils.isElytraEquipped()
+                : autoElytra.isReadyForZeroDelayMaceHandoff();
 
-        // If Elytra is equipped inside < 4.5m with v_y < -0.1, yield lock to Priority 1 (AutoElytra_UNEQUIP)
-        if (InventoryUtils.isElytraEquipped()) {
+        if (!elytraReadyForHandoff) {
             CombatStateManager.releaseMaceSmashLock();
-            if (currentDist < PRIORITY_1_ELYTRA_UNEQUIP_DIST && velY < -0.1D) {
-                ElytraTarget autoElytra = ElytraTarget.getInstance();
-                if (autoElytra != null && autoElytra.isEnabled()) {
-                    autoElytra.ensureUnequippedBeforeMaceAttack(targetEntity);
-                }
+            if (currentDist < PRIORITY_1_ELYTRA_UNEQUIP_DIST && velY < -0.1D && autoElytra != null && autoElytra.isEnabled()) {
+                autoElytra.ensureUnequippedBeforeMaceAttack(targetEntity);
             }
             return;
         }
 
-        // Priority 2 (AutoMace_STRIKE): Target in smash range AND Elytra is unequipped
         if (isFallingForSmash(client) && currentDist <= swingRange.getValue() + 0.5D) {
             CombatStateManager.acquireMaceSmashLock();
         } else if (smashState == SmashSequenceState.IDLE) {
@@ -548,15 +1093,16 @@ public class MaceTarget extends Module {
 
         double currentDist = getPrecisionDistanceToTarget(client, targetEntity);
         double velY = client.player.getDeltaMovement().y;
+        ElytraTarget autoElytra = ElytraTarget.getInstance();
+        boolean elytraReadyForHandoff = (autoElytra == null || !autoElytra.isEnabled())
+                ? !InventoryUtils.isElytraEquipped()
+                : autoElytra.isReadyForZeroDelayMaceHandoff();
 
-        // Priority 1 Check: If Elytra is still equipped when < 4.5m and v_y < -0.1, trigger Priority 1 Unequip first
-        if (InventoryUtils.isElytraEquipped()) {
-            if (currentDist < PRIORITY_1_ELYTRA_UNEQUIP_DIST && velY < -0.1D) {
+        // Pre-emptive Tick 0 Unequip if Elytra is still equipped inside < 4.5m & v_y < -0.1
+        if (!elytraReadyForHandoff) {
+            if (currentDist < PRIORITY_1_ELYTRA_UNEQUIP_DIST && velY < -0.1D && autoElytra != null && autoElytra.isEnabled()) {
                 CombatStateManager.releaseMaceSmashLock();
-                ElytraTarget autoElytra = ElytraTarget.getInstance();
-                if (autoElytra != null && autoElytra.isEnabled()) {
-                    autoElytra.ensureUnequippedBeforeMaceAttack(targetEntity);
-                }
+                autoElytra.ensureUnequippedBeforeMaceAttack(targetEntity);
             }
             return;
         }
@@ -565,28 +1111,28 @@ public class MaceTarget extends Module {
             return;
         }
 
-        // Refresh cachedMaceSlot if needed
-        if (cachedMaceSlot == -1) {
-            updateDynamicMaceCacheAt4Hz(client, true);
-        }
-
+        // Verify cachedMaceSlot still holds a Mace (lazy validation on strike)
+        int maceSlot = getValidatedCachedMaceSlot(client);
         boolean holdingMace = isMaceStack(client.player.getMainHandItem());
-        if (!holdingMace && (!autoSwitch.getValue() || cachedMaceSlot == -1)) {
+        if (!holdingMace && (!autoSwitch.getValue() || maceSlot == -1)) {
             return;
         }
 
-        // Priority 2 (AutoMace_STRIKE): Target in smash range AND Elytra is confirmed unequipped
-        if (!ActionManager.getInstance().acquireLock(ActionPriority.AUTO_MACE_STRIKE, "AutoMace_STRIKE")) {
+        if (!ActionManager.getInstance().acquireLock(ActionManager.ActionPriority.AUTO_MACE_STRIKE, "AutoMace_STRIKE")) {
             return;
         }
 
         int currentSlot = client.player.getInventory().getSelectedSlot();
-        savedHotbarSlot = currentSlot;
-        targetMaceSlot = holdingMace ? currentSlot : cachedMaceSlot;
+        if (!didSwitchHotbarSlot) {
+            savedHotbarSlot = currentSlot;
+        }
+        targetMaceSlot = holdingMace ? currentSlot : maceSlot;
 
-        if (shouldTriggerStunSlam(client, targetEntity) && cachedAxeSlot != -1) {
-            if (currentSlot != cachedAxeSlot) {
-                selectHotbarSlotLegit(client, cachedAxeSlot);
+        int axeSlot = getValidatedCachedAxeSlot(client);
+        if (shouldTriggerStunSlam(targetEntity) && axeSlot != -1) {
+            if (currentSlot != axeSlot) {
+                selectHotbarSlotLegit(client, axeSlot);
+                didSwitchHotbarSlot = true;
                 stateCommittedTick = client.player.tickCount;
                 stateTickTimer.reset();
                 smashState = SmashSequenceState.STEP_1_AXE_STUN_ATTACK;
@@ -600,22 +1146,46 @@ public class MaceTarget extends Module {
 
         if (currentSlot != targetMaceSlot) {
             selectHotbarSlotLegit(client, targetMaceSlot);
+            didSwitchHotbarSlot = true;
             stateCommittedTick = client.player.tickCount;
             stateTickTimer.reset();
             smashState = SmashSequenceState.STEP_1_MACE_SMASH_ATTACK;
             return;
         }
 
+        // Zero-Delay Strike: If already holding the Mace (or pre-selected by Tick 1 Elytra handoff), strike immediately!
         if (currentDist <= swingRange.getValue() && performThrottledAttack(client, targetEntity)) {
             cooldownTimer.reset();
             transitionToSwapBackRestore(client);
         }
     }
 
-    /**
-     * 3. Aim Mode: "Strict"
-     * Instant mathematical center-locking onto (X, Y + Height/2, Z).
-     */
+    private int getValidatedCachedMaceSlot(Minecraft client) {
+        if (client.player == null) {
+            return -1;
+        }
+        if (cachedMaceSlot >= 0 && cachedMaceSlot <= 8
+                && isMaceStack(client.player.getInventory().getItem(cachedMaceSlot))) {
+            return cachedMaceSlot;
+        }
+        lastHotbarContentsHash = 0;
+        refreshSlotCacheOnInventoryChange(client);
+        return cachedMaceSlot;
+    }
+
+    private int getValidatedCachedAxeSlot(Minecraft client) {
+        if (client.player == null) {
+            return -1;
+        }
+        if (cachedAxeSlot >= 0 && cachedAxeSlot <= 8) {
+            ItemStack s = client.player.getInventory().getItem(cachedAxeSlot);
+            if (!s.isEmpty() && (s.getItem() instanceof AxeItem || s.is(ItemTags.AXES))) {
+                return cachedAxeSlot;
+            }
+        }
+        return -1;
+    }
+
     private void applyStrictCenterLockAim(Minecraft client, LivingEntity targetEntity) {
         Angle centerAngle = computeExactCenterAimAngle(client, targetEntity);
         if (centerAngle == null) {
@@ -625,10 +1195,6 @@ public class MaceTarget extends Module {
         client.player.setXRot(Mth.clamp(centerAngle.getPitch(), -89.5F, 89.5F));
     }
 
-    /**
-     * 3. Aim Mode: "Legit" (Default)
-     * Distance-Scaled Deceleration PD Controller + 20% Inner Hitbox Deadzone + GCD quantization.
-     */
     private void applyDistanceScaledPdAim(Minecraft client, LivingEntity targetEntity, double tickFraction) {
         float currentYaw = client.player.getYRot();
         float currentPitch = client.player.getXRot();
@@ -714,10 +1280,6 @@ public class MaceTarget extends Module {
         client.player.setXRot(nextPitch);
     }
 
-    /**
-     * 3. Aim Mode: "Silent"
-     * Server-side rotation synchronization via AngleConnection.INSTANCE.rotateTo(...).
-     */
     private void queueSilentServerRotation(Angle targetAngle) {
         silentRotationActive = true;
         AngleConnection.INSTANCE.rotateTo(
@@ -805,6 +1367,7 @@ public class MaceTarget extends Module {
                 int maceSlot = targetMaceSlot != -1 ? targetMaceSlot : cachedMaceSlot;
                 if (maceSlot != -1) {
                     selectHotbarSlotLegit(client, maceSlot);
+                    didSwitchHotbarSlot = true;
                 }
                 stateCommittedTick = client.player.tickCount;
                 stateTickTimer.reset();
@@ -816,7 +1379,7 @@ public class MaceTarget extends Module {
                     transitionToSwapBackRestore(client);
                     return;
                 }
-                double requiredDelayMs = Math.max(50.0D, maceSwapDelayMs.getValue());
+                double requiredDelayMs = Math.max(45.0D, maceSwapDelayMs.getValue());
                 if (client.player.tickCount - stateCommittedTick < MIN_TICKS_BETWEEN_MACE_STEPS
                         || !stateTickTimer.finished(requiredDelayMs)) {
                     return;
@@ -860,9 +1423,10 @@ public class MaceTarget extends Module {
         if (autoElytra != null && autoElytra.isEnabled()) {
             autoElytra.enterState3RecoveryLock();
         }
-        if (!swapBack.getValue()) {
+        if (!swapBack.getValue() || !didSwitchHotbarSlot) {
             savedHotbarSlot = -1;
             targetMaceSlot = -1;
+            didSwitchHotbarSlot = false;
             smashState = SmashSequenceState.IDLE;
             CombatStateManager.releaseMaceSmashLock();
             return;
@@ -872,19 +1436,25 @@ public class MaceTarget extends Module {
         smashState = SmashSequenceState.STEP_2_SWAPBACK_RESTORE;
     }
 
+    /**
+     * Only restores the hotbar slot if AutoMace actually switched it during this strike sequence,
+     * and never overrides the player's hand while they are actively using an item.
+     */
     private void executeSafeLegitSwapBack(Minecraft client) {
         if (client == null || client.player == null) {
             savedHotbarSlot = -1;
+            targetMaceSlot = -1;
+            didSwitchHotbarSlot = false;
             return;
         }
 
-        int returnSlot = savedHotbarSlot >= 0 && savedHotbarSlot <= 8
-                ? savedHotbarSlot
-                : (cachedSwordSlot != -1 ? cachedSwordSlot : 0);
+        if (didSwitchHotbarSlot && !client.player.isUsingItem() && savedHotbarSlot >= 0 && savedHotbarSlot <= 8) {
+            selectHotbarSlotLegit(client, savedHotbarSlot);
+        }
 
-        selectHotbarSlotLegit(client, returnSlot);
         savedHotbarSlot = -1;
         targetMaceSlot = -1;
+        didSwitchHotbarSlot = false;
     }
 
     private boolean performThrottledAttack(Minecraft client, LivingEntity targetEntity) {
@@ -902,7 +1472,7 @@ public class MaceTarget extends Module {
         if (!ActionManager.verifyStrict3mAttackRaycast(client, targetEntity, swingRange.getValue(), activeLookVec)) {
             return false;
         }
-        if (!ActionManager.getInstance().canDispatchInteraction(client, ActionPriority.AUTO_MACE_STRIKE)) {
+        if (!ActionManager.getInstance().canDispatchInteraction(client, ActionManager.ActionPriority.AUTO_MACE_STRIKE)) {
             return false;
         }
 
@@ -911,7 +1481,7 @@ public class MaceTarget extends Module {
             client.player.stopUsingItem();
         }
 
-        if (clickSim.getValue() && client.options != null) {
+        if (client.options != null) {
             KeyMapping.click(client.options.keyAttack.getDefaultKey());
         }
 
@@ -938,18 +1508,8 @@ public class MaceTarget extends Module {
         target = null;
     }
 
-    /**
-     * If no Mace is found in the 4Hz hotbar cache (cachedMaceSlot == -1) and the player is not holding a Mace,
-     * AutoMace remains completely dormant.
-     */
     private boolean canEngageModule(Minecraft client) {
         if (client.player == null || client.level == null || isGroundedOrAscendingLockout(client)) {
-            return false;
-        }
-        if (onlyOnNonGlide.getValue() && client.player.isFallFlying()) {
-            return false;
-        }
-        if (weaponOnly.getValue() && !isHoldingWeapon(client.player.getMainHandItem())) {
             return false;
         }
         if (smashState != SmashSequenceState.IDLE) {
@@ -961,7 +1521,7 @@ public class MaceTarget extends Module {
             return false;
         }
 
-        return getEffectiveFallDistance(client) >= aimInAir.getValue();
+        return getEffectiveFallDistance(client) >= minFallDist.getValue();
     }
 
     private boolean isManualInputBlockingSwap(Minecraft client) {
@@ -985,20 +1545,6 @@ public class MaceTarget extends Module {
 
     private boolean isWhitelistedFriend(Minecraft client, Entity entity) {
         return ignoreFriends.getValue() && ActionManager.isWhitelistedFriend(client, entity);
-    }
-
-    @SubscribeEvent
-    public void onWorldRender(WorldRenderEvent event) {
-        if (!isEnabled() || !targetEsp.getValue() || target == null || !target.isAlive()) {
-            return;
-        }
-        Minecraft client = Minecraft.getInstance();
-        if (client.player == null || client.level == null || isGroundedOrAscendingLockout(client)) {
-            return;
-        }
-        if (client.player.distanceToSqr(target) <= 4096.0D) {
-            Render3D.drawBox(target.getBoundingBox(), TARGET_WIREFRAME_COLOR, 1.0F, true, false, false);
-        }
     }
 
     private void resetKinematicAimState() {
@@ -1042,15 +1588,11 @@ public class MaceTarget extends Module {
         if (getPrecisionDistanceToTarget(client, target) > aimRange.getValue()) {
             return false;
         }
-        double requiredFall = Math.max(minFallDist.getValue(), aimInAir.getValue());
-        return getEffectiveFallDistance(client) >= requiredFall;
+        return getEffectiveFallDistance(client) >= minFallDist.getValue();
     }
 
     private boolean isFallingForSmash(Minecraft client) {
         if (client.player == null || isGroundedOrAscendingLockout(client)) {
-            return false;
-        }
-        if (onlyOnNonGlide.getValue() && client.player.isFallFlying()) {
             return false;
         }
         return getEffectiveFallDistance(client) >= minFallDist.getValue();
@@ -1066,38 +1608,14 @@ public class MaceTarget extends Module {
         return hit.isPresent();
     }
 
-    private boolean shouldTriggerStunSlam(Minecraft client, LivingEntity targetEntity) {
-        if (!stunSlam.getValue()) {
+    private boolean shouldTriggerStunSlam(LivingEntity targetEntity) {
+        if (!stunSlam.getValue() || targetEntity == null) {
             return false;
         }
-        boolean blocking = isTargetBlockingWithShield(targetEntity);
-        if (properStunslam.getValue()) {
-            return blocking && isTargetFacingPlayer(client, targetEntity);
-        }
-        return blocking;
-    }
-
-    private boolean isTargetBlockingWithShield(LivingEntity entity) {
-        if (entity == null) {
-            return false;
-        }
-        if (entity.isBlocking()) {
+        if (targetEntity.isBlocking()) {
             return true;
         }
-        return entity.isUsingItem() && entity.getUseItem().getItem() == Items.SHIELD;
-    }
-
-    private boolean isTargetFacingPlayer(Minecraft client, LivingEntity targetEntity) {
-        Vec3 toPlayer = client.player.position().subtract(targetEntity.position());
-        toPlayer = new Vec3(toPlayer.x, 0.0D, toPlayer.z).normalize();
-        Vec3 targetLook = targetEntity.getViewVector(1.0F);
-        targetLook = new Vec3(targetLook.x, 0.0D, targetLook.z).normalize();
-        return toPlayer.dot(targetLook) > 0.0D;
-    }
-
-    private int resolveMaceSlot(Minecraft client) {
-        updateDynamicMaceCacheAt4Hz(client, false);
-        return cachedMaceSlot;
+        return targetEntity.isUsingItem() && targetEntity.getUseItem().getItem() == Items.SHIELD;
     }
 
     private boolean isMaceStack(ItemStack stack) {
@@ -1105,17 +1623,6 @@ public class MaceTarget extends Module {
             return false;
         }
         return stack.getItem() == Items.MACE;
-    }
-
-    private boolean isHoldingWeapon(ItemStack stack) {
-        if (stack == null || stack.isEmpty()) {
-            return false;
-        }
-        return isMaceStack(stack)
-                || stack.getItem() instanceof AxeItem
-                || stack.getItem() instanceof TridentItem
-                || stack.is(ItemTags.SWORDS)
-                || stack.is(ItemTags.AXES);
     }
 
     private double getPrecisionDistanceToTarget(Minecraft client, LivingEntity entity) {
@@ -1191,8 +1698,9 @@ public class MaceTarget extends Module {
         stateCommittedTick = -1;
         savedHotbarSlot = -1;
         targetMaceSlot = -1;
+        didSwitchHotbarSlot = false;
         lastTargetScanTick = -1;
-        lastInventoryScanTick = -100;
+        lastHotbarContentsHash = 0;
         cachedMaceSlot = -1;
         cachedAxeSlot = -1;
         cachedSwordSlot = -1;
