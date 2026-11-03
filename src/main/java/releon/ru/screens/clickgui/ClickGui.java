@@ -10,7 +10,7 @@ import releon.ru.screens.clickgui.impl.ClickGuiController;
 
 public final class ClickGui extends Screen {
     public ClickGui() {
-        super(Component.literal("Releon ClickGui"));
+        super(Component.literal("Attrium Client ClickGui"));
     }
 
     @Override

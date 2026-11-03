@@ -163,4 +163,26 @@ public abstract class Module implements IMinecraft {
             listener.onChanged(this);
         }
     }
+
+    private boolean settingsExpanded = false;
+
+    public boolean isSettingsExpanded() {
+        return this.settingsExpanded;
+    }
+
+    public void setSettingsExpanded(boolean expanded) {
+        this.settingsExpanded = expanded;
+    }
+
+    public void toggleSettingsExpanded() {
+        this.settingsExpanded = !this.settingsExpanded;
+    }
+
+    public static boolean isClickGuiScreenActive() {
+        net.minecraft.client.Minecraft client = net.minecraft.client.Minecraft.getInstance();
+        return client != null
+                && client.screen != null
+                && client.screen.getClass().getName().startsWith("releon.ru.screens");
+    }
+
 }

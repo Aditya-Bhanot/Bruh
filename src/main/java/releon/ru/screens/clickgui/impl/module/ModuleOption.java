@@ -210,6 +210,10 @@ public class ModuleOption {
             }
             return true;
         }
+        if (event.button() == 1 && isRowHovered(event.x(), event.y())) {
+            module.toggleSettingsExpanded();
+            return true;
+        }
         if (event.button() == 0 && isRowHovered(event.x(), event.y())) {
             module.toggle();
             return true;

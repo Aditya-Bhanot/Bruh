@@ -49,7 +49,6 @@ public final class ElytraTarget extends Module {
     private static final double PRIORITY_1_UNEQUIP_MAX_VEL_Y = -0.1D;
     private static final double PRIORITY_3_EQUIP_WIND_CHARGE_VEL_Y = 0.6D;
 
-    private static final long WIND_CHARGE_SETTLE_DELAY_MS = 250L;
     private static final float MIN_LEGAL_FALL_DISTANCE = 0.25F;
     private static final double MAX_LEGAL_GLIDE_VELOCITY_Y = -0.08D;
 
@@ -69,9 +68,9 @@ public final class ElytraTarget extends Module {
     private final BooleanSetting automaceSync = register(new BooleanSetting(
             "Automace Sync", "Synchronize elytra unequip/equip priorities with AutoMace.", true));
     private final BooleanSetting disableOnGround = register(new BooleanSetting(
-            "Disable on Ground", "Swap to chestplate and reset flight state when touching the ground.", true));
+            "Disable on Ground", "Swap to chestplate and reset flight state when touching the ground.", false));
     private final NumberSetting macePreHitRange = register(new NumberSetting(
-            "Mace Pre-Hit Range", "Pre-impact distance threshold (< 4.5m default) to unequip elytra before a mace hit.", 4.5D, 0.5D, 10.0D, 0.1D));
+            "Mace Pre-Hit Range", "Pre-impact distance threshold (< 4.5m default) to unequip elytra before a mace hit.", 2.5D, 0.5D, 10.0D, 0.1D));
     private final NumberSetting minDropDist = register(new NumberSetting(
             "Min Drop Dist", "Minimum drop distance required for chestplate drop and smash preparation.", 1.5D, 0.0D, 20.0D, 0.1D));
 
@@ -95,6 +94,8 @@ public final class ElytraTarget extends Module {
     private int cachedChestplateHotbarSlot = -1;
     private int lastArmorInventoryHash = 0;
 
+    private long strikeTime = 0L;
+    private boolean postStrikeReequipPending = false;
     private long lastWindChargeOrBlastTimeMs = 0L;
     private boolean wasWindChargeOnCooldown = false;
     private boolean windChargeAscentDetected = false;
@@ -177,6 +178,8 @@ public final class ElytraTarget extends Module {
     public void enterState3RecoveryLock() {
         flightState = CombatFlightState.STATE_3_RECOVERY;
         forceCancelFlightInput = false;
+        strikeTime = System.currentTimeMillis();
+        postStrikeReequipPending = true;
         swapCommitmentTimer.reset();
     }
 
@@ -248,9 +251,11 @@ public final class ElytraTarget extends Module {
         // Tick 1: Swaps Chestplate onto body, restores weapon slot, and hands control to AutoMace.
         // =========================================================================================
         if (InventoryUtils.isElytraEquipped() && !mc.player.onGround()) {
-            if (velY < PRIORITY_1_UNEQUIP_MAX_VEL_Y
+            boolean requiresUnequipFlagged = CombatStateManager.isRequiresUnequip();
+            if (requiresUnequipFlagged
+                    || (velY < PRIORITY_1_UNEQUIP_MAX_VEL_Y
                     && cachedTarget != null
-                    && shouldTriggerPriority1Unequip(cachedTarget)) {
+                    && shouldTriggerPriority1Unequip(cachedTarget))) {
                 if (requestFast2TickChestplateUnequip()) {
                     flightState = CombatFlightState.STATE_2_SMASH_WINDOW;
                     return;
@@ -269,19 +274,34 @@ public final class ElytraTarget extends Module {
             }
             flightState = CombatFlightState.STATE_1_FLIGHT;
             equipAfterWindChargeApexPending = false;
+            postStrikeReequipPending = false;
             return;
         }
 
         // =========================================================================================
-        // PRIORITY 3 (LOWEST): AutoElytra_EQUIP (Flight Deploy)
-        // Trigger: Wind Charge upward velocity spike (v_y > 0.6) -> post-apex legal glide transition.
-        // Action: ONLY executes if AutoMace is completely idle!
+        // PRIORITY 3 (LOWEST): AutoElytra_EQUIP (Flight Deploy / Post-Strike Re-Equip)
+        // Strictly gated by dynamic GUI Reequip Delay (ms):
+        //     System.currentTimeMillis() - strikeTime >= reequipDelayMs.getValue()
+        // Action: ONLY executes if AutoMace is completely idle and Reequip Delay (ms) has elapsed!
         // =========================================================================================
         boolean autoMaceCompletelyIdle = !maceActive || !autoMace.isMidSlamSequence();
+        long effectiveStrikeTime = Math.max(strikeTime, CombatStateManager.getLastMaceStrikeTimeMs());
+        double guiReequipDelay = reequipDelayMs.getValue() + computeRandomOffsetMs();
+        boolean reequipDelayElapsed = (System.currentTimeMillis() - effectiveStrikeTime) >= guiReequipDelay;
+
         if (autoMaceCompletelyIdle
+                && reequipDelayElapsed
                 && !actionManager.isBlockedByHigherPriority(ActionPriority.AUTO_ELYTRA_EQUIP)
                 && canStartPriority3Equip()) {
-            if (equipAfterWindChargeApexPending && isLegalVanillaFallFlyingState()) {
+            if (postStrikeReequipPending) {
+                postStrikeReequipPending = false;
+                flightState = CombatFlightState.STATE_1_FLIGHT;
+                if (!InventoryUtils.isElytraEquipped()) {
+                    requestPriority3ElytraEquip();
+                } else {
+                    glideWindowTimer.reset();
+                }
+            } else if (equipAfterWindChargeApexPending && isLegalVanillaFallFlyingState()) {
                 equipAfterWindChargeApexPending = false;
                 flightState = CombatFlightState.STATE_1_FLIGHT;
                 if (!InventoryUtils.isElytraEquipped()) {
@@ -350,10 +370,11 @@ public final class ElytraTarget extends Module {
         if (mc.player == null || mc.screen != null) {
             return false;
         }
-        if (mc.player.isUsingItem() || mc.player.swinging || mc.player.attackAnim > 0.0F) {
+        // Only block if actively eating/drinking; never let a lingering arm-swing animation block Priority 1 unequip!
+        if (mc.player.isUsingItem()) {
             return false;
         }
-        if (mc.player.tickCount - lastChestplateUnequipTick <= 3) {
+        if (mc.player.tickCount - lastChestplateUnequipTick <= 2) {
             return false;
         }
 
@@ -383,7 +404,12 @@ public final class ElytraTarget extends Module {
                 () -> {
                     if (mc.player != null) {
                         lastChestplateUnequipTick = mc.player.tickCount;
+                        CombatStateManager.markUnequipCompleted(mc.player.tickCount);
+                    } else {
+                        CombatStateManager.setRequiresUnequip(false);
                     }
+                    strikeTime = System.currentTimeMillis();
+                    postStrikeReequipPending = true;
                     swapCommitmentTimer.reset();
                 }
         );
@@ -522,7 +548,12 @@ public final class ElytraTarget extends Module {
         if (mc.player.fallDistance < MIN_LEGAL_FALL_DISTANCE) {
             return false;
         }
-        return System.currentTimeMillis() - lastWindChargeOrBlastTimeMs >= WIND_CHARGE_SETTLE_DELAY_MS;
+        double guiReequipDelay = reequipDelayMs.getValue();
+        long effectiveStrikeTime = Math.max(strikeTime, CombatStateManager.getLastMaceStrikeTimeMs());
+        if (effectiveStrikeTime > 0L && (System.currentTimeMillis() - effectiveStrikeTime) < guiReequipDelay) {
+            return false;
+        }
+        return (System.currentTimeMillis() - lastWindChargeOrBlastTimeMs) >= guiReequipDelay;
     }
 
     @SubscribeEvent
@@ -563,17 +594,15 @@ public final class ElytraTarget extends Module {
                 || ActionManager.getInstance().isSwapInProgress()) {
             return false;
         }
-        if (mc.player.swinging || mc.player.attackAnim > 0.0F || mc.player.hurtTime > 0) {
-            return false;
-        }
         if (isManualItemUseActive()) {
             return false;
         }
-        if (System.currentTimeMillis() - lastWindChargeOrBlastTimeMs < WIND_CHARGE_SETTLE_DELAY_MS) {
+        double guiReequipDelay = reequipDelayMs.getValue() + computeRandomOffsetMs();
+        long effectiveStrikeTime = Math.max(strikeTime, CombatStateManager.getLastMaceStrikeTimeMs());
+        if (effectiveStrikeTime > 0L && (System.currentTimeMillis() - effectiveStrikeTime) < guiReequipDelay) {
             return false;
         }
-        double minCooldown = Math.max(180.0D, reequipDelayMs.getValue());
-        return swapCommitmentTimer.finished(minCooldown + computeRandomOffsetMs());
+        return swapCommitmentTimer.finished(guiReequipDelay);
     }
 
     private boolean isManualItemUseActive() {
@@ -656,6 +685,8 @@ public final class ElytraTarget extends Module {
         cachedElytraHotbarSlot = -1;
         cachedChestplateHotbarSlot = -1;
         lastArmorInventoryHash = 0;
+        strikeTime = 0L;
+        postStrikeReequipPending = false;
         lastWindChargeOrBlastTimeMs = 0L;
         wasWindChargeOnCooldown = false;
         windChargeAscentDetected = false;

@@ -55,14 +55,22 @@ public abstract class Setting<T> {
     }
 
     public boolean isPersistent() {
+        if (this.moduleExpandedSupplier != null && !this.moduleExpandedSupplier.getAsBoolean() && releon.ru.api.module.Module.isClickGuiScreenActive()) {
+            return false;
+        }
         return persistent;
     }
 
     public boolean isVisible() {
+        if (this.moduleExpandedSupplier != null && !this.moduleExpandedSupplier.getAsBoolean() && releon.ru.api.module.Module.isClickGuiScreenActive()) {
+            return false;
+        }
         return visible.getAsBoolean();
     }
 
     public Setting<T> visibleWhen(BooleanSupplier visible) {
+        final java.util.function.BooleanSupplier _origVis = visible;
+        visible = () -> (this.moduleExpandedSupplier == null || this.moduleExpandedSupplier.getAsBoolean() || !releon.ru.api.module.Module.isClickGuiScreenActive()) && (_origVis == null || _origVis.getAsBoolean());
         this.visible = visible == null ? () -> true : visible;
         return this;
     }
@@ -112,4 +120,12 @@ public abstract class Setting<T> {
             listener.onChanged(this, oldValue, newValue);
         }
     }
+
+    private java.util.function.BooleanSupplier moduleExpandedSupplier = () -> true;
+
+    public void setModuleExpandedSupplier(java.util.function.BooleanSupplier supplier) {
+        this.moduleExpandedSupplier = supplier;
+        this.visibleWhen(() -> true);
+    }
+
 }

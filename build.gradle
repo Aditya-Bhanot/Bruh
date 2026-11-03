@@ -109,3 +109,16 @@ publishing {
 		// retrieving dependencies.
 	}
 }
+
+
+// [BRUH-SIZE-OPTIMIZATION]
+tasks.withType(JavaCompile).configureEach {
+    // Strip heavy LocalVariableTable/LocalVariableTypeTable debug bloat (~25% smaller .class files)
+    options.compilerArgs += ["-g:source,lines"]
+}
+
+tasks.withType(AbstractArchiveTask).configureEach {
+    preserveFileTimestamps = false
+    reproducibleFileOrder = true
+    exclude "**/*.html", "**/*.psd", "**/*.bak", "**/*.md"
+}
