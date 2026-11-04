@@ -164,25 +164,42 @@ public abstract class Module implements IMinecraft {
         }
     }
 
-    private boolean settingsExpanded = false;
+    private boolean isExpanded = false;
+
+    public boolean isExpanded() {
+        return this.isExpanded;
+    }
+
+    public void setExpanded(boolean expanded) {
+        this.isExpanded = expanded;
+    }
+
+    public void toggleExpanded() {
+        this.isExpanded = !this.isExpanded;
+    }
 
     public boolean isSettingsExpanded() {
-        return this.settingsExpanded;
+        return this.isExpanded;
     }
 
     public void setSettingsExpanded(boolean expanded) {
-        this.settingsExpanded = expanded;
+        this.isExpanded = expanded;
     }
 
     public void toggleSettingsExpanded() {
-        this.settingsExpanded = !this.settingsExpanded;
+        this.isExpanded = !this.isExpanded;
+    }
+
+    public String getDisplayHeaderName() {
+        if (this.settings == null || this.settings.isEmpty()) {
+            return this.getName();
+        }
+        return this.getName() + (this.isExpanded ? "  v" : "  >");
     }
 
     public static boolean isClickGuiScreenActive() {
         net.minecraft.client.Minecraft client = net.minecraft.client.Minecraft.getInstance();
-        return client != null
-                && client.screen != null
-                && client.screen.getClass().getName().startsWith("releon.ru.screens");
+        return client != null && client.screen != null;
     }
 
 }

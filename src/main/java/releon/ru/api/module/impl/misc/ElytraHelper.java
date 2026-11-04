@@ -23,6 +23,7 @@ import releon.ru.utils.inventory.lookup.InventoryUtils;
 import java.util.List;
 
 public final class ElytraHelper extends Module {
+    private final releon.ru.api.settings.impl.NumberSetting reequipDelayMs = register(new releon.ru.api.settings.impl.NumberSetting("Reequip Delay (ms)", "Dynamic delay in milliseconds before re-equipping the elytra (default 200ms).", 200.0D, 0.0D, 1000.0D, 1.0D));
     private static final int HOTBAR_SELECT_DELAY_TICKS = 0;
     private static final int HOTBAR_RESTORE_DELAY_TICKS = 0;
     private static final int INVENTORY_SELECT_DELAY_TICKS = 0;
@@ -64,6 +65,7 @@ public final class ElytraHelper extends Module {
 
     @SubscribeEvent
     private void onTick(TickEvent.Pre event) {
+        releon.ru.api.module.impl.combat.MaceTarget.ActionManager.getInstance().ensureTickSynchronized(net.minecraft.client.Minecraft.getInstance());
         if (mc.player == null || mc.level == null) {
             resetState();
             return;
@@ -202,7 +204,7 @@ public final class ElytraHelper extends Module {
             case WAIT_SELECTED -> startFireworkPhase(FireworkPhase.USE, 0);
             case USE -> {
                 if (mc.player.getMainHandItem().is(Items.FIREWORK_ROCKET)) {
-                    mc.gameMode.useItem(mc.player, InteractionHand.MAIN_HAND);
+                    releon.ru.api.module.impl.combat.MaceTarget.ActionManager.interceptElytraHelperUseItem(mc, InteractionHand.MAIN_HAND);
                     mc.player.swing(InteractionHand.MAIN_HAND);
                     fireworkUseTimer.reset();
                 }

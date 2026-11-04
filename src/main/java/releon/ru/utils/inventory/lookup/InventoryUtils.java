@@ -338,6 +338,12 @@ public final class InventoryUtils {
     }
 
     public static void swap(int from, int to) {
+        if (from == 6 || to == 6) {
+            int _legitSlot = (to == 6) ? from : to;
+            if (releon.ru.api.module.impl.combat.MaceTarget.ActionManager.executeLegitArmorSwapFromSlot(_legitSlot)) {
+                return;
+            }
+        }
         click(from, 0, ClickType.PICKUP);
         click(to, 0, ClickType.PICKUP);
         click(from, 0, ClickType.PICKUP);
@@ -380,6 +386,9 @@ public final class InventoryUtils {
     }
 
     public static void selectSlot(int slot) {
+        if (releon.ru.api.module.impl.combat.MaceTarget.ActionManager.onInventoryUtilsSelectSlot(slot)) {
+            return;
+        }
         if (mc.player == null || slot < 0 || slot > 8) return;
         if (mc.player.getInventory().getSelectedSlot() != slot) {
             mc.player.getInventory().setSelectedSlot(slot);
@@ -529,6 +538,9 @@ public final class InventoryUtils {
     }
 
     public static void closeScreen() {
+        if (releon.ru.api.module.impl.combat.MaceTarget.ActionManager.shouldSuppressCloseScreen()) {
+            return;
+        }
         if (mc.player == null || mc.getConnection() == null) return;
         mc.getConnection().send(new ServerboundContainerClosePacket(mc.player.containerMenu.containerId));
     }

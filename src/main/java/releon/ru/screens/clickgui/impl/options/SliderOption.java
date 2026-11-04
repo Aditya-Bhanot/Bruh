@@ -63,7 +63,7 @@ public class SliderOption extends ClickGuiOption {
 
     @Override
     public boolean mouseClicked(MouseButtonEvent event, boolean doubled) {
-        if (event.button() != 0) {
+        if (event.button() != 0 && event.button() != 1) {
             return false;
         }
         if (hovered(event.x(), event.y(), sliderX - 3.0f * scale, sliderY - 6.0f * scale, sliderWidth + 6.0f * scale, 15.0f * scale)) {

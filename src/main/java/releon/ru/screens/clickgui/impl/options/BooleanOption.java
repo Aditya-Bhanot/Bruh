@@ -45,7 +45,7 @@ public class BooleanOption extends ClickGuiOption {
 
     @Override
     public boolean mouseClicked(MouseButtonEvent event, boolean doubled) {
-        if (event.button() != 0) {
+        if (event.button() != 0 && event.button() != 1) {
             return false;
         }
         if (hovered(event.x(), event.y(), switchX - 2.0f * scale, switchY - 2.0f * scale, switchWidth + 4.0f * scale, switchHeight + 4.0f * scale)) {

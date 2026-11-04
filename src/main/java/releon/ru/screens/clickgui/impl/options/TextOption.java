@@ -84,7 +84,7 @@ public class TextOption extends ClickGuiOption {
 
     @Override
     public boolean mouseClicked(MouseButtonEvent event, boolean doubled) {
-        if (event.button() != 0) {
+        if (event.button() != 0 && event.button() != 1) {
             return false;
         }
         if (hovered(event.x(), event.y(), controlX, controlY, controlWidth, controlHeight)) {

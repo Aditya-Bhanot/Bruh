@@ -131,7 +131,7 @@ public final class ClickGuiSearchBar {
             }
         }
 
-        if (event.button() != 0) {
+        if (event.button() != 0 && event.button() != 1) {
             return false;
         }
 

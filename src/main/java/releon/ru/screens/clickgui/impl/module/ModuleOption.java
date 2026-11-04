@@ -59,8 +59,10 @@ public class ModuleOption {
         bindProgress = bindAnimation.get();
         enabledAnimation.run(module.isEnabled() ? 1.0 : 0.0, 0.22, Easings.CUBIC_OUT, true);
         enabledAnimation.update();
+        if (this.module.isExpanded()) {
         for (ClickGuiOption option : settings) {
             option.updateVisibility();
+        }
         }
     }
 
@@ -76,14 +78,14 @@ public class ModuleOption {
         int textColor = color(moduleColor, moduleColor, moduleColor, (int) (255 * (1.0f - bindProgress)), alpha);
         float moduleTextX = panelX + 11.0f * scale;
         float moduleTextY = rowY + 5.3f * scale;
-        float moduleTextWidth = Render2D.textWidth(FontType.SEMIBOLD, module.getName(), 8.0f);
+        float moduleTextWidth = Render2D.textWidth(FontType.SEMIBOLD, module.getDisplayHeaderName(), 8.0f);
         float clickPaddingY = 3.0f * scale;
         this.rowClickX = moduleTextX;
         this.rowClickY = moduleTextY - clickPaddingY;
         this.rowClickWidth = moduleTextWidth;
         this.rowClickHeight = 8.0f + clickPaddingY * 2.0f;
         Render2D.rect(panelX + 7.5f * scale, rowY + 6.5f * scale, 1.0f * scale, 8.0f * scale, 0, color(moduleColor, moduleColor, moduleColor, (int) (50 * (1.0f - bindProgress)), alpha));
-        Render2D.text(FontType.SEMIBOLD, module.getName(), moduleTextX, moduleTextY, 8.0f, textColor);
+        Render2D.text(FontType.SEMIBOLD, module.getDisplayHeaderName(), moduleTextX, moduleTextY, 8.0f, textColor);
 
         if (hasSettings()) {
             String dots = "...";
@@ -152,6 +154,7 @@ public class ModuleOption {
         Render2D.pushScissor(graphics, settingsX, settingsY, settingsWidth, clippedHeight);
         try {
             float optionY = settingsY;
+            if (this.module.isExpanded()) {
             for (ClickGuiOption option : settings) {
                 float visibility = option.visibilityProgress();
                 float slotHeight = (option.getHeight() + OPTION_GAP) * scale;
@@ -162,6 +165,7 @@ public class ModuleOption {
                 }
                 optionY += slotHeight * visibility;
             }
+            }
         } finally {
             Render2D.popScissor(graphics);
         }
@@ -171,6 +175,7 @@ public class ModuleOption {
         if (!hasSettings() || settingsProgress <= 0.01f) {
             return;
         }
+        if (this.module.isExpanded()) {
         for (ClickGuiOption option : settings) {
             float visibility = option.visibilityProgress();
             if (visibility <= 0.01f) {
@@ -178,6 +183,7 @@ public class ModuleOption {
             }
             option.setFadeMultiplier(settingsProgress * visibility);
             option.renderOverlay(graphics);
+        }
         }
     }
 
@@ -187,12 +193,18 @@ public class ModuleOption {
         rowClickY = 0.0f;
         rowClickWidth = 0.0f;
         rowClickHeight = 0.0f;
+        if (this.module.isExpanded()) {
         for (ClickGuiOption option : settings) {
             option.resetInteractionFrame();
+        }
         }
     }
 
     public boolean mouseClicked(MouseButtonEvent event, boolean doubled) {
+        if (event.button() == 1 && isRowHovered(event.x(), event.y())) {
+            this.module.toggleExpanded();
+            return true;
+        }
         if (mouseClickedSettings(event, doubled)) {
             return true;
         }
@@ -211,7 +223,7 @@ public class ModuleOption {
             return true;
         }
         if (event.button() == 1 && isRowHovered(event.x(), event.y())) {
-            module.toggleSettingsExpanded();
+            this.module.toggleExpanded();
             return true;
         }
         if (event.button() == 0 && isRowHovered(event.x(), event.y())) {
@@ -233,6 +245,7 @@ public class ModuleOption {
         }
 
         ClickGuiOption handled = null;
+        if (this.module.isExpanded()) {
         for (ClickGuiOption option : settings) {
             if (!option.isVisibleForInteraction()) {
                 continue;
@@ -242,7 +255,9 @@ public class ModuleOption {
                 break;
             }
         }
+        }
         if (handled == null) {
+            if (this.module.isExpanded()) {
             for (int i = settings.size() - 1; i >= 0; i--) {
                 ClickGuiOption option = settings.get(i);
                 if (!option.isVisibleForInteraction()) {
@@ -252,6 +267,7 @@ public class ModuleOption {
                     handled = option;
                     break;
                 }
+            }
             }
         }
         if (handled != null) {
@@ -270,6 +286,7 @@ public class ModuleOption {
 
         boolean hasOpenPopup = false;
         ClickGuiOption handled = null;
+        if (this.module.isExpanded()) {
         for (int i = settings.size() - 1; i >= 0; i--) {
             ClickGuiOption option = settings.get(i);
             if (!option.isVisibleForRender() || !option.hasOpenPopup()) {
@@ -280,6 +297,7 @@ public class ModuleOption {
                 handled = option;
                 break;
             }
+        }
         }
 
         if (handled != null) {
@@ -297,6 +315,7 @@ public class ModuleOption {
         if (!hasSettings() || settingsProgress <= 0.01f) {
             return false;
         }
+        if (this.module.isExpanded()) {
         for (int i = settings.size() - 1; i >= 0; i--) {
             ClickGuiOption option = settings.get(i);
             if (!option.isVisibleForInteraction()) {
@@ -306,6 +325,7 @@ public class ModuleOption {
                 return true;
             }
         }
+        }
         return false;
     }
 
@@ -313,6 +333,7 @@ public class ModuleOption {
         if (!hasSettings() || settingsProgress <= 0.01f) {
             return false;
         }
+        if (this.module.isExpanded()) {
         for (int i = settings.size() - 1; i >= 0; i--) {
             ClickGuiOption option = settings.get(i);
             if (!option.isVisibleForInteraction()) {
@@ -321,6 +342,7 @@ public class ModuleOption {
             if (option.mouseDragged(event, dragX, dragY)) {
                 return true;
             }
+        }
         }
         return false;
     }
@@ -337,6 +359,7 @@ public class ModuleOption {
         if (!hasSettings() || settingsProgress <= 0.01f) {
             return false;
         }
+        if (this.module.isExpanded()) {
         for (int i = settings.size() - 1; i >= 0; i--) {
             ClickGuiOption option = settings.get(i);
             if (!option.isVisibleForInteraction()) {
@@ -346,6 +369,7 @@ public class ModuleOption {
                 return true;
             }
         }
+        }
         return false;
     }
 
@@ -353,6 +377,7 @@ public class ModuleOption {
         if (!hasSettings() || settingsProgress <= 0.01f) {
             return false;
         }
+        if (this.module.isExpanded()) {
         for (int i = settings.size() - 1; i >= 0; i--) {
             ClickGuiOption option = settings.get(i);
             if (!option.isVisibleForInteraction()) {
@@ -361,6 +386,7 @@ public class ModuleOption {
             if (option.charTyped(event)) {
                 return true;
             }
+        }
         }
         return false;
     }
@@ -390,12 +416,14 @@ public class ModuleOption {
 
     private float computeSettingsHeight() {
         float height = 0.0f;
+        if (this.module.isExpanded()) {
         for (ClickGuiOption option : settings) {
             float visibility = option.visibilityProgress();
             if (visibility <= 0.01f) {
                 continue;
             }
             height += (option.getHeight() + OPTION_GAP) * visibility;
+        }
         }
         return height <= 0.01f ? 0.0f : height + 1.0f;
     }
@@ -428,10 +456,12 @@ public class ModuleOption {
     }
 
     private void closePopupsExcept(ClickGuiOption keepOpen) {
+        if (this.module.isExpanded()) {
         for (ClickGuiOption option : settings) {
             if (option != keepOpen) {
                 option.closePopup();
             }
+        }
         }
     }
 
