@@ -65,7 +65,9 @@
     "MovePlayerPacketAccessor",
     "InventorySlotSyncMixin"
   ],
-  "client": [],
+  "client": [
+    "accessor.CarriedItemSyncInvoker"
+  ],
   "injectors": {
     "defaultRequire": 1
   }

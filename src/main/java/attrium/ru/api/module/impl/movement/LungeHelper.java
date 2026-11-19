@@ -7,7 +7,7 @@ import net.minecraft.core.Direction;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.protocol.game.ServerboundPlayerActionPacket;
-import net.minecraft.network.protocol.game.ServerboundSetCarriedItemPacket;
+import attrium.ru.mixin.accessor.CarriedItemSyncInvoker;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.item.ItemStack;
 import org.lwjgl.glfw.GLFW;
@@ -461,8 +461,8 @@ public class LungeHelper extends Module {
         }
         if (client.player.getInventory().getSelectedSlot() != targetSlot) {
             client.player.getInventory().setSelectedSlot(targetSlot);
-            if (client.player.connection != null) {
-                client.player.connection.send(new ServerboundSetCarriedItemPacket(targetSlot));
+            if (client.gameMode != null) {
+                ((CarriedItemSyncInvoker) client.gameMode).attrium$ensureHasSentCarriedItem();
             }
         }
     }
