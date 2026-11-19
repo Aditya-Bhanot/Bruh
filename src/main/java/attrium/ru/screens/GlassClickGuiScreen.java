@@ -1,0 +1,3092 @@
+package attrium.ru.screens;
+
+import com.mojang.blaze3d.platform.InputConstants;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.GuiGraphics;
+import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.Style;
+import net.minecraft.util.Mth;
+import net.minecraft.world.item.Items;
+import org.lwjgl.glfw.GLFW;
+import org.lwjgl.glfw.GLFWCharCallback;
+import org.lwjgl.glfw.GLFWKeyCallback;
+import net.minecraft.client.gui.components.PlayerFaceRenderer;
+import net.minecraft.client.multiplayer.PlayerInfo;
+import attrium.ru.api.module.Module;
+import attrium.ru.manager.FriendManager;
+import attrium.ru.manager.FriendManager.FriendRecord;
+import attrium.ru.api.module.ModuleCategory;
+import attrium.ru.api.module.impl.combat.MaceTarget;
+import attrium.ru.api.module.impl.combat.SilentAura;
+import attrium.ru.api.module.impl.movement.ElytraTarget;
+import attrium.ru.api.module.impl.movement.LungeHelper;
+import attrium.ru.api.settings.Setting;
+import attrium.ru.api.settings.impl.BooleanSetting;
+import attrium.ru.api.settings.impl.ModeSetting;
+import attrium.ru.api.settings.impl.MultiModeSetting;
+import attrium.ru.api.settings.impl.NumberSetting;
+import attrium.ru.utils.sound.SoundUtil;
+
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Locale;
+
+/**
+ * Attrium ClickGUI: Isolated Regular Nunito Typography (`nunito_regular.ttf`),
+ * Action-Macro AutoLunge Support (Hides ON/OFF Toggle Pill, Keybind-Only Trigger),
+ * Type-Safe Keybinds, World-Join Null Guards, and Tactile UI Volume Mixer.
+ */
+public class GlassClickGuiScreen extends Screen {
+    private static GlassClickGuiScreen instance;
+
+    // =========================================================================
+    // Premium Outline-Free Glassmorphism Palette
+    // =========================================================================
+    public static final int COLOR_WINDOW_BG = 0xE0101218;           // Main 16px rounded window background
+    private static final int COLOR_SCREEN_BACKDROP = 0x6007080C;
+    private static final int COLOR_TOP_NAV_BG = 0xD0171A24;
+    private static final int COLOR_TOP_NAV_ACTIVE_PILL = 0xFF282C3C;
+
+    private static final int COLOR_SEARCH_BG = 0xE0171923;
+    private static final int COLOR_SEARCH_BG_FOCUSED = 0xEE1F2230;
+
+    // Category Pills: Solid White active w/ dark text; Transparent inactive w/ white text
+    private static final int COLOR_PILL_ACTIVE_BG = 0xFFFFFFFF;
+    private static final int COLOR_PILL_ACTIVE_TEXT = 0xFF11131A;
+    private static final int COLOR_PILL_INACTIVE_BG = 0x00191C26;
+    private static final int COLOR_PILL_INACTIVE_HOVER = 0x2EFFFFFF;
+
+    // Module Rows: Transparent unless hovered; subtle dark 6px rounded rect on hover
+    private static final int COLOR_ROW_EVEN_BG = 0x00151720;
+    private static final int COLOR_ROW_ODD_BG = 0x00181B26;
+    private static final int COLOR_ROW_HOVER_BG = 0xD81C202E;
+    private static final int COLOR_ICON_BOX_BG = 0xE0181B26;
+    private static final int COLOR_ICON_BOX_HOVER_BG = 0xEE232738;
+    private static final int COLOR_DRAWER_BG = 0xC8131620;
+
+    public static final int COLOR_TEXT_BRIGHT_WHITE = 0xFFFFFFFF;   // Module Names & Category Tabs (0xFFFFFF)
+    public static final int COLOR_TEXT_DIMMED_GRAY = 0xFFAAAAAA;    // Module Descriptions & Bind Text (0xAAAAAA)
+
+    private static final int COLOR_BIND_BG = 0xCC1E212E;
+    private static final int COLOR_BIND_BG_HOVER = 0xEE2C3044;
+    private static final int COLOR_BIND_LISTENING = 0xFF4E4C78;
+
+    // iOS Pill Toggle (24x12, Radius 6): Gray to Accent/White track with solid white circle knob
+    private static final int COLOR_TOGGLE_ON_BG = 0xFF6E75A8;
+    private static final int COLOR_TOGGLE_OFF_BG = 0xFF2A2D3C;
+    private static final int COLOR_TOGGLE_KNOB_ON = 0xFFFFFFFF;
+    private static final int COLOR_TOGGLE_KNOB_OFF = 0xFFFFFFFF;
+
+    // =========================================================================
+    // Layout & Radius Constants
+    // =========================================================================
+    private static final int WINDOW_CORNER_RADIUS = 16;             // 16px Main Container Radius
+    private static final int SEARCH_BAR_RADIUS = 10;                // 10px Search Bar Radius
+    private static final int CATEGORY_PILL_RADIUS = 10;             // Full Pill Radius for Categories
+    private static final int ICON_BOX_RADIUS = 8;                   // 8px Module Icon Square Radius
+    private static final int ROW_AND_SEARCH_RADIUS = 6;             // 6px Hovered Row Radius
+    private static final int TOGGLE_PILL_WIDTH = 24;                // 24px iOS Pill Switch Width
+    private static final int TOGGLE_PILL_HEIGHT = 12;               // 12px iOS Pill Switch Height
+    private static final int TOGGLE_PILL_RADIUS = 6;                // 6px iOS Pill Switch Radius
+    private static final int MAX_PRECOMPUTED_RADIUS = 20;
+
+    private static final int BASE_WINDOW_WIDTH = 600;
+    private static final int BASE_WINDOW_HEIGHT = 390;
+    private static final int HEADER_HEIGHT = 76;
+    private static final int ROW_HEIGHT = 44;
+    private static final int ROW_GAP = 0;                           // Flush module rows (0px gap)
+    private static final int SETTING_ROW_HEIGHT = 26;
+    private static final int LIST_SIDE_PADDING = 18;
+
+    private static final String[] TOP_TABS = new String[]{
+            "Modules", "Configs", "HUD", "Friends", "Client"
+    };
+
+    private static final String[] CATEGORY_PILLS = new String[]{
+            "All", "Combat", "Movement", "Render", "Player", "World", "Misc"
+    };
+
+    // =========================================================================
+    // Pre-Computed Sub-Pixel Anti-Aliased Corner Tables (Radii 1..14)
+    // =========================================================================
+    private static final int[][] AA_SOLID_INSET = new int[MAX_PRECOMPUTED_RADIUS + 1][MAX_PRECOMPUTED_RADIUS];
+    private static final float[][] AA_EDGE_COVERAGE = new float[MAX_PRECOMPUTED_RADIUS + 1][MAX_PRECOMPUTED_RADIUS];
+
+    static {
+        for (int r = 2; r <= MAX_PRECOMPUTED_RADIUS; r++) {
+            for (int dy = 0; dy < r; dy++) {
+                double yCenter = (r - 0.5D) - dy;
+                double exactSpan = Math.sqrt(Math.max(0.0D, (double) (r * r) - yCenter * yCenter));
+                double exactInset = (double) r - exactSpan;
+                int solidInset = (int) Math.ceil(exactInset);
+                float edgeAlpha = (float) Mth.clamp(1.0D - (exactInset - Math.floor(exactInset)), 0.15D, 0.95D);
+                AA_SOLID_INSET[r][dy] = Math.max(0, solidInset);
+                AA_EDGE_COVERAGE[r][dy] = edgeAlpha;
+            }
+        }
+    }
+
+    // =========================================================================
+    // Strictly Isolated Nunito Regular Font Style (No Bold Style!)
+    // =========================================================================
+    private static Style nunitoRegularStyle = Style.EMPTY;
+    private static Style nunitoBoldStyle = Style.EMPTY;
+    private static boolean nunitoStylesInitialized = false;
+
+    // =========================================================================
+    // Pre-Allocated 2-Pass Batch Queues (Pass 1: Anti-Aliased Rounded Quads -> Pass 2: Nunito Text)
+    // =========================================================================
+    private static final int MAX_BATCHED_QUADS = 6144;
+    private static final int MAX_BATCHED_TEXTS = 512;
+
+    private final int[] bgQuadQueue = new int[MAX_BATCHED_QUADS * 5];
+    private int bgQuadCount = 0;
+
+    private final Component[] textComponentQueue = new Component[MAX_BATCHED_TEXTS];
+    private final int[] textCoordsAndColorQueue = new int[MAX_BATCHED_TEXTS * 3];
+    private int textQueueCount = 0;
+
+    // =========================================================================
+    // Cached Reflection & Chained GLFW Input Handles
+    // =========================================================================
+    private static Field cachedModuleKeyField = null;
+    private static Method cachedModuleGetKeyMethod = null;
+    private static Method cachedModuleSetKeyMethod = null;
+    private static boolean moduleKeyReflectionInitialized = false;
+
+    private static long hookedWindowHandle = 0L;
+    private static GLFWKeyCallback prevKeyCallback = null;
+    private static GLFWCharCallback prevCharCallback = null;
+    private char lastKeyAppendedChar = 0;
+    private long lastKeyAppendTimeNs = 0L;
+
+    // =========================================================================
+    // Dirty-Flag Cached Structures
+    // =========================================================================
+    private static final class CachedSettingEntry {
+        final Setting<?> setting;
+        final String name;
+        final Component nameComponent;
+        final int type; // 0 = Boolean, 1 = Number, 2 = Mode, 3 = MultiMode
+        final double step;
+        final String[] modeOptions;
+        final Component[] modeOptionComponents;
+        final int[] modePillWidths;
+
+        int cachedNameWidth = 0;
+        boolean visible = true;
+        float toggleAnim = 0.0F;
+
+        double lastCachedNumberValue = Double.NaN;
+        String cachedFormattedValue = "";
+        Component cachedValueComponent = Component.empty();
+        int cachedValueTextWidth = 0;
+
+        CachedSettingEntry(
+                Setting<?> setting,
+                String name,
+                int type,
+                double step,
+                String[] modeOptions
+        ) {
+            this.setting = setting;
+            this.name = (name != null && !name.isEmpty()) ? name : "Setting";
+            this.nameComponent = Component.literal(this.name).withStyle(nunitoRegularStyle);
+            this.type = type;
+            this.step = step > 0.0D ? step : 0.1D;
+            this.modeOptions = modeOptions != null ? modeOptions : new String[0];
+            this.modeOptionComponents = new Component[this.modeOptions.length];
+            for (int i = 0; i < this.modeOptions.length; i++) {
+                String opt = this.modeOptions[i] != null ? this.modeOptions[i] : "";
+                this.modeOptionComponents[i] = Component.literal(opt).withStyle(nunitoRegularStyle);
+            }
+            this.modePillWidths = new int[this.modeOptions.length];
+            if (type == 0 && setting instanceof BooleanSetting bs) {
+                Object raw = ((Setting<?>) bs).getValue();
+                this.toggleAnim = (raw instanceof Boolean b && b) ? 1.0F : 0.0F;
+            }
+        }
+    }
+
+    private static final class CachedModuleRow {
+        final Module module;
+        final String name;
+        final String nameLower;
+        final String description;
+        final String descriptionLower;
+        final Component nunitoTitle;
+        final Component nunitoRegularDesc;
+        final int categoryPillIndex;
+        final CachedSettingEntry[] settings;
+
+        boolean expanded = false;
+        boolean wasHoveredLastFrame = false;
+        float hoverAnim = 0.0F;
+        float expandAnim = 0.0F;
+        float animatedDrawerHeight = 0.0F;
+        float toggleAnim = 0.0F;
+        float bindHoverAnim = 0.0F;
+
+        int cachedYOffset = 0;
+        int cachedTotalHeight = ROW_HEIGHT;
+        int cachedVisibleSettingCount = 0;
+
+        int boundKey = -1;
+        boolean wasKeyDownInGame = false;
+        long lastBindTriggerMs = 0L;
+
+        String cachedBindText = "NONE";
+        Component cachedBindComponent = Component.literal("NONE");
+        int cachedBindTextWidth = 24;
+        int cachedBindPillWidth = 34;
+        int lastObservedKey = Integer.MIN_VALUE;
+
+        CachedModuleRow(
+                Module module,
+                String name,
+                String description,
+                int categoryPillIndex,
+                CachedSettingEntry[] settings,
+                int initialKey
+        ) {
+            this.module = module;
+            this.name = (name != null && !name.isEmpty()) ? name : "Module";
+            this.nameLower = this.name.toLowerCase(Locale.ROOT);
+            this.description = (description != null && !description.isEmpty())
+                    ? description
+                    : "Configure " + this.name + " parameters";
+            this.descriptionLower = this.description.toLowerCase(Locale.ROOT);
+            this.nunitoTitle = Component.literal(this.name).withStyle(nunitoRegularStyle);
+            this.nunitoRegularDesc = Component.literal(this.description).withStyle(nunitoRegularStyle);
+            this.categoryPillIndex = categoryPillIndex;
+            this.settings = settings != null ? settings : new CachedSettingEntry[0];
+            this.toggleAnim = module.isEnabled() ? 1.0F : 0.0F;
+            this.boundKey = (initialKey == 0 || initialKey == GLFW.GLFW_KEY_UNKNOWN) ? -1 : initialKey;
+            this.cachedBindComponent = Component.literal("NONE").withStyle(nunitoRegularStyle);
+        }
+    }
+
+    private CachedModuleRow[] allModuleRows = new CachedModuleRow[0];
+    private CachedModuleRow[] filteredRows = new CachedModuleRow[0];
+    private int filteredRowCount = 0;
+    private boolean moduleRegistryInitialized = false;
+
+    private CachedSettingEntry clientTabUiVolumeEntry;
+
+    private boolean windowGeometryDirty = true;
+    private boolean stringWidthsDirty = true;
+    private boolean filterDirty = true;
+    private boolean layoutDirty = true;
+
+    private int lastScreenWidth = -1;
+    private int lastScreenHeight = -1;
+
+    private int activeTopTabIndex = 0;
+    private int activeCategoryIndex = 0;
+    private int navContainerX, navContainerY, navContainerW, navContainerH;
+    private final int[] topTabX = new int[TOP_TABS.length];
+    private final int[] topTabW = new int[TOP_TABS.length];
+    private final int[] topTabTextX = new int[TOP_TABS.length];
+    private final float[] topTabHoverAnim = new float[TOP_TABS.length];
+    private final Component[] topTabComponents = new Component[TOP_TABS.length];
+
+    private final int[] categoryPillX = new int[CATEGORY_PILLS.length];
+    private final int[] categoryPillW = new int[CATEGORY_PILLS.length];
+    private final int[] categoryPillTextX = new int[CATEGORY_PILLS.length];
+    private final float[] categoryPillHoverAnim = new float[CATEGORY_PILLS.length];
+    private final Component[] categoryPillComponents = new Component[CATEGORY_PILLS.length];
+
+    private boolean searchFocused = false;
+    private String searchQuery = "";
+    private String searchQueryLower = "";
+    private Component cachedSearchDisplayComponent = Component.literal("Search");
+    private String lastRenderedSearchString = "";
+    private float searchFocusAnim = 0.0F;
+    private final Component[] cachedSecondaryTabComponents = new Component[TOP_TABS.length];
+    private final int[] cachedSecondaryTabMessageWidths = new int[TOP_TABS.length];
+
+    private Component chevronCollapsedComponent;
+    private Component chevronExpandedComponent;
+    private Component bindDotsComponent;
+    private Component clearXComponent;
+    private Component backspaceLtComponent;
+    private Component slashComponent;
+    private Component clientAudioHeaderComponent;
+
+    private float scrollOffset = 0.0F;
+    private float targetScrollOffset = 0.0F;
+    private float maxScrollOffset = 0.0F;
+    private int totalContentHeight = 0;
+    private boolean draggingScrollbar = false;
+    private float scrollbarDragStartMouseY = 0.0F;
+    private float scrollbarDragStartOffset = 0.0F;
+
+    private CachedModuleRow bindingRow = null;
+    private boolean waitingForBindRelease = false;
+    private CachedSettingEntry activeDraggingSliderEntry = null;
+    private int activeSliderTrackX = 0;
+    private int activeSliderTrackW = 1;
+
+    private boolean wasLeftMouseDown = false;
+    private boolean wasRightMouseDown = false;
+    private long lastFrameTimeNs = 0L;
+
+    private int winX, winY, winW, winH;
+    private int listLeft, listTop, listRight, listBottom, listHeight, rowWidth;
+    private int searchBoxX, searchBoxY, searchBoxW, searchBoxH;
+    private int searchClearBtnX, searchBackspaceBtnX, searchBtnY, searchSlashBadgeX;
+
+    // Friends Tab State (Index 3 — Replaced "Theme" Tab)
+    private boolean friendInputFocused = false;
+    private String friendInputText = "";
+    private Component cachedFriendInputComponent = Component.literal("Enter username...");
+    private String lastRenderedFriendInputString = "";
+    private boolean listeningForFriendBind = false;
+    private float friendScrollOffset = 0.0F;
+    private float friendTargetScrollOffset = 0.0F;
+    private float friendMaxScrollOffset = 0.0F;
+    private int friendInputBoxX, friendInputBoxY, friendInputBoxW, friendInputBoxH;
+    private int friendAddBtnX, friendAddBtnY, friendAddBtnW, friendAddBtnH;
+    private int friendBindBtnX, friendBindBtnY, friendBindBtnW, friendBindBtnH;
+
+    public GlassClickGuiScreen() {
+        super(Component.literal("ClickGUI"));
+        instance = this;
+        initIsolatedNunitoStylesOnce();
+        this.clientTabUiVolumeEntry = new CachedSettingEntry(
+                SoundUtil.UI_VOLUME_SETTING,
+                "UI Volume",
+                1,
+                0.05D,
+                new String[0]
+        );
+    }
+
+    public static GlassClickGuiScreen getInstance() {
+        if (instance == null) {
+            instance = new GlassClickGuiScreen();
+        }
+        return instance;
+    }
+
+    public boolean isSearchBarFocused() {
+        return searchFocused || friendInputFocused || bindingRow != null || listeningForFriendBind;
+    }
+
+    public static Style getNunitoBoldStyle() {
+        initIsolatedNunitoStylesOnce();
+        return nunitoRegularStyle;
+    }
+
+    public static Style getNunitoRegularStyle() {
+        initIsolatedNunitoStylesOnce();
+        return nunitoRegularStyle;
+    }
+
+    private static void initIsolatedNunitoStylesOnce() {
+        if (nunitoStylesInitialized) {
+            return;
+        }
+        nunitoStylesInitialized = true;
+        boolean hasNunitoAssets = GlassClickGuiScreen.class.getResource("/assets/attrium/font/nunito_regular.json") != null
+                && GlassClickGuiScreen.class.getResource("/assets/attrium/font/nunito_regular.ttf") != null;
+        if (hasNunitoAssets) {
+            Style resolvedRegular = loadIsolatedFontStyle("attrium", "nunito_regular");
+            nunitoRegularStyle = resolvedRegular != null ? resolvedRegular.withBold(false) : Style.EMPTY.withBold(false);
+        } else {
+            // Safe fallback to vanilla Minecraft default font so text is NEVER invisible when nunito_regular.ttf is absent
+            nunitoRegularStyle = Style.EMPTY.withBold(false);
+        }
+        nunitoBoldStyle = nunitoRegularStyle;
+    }
+
+    private static Style loadIsolatedFontStyle(String namespace, String path) {
+        try {
+            Object sampleRl = BuiltInRegistries.ITEM.getKey(Items.APPLE);
+            if (sampleRl == null) {
+                return null;
+            }
+            Class<?> rlClass = sampleRl.getClass();
+            String safeNamespace = namespace.toLowerCase(Locale.ROOT);
+            String safePath = path.toLowerCase(Locale.ROOT);
+            String expectedString = safeNamespace + ":" + safePath;
+            Object fontId = null;
+
+            for (Method m : rlClass.getDeclaredMethods()) {
+                if (Modifier.isStatic(m.getModifiers())
+                        && m.getParameterCount() == 2
+                        && m.getParameterTypes()[0] == String.class
+                        && m.getParameterTypes()[1] == String.class
+                        && rlClass.isAssignableFrom(m.getReturnType())) {
+                    try {
+                        m.setAccessible(true);
+                        Object candidate = m.invoke(null, safeNamespace, safePath);
+                        if (candidate != null && expectedString.equals(candidate.toString())) {
+                            fontId = candidate;
+                            break;
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
+
+            if (fontId == null) {
+                for (Method m : rlClass.getDeclaredMethods()) {
+                    if (Modifier.isStatic(m.getModifiers())
+                            && m.getParameterCount() == 1
+                            && m.getParameterTypes()[0] == String.class
+                            && rlClass.isAssignableFrom(m.getReturnType())) {
+                        try {
+                            m.setAccessible(true);
+                            Object candidate = m.invoke(null, expectedString);
+                            if (candidate != null && expectedString.equals(candidate.toString())) {
+                                fontId = candidate;
+                                break;
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                }
+            }
+
+            if (fontId != null) {
+                for (Method wm : Style.class.getDeclaredMethods()) {
+                    if (!Modifier.isStatic(wm.getModifiers())
+                            && wm.getParameterCount() == 1
+                            && wm.getReturnType() == Style.class) {
+                        Class<?> paramType = wm.getParameterTypes()[0];
+                        if (paramType.isAssignableFrom(rlClass)) {
+                            wm.setAccessible(true);
+                            Style result = (Style) wm.invoke(Style.EMPTY, fontId);
+                            if (result != null) {
+                                return result.withBold(false);
+                            }
+                        } else if (!paramType.isPrimitive()
+                                && paramType != String.class
+                                && paramType != Boolean.class
+                                && paramType != Integer.class) {
+                            for (Constructor<?> ctor : paramType.getDeclaredConstructors()) {
+                                if (ctor.getParameterCount() == 1
+                                        && ctor.getParameterTypes()[0].isAssignableFrom(rlClass)) {
+                                    ctor.setAccessible(true);
+                                    Object fontDesc = ctor.newInstance(fontId);
+                                    wm.setAccessible(true);
+                                    Style result = (Style) wm.invoke(Style.EMPTY, fontDesc);
+                                    if (result != null) {
+                                        return result.withBold(false);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    /**
+     * Identifies whether a module row is a pure keybind-driven Action Macro (AutoLunge)
+     * rather than an ON/OFF toggleable module.
+     */
+    private static boolean isActionMacroRow(CachedModuleRow row) {
+        if (row == null) {
+            return false;
+        }
+        return (row.module instanceof LungeHelper)
+                || "LungeHelper".equalsIgnoreCase(row.name)
+                || "AutoLunge".equalsIgnoreCase(row.name)
+                || "Lunge".equalsIgnoreCase(row.name);
+    }
+
+    @Override
+    protected void init() {
+        super.init();
+        initIsolatedNunitoStylesOnce();
+        ensureGlfwCallbacksHooked();
+        ensureModuleCacheReady();
+        windowGeometryDirty = true;
+        layoutDirty = true;
+        processDirtyCachesIfNeeded();
+        lastFrameTimeNs = System.nanoTime();
+    }
+
+    private void ensureModuleCacheReady() {
+        if (!moduleRegistryInitialized || allModuleRows.length == 0) {
+            rebuildModuleCacheFromRegistry();
+            moduleRegistryInitialized = true;
+            stringWidthsDirty = true;
+            filterDirty = true;
+        }
+    }
+
+    @Override
+    public boolean isPauseScreen() {
+        return false;
+    }
+
+    @Override
+    public void renderBackground(GuiGraphics guiGraphics, int mouseX, int mouseY, float partialTick) {
+        // Zero background blur shader overhead
+    }
+
+    public void onMouseScroll(double verticalDelta) {
+        if (verticalDelta == 0.0D) {
+            return;
+        }
+        float step = (float) (-verticalDelta * 36.0D);
+        if (activeTopTabIndex == 3) {
+            friendTargetScrollOffset = Mth.clamp(friendTargetScrollOffset + step, 0.0F, friendMaxScrollOffset);
+        } else {
+            targetScrollOffset = Mth.clamp(targetScrollOffset + step, 0.0F, maxScrollOffset);
+        }
+    }
+
+    @Override
+    public boolean mouseScrolled(double mouseX, double mouseY, double scrollX, double scrollY) {
+        onMouseScroll(scrollY);
+        return true;
+    }
+
+    // =========================================================================
+    // Global In-Game Keybind & AutoLunge Action Macro Listener
+    // =========================================================================
+    public static void pollGlobalKeybinds() {
+        Minecraft mc = Minecraft.getInstance();
+        if (mc == null || mc.player == null || mc.level == null || mc.getWindow() == null) {
+            return;
+        }
+        GlassClickGuiScreen gui = getInstance();
+        gui.ensureGlfwCallbacksHooked();
+        gui.ensureModuleCacheReady();
+
+        if (mc.screen != null) {
+            for (int i = 0; i < gui.allModuleRows.length; i++) {
+                gui.allModuleRows[i].wasKeyDownInGame = false;
+            }
+            // Allow AutoLunge to restore previousSlot if a GUI screen was opened while holding the bind
+            LungeHelper.tickMacroGlobal(mc, LungeHelper.getMacroBoundKey());
+            return;
+        }
+
+        long windowHandle = mc.getWindow().handle();
+        if (windowHandle == 0L) {
+            return;
+        }
+
+        long nowMs = System.currentTimeMillis();
+        boolean lungeRowHandled = false;
+
+        for (int i = 0; i < gui.allModuleRows.length; i++) {
+            CachedModuleRow row = gui.allModuleRows[i];
+            int key = gui.resolveEffectiveBindKey(row);
+
+            // AutoLunge is a pure keybind-driven Action Macro (single press or Hold-to-Spam + memory slot swap)
+            if (isActionMacroRow(row)) {
+                lungeRowHandled = true;
+                LungeHelper.tickMacroGlobal(mc, key);
+                continue;
+            }
+
+            if (key == -1 || key == 0 || key == GLFW.GLFW_KEY_UNKNOWN) {
+                row.wasKeyDownInGame = false;
+                continue;
+            }
+
+            if ("ClickGUI".equalsIgnoreCase(row.name) || "ClickGui".equalsIgnoreCase(row.name)) {
+                continue;
+            }
+
+            boolean isDown;
+            if (key < -1) {
+                int btn = -100 - key;
+                isDown = btn >= 0 && btn <= GLFW.GLFW_MOUSE_BUTTON_LAST
+                        && GLFW.glfwGetMouseButton(windowHandle, btn) == GLFW.GLFW_PRESS;
+            } else {
+                isDown = key >= GLFW.GLFW_KEY_SPACE && key <= GLFW.GLFW_KEY_LAST
+                        && (InputConstants.isKeyDown(mc.getWindow(), key)
+                        || GLFW.glfwGetKey(windowHandle, key) == GLFW.GLFW_PRESS);
+            }
+
+            if (isDown && !row.wasKeyDownInGame) {
+                if (nowMs - row.lastBindTriggerMs > 60L) {
+                    row.lastBindTriggerMs = nowMs;
+                    row.module.toggle();
+                }
+            }
+            row.wasKeyDownInGame = isDown;
+        }
+
+        if (!lungeRowHandled) {
+            LungeHelper.tickMacroGlobal(mc, LungeHelper.getMacroBoundKey());
+        }
+
+        int fKey = FriendManager.getFriendBindKey();
+        if (fKey != -1 && fKey != 0 && fKey != GLFW.GLFW_KEY_UNKNOWN) {
+            boolean fDown;
+            if (fKey < -1) {
+                int btn = -100 - fKey;
+                fDown = btn >= 0 && btn <= GLFW.GLFW_MOUSE_BUTTON_LAST
+                        && GLFW.glfwGetMouseButton(windowHandle, btn) == GLFW.GLFW_PRESS;
+            } else {
+                fDown = fKey >= GLFW.GLFW_KEY_SPACE && fKey <= GLFW.GLFW_KEY_LAST
+                        && (InputConstants.isKeyDown(mc.getWindow(), fKey)
+                        || GLFW.glfwGetKey(windowHandle, fKey) == GLFW.GLFW_PRESS);
+            }
+            FriendManager.pollFriendKeybindInGame(mc, fDown);
+        } else {
+            FriendManager.pollFriendKeybindInGame(mc, false);
+        }
+    }
+
+    private void onGlobalKeyPressFromCallback(int key) {
+        if (key <= 0 || key == GLFW.GLFW_KEY_UNKNOWN) {
+            return;
+        }
+        Minecraft mc = Minecraft.getInstance();
+        if (mc == null || mc.player == null || mc.level == null || mc.screen != null) {
+            return;
+        }
+        ensureModuleCacheReady();
+        long nowMs = System.currentTimeMillis();
+        for (int i = 0; i < allModuleRows.length; i++) {
+            CachedModuleRow row = allModuleRows[i];
+            if ("ClickGUI".equalsIgnoreCase(row.name) || "ClickGui".equalsIgnoreCase(row.name)) {
+                continue;
+            }
+            // Skip AutoLunge here so it is handled as an Action Macro in pollGlobalKeybinds() rather than toggled ON/OFF
+            if (isActionMacroRow(row)) {
+                continue;
+            }
+            int bound = resolveEffectiveBindKey(row);
+            if (bound == key) {
+                row.wasKeyDownInGame = true;
+                if (nowMs - row.lastBindTriggerMs > 60L) {
+                    row.lastBindTriggerMs = nowMs;
+                    row.module.toggle();
+                }
+            }
+        }
+    }
+
+    private static int lerpColor(int c1, int c2, float t) {
+        float clamped = Mth.clamp(t, 0.0F, 1.0F);
+        if (clamped <= 0.001F) return c1;
+        if (clamped >= 0.999F) return c2;
+
+        int a1 = (c1 >>> 24) & 0xFF;
+        int r1 = (c1 >>> 16) & 0xFF;
+        int g1 = (c1 >>> 8) & 0xFF;
+        int b1 = c1 & 0xFF;
+
+        int a2 = (c2 >>> 24) & 0xFF;
+        int r2 = (c2 >>> 16) & 0xFF;
+        int g2 = (c2 >>> 8) & 0xFF;
+        int b2 = c2 & 0xFF;
+
+        int a = Math.round(a1 + (a2 - a1) * clamped);
+        int r = Math.round(r1 + (r2 - r1) * clamped);
+        int g = Math.round(g1 + (g2 - g1) * clamped);
+        int b = Math.round(b1 + (b2 - b1) * clamped);
+
+        return (a << 24) | (r << 16) | (g << 8) | b;
+    }
+
+    private static int multiplyAlpha(int color, float factor) {
+        int baseAlpha = (color >>> 24) & 0xFF;
+        int scaledAlpha = Mth.clamp(Math.round(baseAlpha * factor), 0, 255);
+        return (scaledAlpha << 24) | (color & 0x00FFFFFF);
+    }
+
+    private void resetBatchQueues() {
+        bgQuadCount = 0;
+        textQueueCount = 0;
+    }
+
+    private void enqueueBgQuad(int x1, int y1, int x2, int y2, int color) {
+        if (x2 <= x1 || y2 <= y1 || (color >>> 24) == 0 || bgQuadCount >= MAX_BATCHED_QUADS) {
+            return;
+        }
+        int idx = bgQuadCount * 5;
+        bgQuadQueue[idx] = x1;
+        bgQuadQueue[idx + 1] = y1;
+        bgQuadQueue[idx + 2] = x2;
+        bgQuadQueue[idx + 3] = y2;
+        bgQuadQueue[idx + 4] = color;
+        bgQuadCount++;
+    }
+
+    private void drawRoundedRect(int x, int y, int w, int h, int radius, int color) {
+        if (w <= 0 || h <= 0 || (color >>> 24) == 0) {
+            return;
+        }
+        int r = Mth.clamp(Math.min(radius, Math.min(w / 2, h / 2)), 0, MAX_PRECOMPUTED_RADIUS);
+        if (r <= 1) {
+            enqueueBgQuad(x, y, x + w, y + h, color);
+            return;
+        }
+
+        if (h > 2 * r) {
+            enqueueBgQuad(x, y + r, x + w, y + h - r, color);
+        }
+
+        int[] insets = AA_SOLID_INSET[r];
+        float[] coverages = AA_EDGE_COVERAGE[r];
+
+        for (int dy = 0; dy < r; dy++) {
+            int inset = insets[dy];
+            int topY = y + dy;
+            int botY = y + h - 1 - dy;
+
+            int leftSolidX = x + inset;
+            int rightSolidX = x + w - inset;
+
+            if (rightSolidX > leftSolidX) {
+                enqueueBgQuad(leftSolidX, topY, rightSolidX, topY + 1, color);
+                if (botY != topY) {
+                    enqueueBgQuad(leftSolidX, botY, rightSolidX, botY + 1, color);
+                }
+            }
+
+            if (inset > 0) {
+                int aaColor = multiplyAlpha(color, coverages[dy]);
+                int leftAaX = leftSolidX - 1;
+                int rightAaX = rightSolidX;
+                enqueueBgQuad(leftAaX, topY, leftAaX + 1, topY + 1, aaColor);
+                enqueueBgQuad(rightAaX, topY, rightAaX + 1, topY + 1, aaColor);
+                if (botY != topY) {
+                    enqueueBgQuad(leftAaX, botY, leftAaX + 1, botY + 1, aaColor);
+                    enqueueBgQuad(rightAaX, botY, rightAaX + 1, botY + 1, aaColor);
+                }
+            }
+        }
+    }
+
+    private void enqueueComponentText(Component comp, int x, int y, int color) {
+        if (comp == null || textQueueCount >= MAX_BATCHED_TEXTS) {
+            return;
+        }
+        textComponentQueue[textQueueCount] = comp;
+        int idx = textQueueCount * 3;
+        textCoordsAndColorQueue[idx] = x;
+        textCoordsAndColorQueue[idx + 1] = y;
+        textCoordsAndColorQueue[idx + 2] = color;
+        textQueueCount++;
+    }
+
+    private void flushBatchedRenderPasses(GuiGraphics guiGraphics) {
+        for (int i = 0; i < bgQuadCount; i++) {
+            int idx = i * 5;
+            guiGraphics.fill(
+                    bgQuadQueue[idx],
+                    bgQuadQueue[idx + 1],
+                    bgQuadQueue[idx + 2],
+                    bgQuadQueue[idx + 3],
+                    bgQuadQueue[idx + 4]
+            );
+        }
+
+        for (int i = 0; i < textQueueCount; i++) {
+            int idx = i * 3;
+            guiGraphics.drawString(
+                    this.font,
+                    textComponentQueue[i],
+                    textCoordsAndColorQueue[idx],
+                    textCoordsAndColorQueue[idx + 1],
+                    textCoordsAndColorQueue[idx + 2],
+                    false
+            );
+            textComponentQueue[i] = null;
+        }
+
+        resetBatchQueues();
+    }
+
+    private void processDirtyCachesIfNeeded() {
+        if (this.width != lastScreenWidth || this.height != lastScreenHeight) {
+            lastScreenWidth = this.width;
+            lastScreenHeight = this.height;
+            windowGeometryDirty = true;
+            layoutDirty = true;
+        }
+
+        if (stringWidthsDirty && this.font != null) {
+            cacheAllStaticStringWidths();
+            stringWidthsDirty = false;
+            windowGeometryDirty = true;
+        }
+
+        if (windowGeometryDirty && this.font != null) {
+            recomputeWindowGeometry();
+            windowGeometryDirty = false;
+            layoutDirty = true;
+        }
+
+        if (filterDirty) {
+            rebuildFilteredModuleList();
+            filterDirty = false;
+            layoutDirty = true;
+        }
+
+        if (layoutDirty) {
+            recalculateRowYOffsets();
+            layoutDirty = false;
+        }
+    }
+
+    private void cacheAllStaticStringWidths() {
+        chevronCollapsedComponent = Component.literal(">").withStyle(nunitoRegularStyle);
+        chevronExpandedComponent = Component.literal("v").withStyle(nunitoRegularStyle);
+        bindDotsComponent = Component.literal("...").withStyle(nunitoRegularStyle);
+        clearXComponent = Component.literal("x").withStyle(nunitoRegularStyle);
+        backspaceLtComponent = Component.literal("<").withStyle(nunitoRegularStyle);
+        slashComponent = Component.literal("/").withStyle(nunitoRegularStyle);
+        clientAudioHeaderComponent = Component.literal("Client Audio & Tactile Mixer").withStyle(nunitoRegularStyle);
+
+        for (int i = 0; i < TOP_TABS.length; i++) {
+            topTabComponents[i] = Component.literal(TOP_TABS[i]).withStyle(nunitoRegularStyle);
+            String msg = TOP_TABS[i] + " panel is synchronized with your active client profile.";
+            cachedSecondaryTabComponents[i] = Component.literal(msg).withStyle(nunitoRegularStyle);
+            cachedSecondaryTabMessageWidths[i] = this.font.width(cachedSecondaryTabComponents[i]);
+        }
+
+        for (int i = 0; i < CATEGORY_PILLS.length; i++) {
+            categoryPillComponents[i] = Component.literal(CATEGORY_PILLS[i]).withStyle(nunitoRegularStyle);
+        }
+
+        if (clientTabUiVolumeEntry != null) {
+            clientTabUiVolumeEntry.cachedNameWidth = this.font.width(clientTabUiVolumeEntry.nameComponent);
+            updateCachedSliderStringIfNeeded(clientTabUiVolumeEntry);
+        }
+
+        for (int i = 0; i < allModuleRows.length; i++) {
+            CachedModuleRow row = allModuleRows[i];
+            refreshModuleBindLabelIfNeeded(row, true);
+            for (int s = 0; s < row.settings.length; s++) {
+                CachedSettingEntry se = row.settings[s];
+                se.cachedNameWidth = this.font.width(se.nameComponent);
+                for (int m = 0; m < se.modeOptions.length; m++) {
+                    int pad = (se.type == 2) ? 12 : 10;
+                    se.modePillWidths[m] = this.font.width(se.modeOptionComponents[m]) + pad;
+                }
+                if (se.type == 1) {
+                    updateCachedSliderStringIfNeeded(se);
+                }
+            }
+        }
+    }
+
+    private void updateCachedSliderStringIfNeeded(CachedSettingEntry se) {
+        NumberSetting ns = (NumberSetting) se.setting;
+        double val = ns.getValue();
+        if (Double.compare(val, se.lastCachedNumberValue) != 0 || se.cachedFormattedValue.isEmpty()) {
+            se.lastCachedNumberValue = val;
+            se.cachedFormattedValue = formatSliderValue(val, se.step);
+            se.cachedValueComponent = Component.literal(se.cachedFormattedValue).withStyle(nunitoRegularStyle);
+            if (this.font != null) {
+                se.cachedValueTextWidth = this.font.width(se.cachedValueComponent);
+            }
+        }
+    }
+
+    private void recomputeWindowGeometry() {
+        winW = Math.min(BASE_WINDOW_WIDTH, this.width - 28);
+        winH = Math.min(BASE_WINDOW_HEIGHT, this.height - 24);
+        winX = (this.width - winW) / 2;
+        winY = (this.height - winH) / 2;
+
+        int totalTopNavW = 0;
+        for (int i = 0; i < TOP_TABS.length; i++) {
+            int labelW = this.font.width(topTabComponents[i] != null ? topTabComponents[i] : Component.literal(TOP_TABS[i]));
+            int w = labelW + 20;
+            topTabW[i] = w;
+            totalTopNavW += w + (i > 0 ? 4 : 0);
+        }
+        int curTopX = winX + (winW - totalTopNavW) / 2;
+        for (int i = 0; i < TOP_TABS.length; i++) {
+            int labelW = topTabW[i] - 20;
+            topTabX[i] = curTopX;
+            topTabTextX[i] = curTopX + (topTabW[i] - labelW) / 2;
+            curTopX += topTabW[i] + 4;
+        }
+        navContainerX = topTabX[0] - 6;
+        navContainerW = (topTabX[TOP_TABS.length - 1] + topTabW[TOP_TABS.length - 1]) - navContainerX + 6;
+        navContainerY = winY + 11;
+        navContainerH = 22;
+
+        searchBoxX = winX + LIST_SIDE_PADDING;
+        searchBoxY = winY + 42;
+        searchBoxW = Math.min(182, (int) (winW * 0.31F));
+        searchBoxH = 22;
+        searchBtnY = searchBoxY + 4;
+        searchClearBtnX = searchBoxX + searchBoxW - 18;
+        searchBackspaceBtnX = searchClearBtnX - 19;
+        searchSlashBadgeX = searchBoxX + searchBoxW - 19;
+
+        int pillStartX = searchBoxX + searchBoxW + 12;
+        int curPillX = pillStartX;
+        for (int i = 0; i < CATEGORY_PILLS.length; i++) {
+            int labelW = this.font.width(categoryPillComponents[i] != null ? categoryPillComponents[i] : Component.literal(CATEGORY_PILLS[i]));
+            int pw = labelW + 16;
+            categoryPillX[i] = curPillX;
+            categoryPillW[i] = pw;
+            categoryPillTextX[i] = curPillX + (pw - labelW) / 2;
+            curPillX += pw + 5;
+        }
+
+        listLeft = winX + LIST_SIDE_PADDING;
+        listTop = winY + HEADER_HEIGHT;
+        listRight = winX + winW - LIST_SIDE_PADDING;
+        listBottom = winY + winH - 14;
+        listHeight = Math.max(40, listBottom - listTop);
+        rowWidth = (listRight - listLeft) - 8;
+    }
+
+    private void rebuildFilteredModuleList() {
+        int count = 0;
+        boolean filterByCategory = activeCategoryIndex > 0;
+        boolean filterBySearch = !searchQueryLower.isEmpty();
+
+        for (int i = 0; i < allModuleRows.length; i++) {
+            CachedModuleRow row = allModuleRows[i];
+            if (filterByCategory && row.categoryPillIndex != activeCategoryIndex) {
+                continue;
+            }
+            if (filterBySearch
+                    && !row.nameLower.contains(searchQueryLower)
+                    && !row.descriptionLower.contains(searchQueryLower)) {
+                continue;
+            }
+            filteredRows[count++] = row;
+        }
+        filteredRowCount = count;
+        layoutDirty = true;
+    }
+
+    private void recalculateRowYOffsets() {
+        int yCursor = 0;
+        for (int i = 0; i < filteredRowCount; i++) {
+            CachedModuleRow row = filteredRows[i];
+            row.cachedYOffset = yCursor;
+
+            int visSettings = 0;
+            if (row.expanded || row.expandAnim > 0.01F || row.animatedDrawerHeight > 0.5F) {
+                for (int s = 0; s < row.settings.length; s++) {
+                    CachedSettingEntry se = row.settings[s];
+                    se.visible = se.setting.isVisible();
+                    if (se.visible) {
+                        visSettings++;
+                    }
+                }
+            }
+            row.cachedVisibleSettingCount = visSettings;
+            int animatedDrawerH = Math.max(0, Math.round(row.animatedDrawerHeight));
+            row.cachedTotalHeight = ROW_HEIGHT + animatedDrawerH;
+
+            yCursor += row.cachedTotalHeight + ROW_GAP;
+        }
+
+        totalContentHeight = Math.max(0, yCursor - ROW_GAP);
+        maxScrollOffset = Math.max(0.0F, (float) (totalContentHeight - listHeight));
+        targetScrollOffset = Mth.clamp(targetScrollOffset, 0.0F, maxScrollOffset);
+        scrollOffset = Mth.clamp(scrollOffset, 0.0F, maxScrollOffset);
+    }
+
+    @Override
+    public void render(GuiGraphics guiGraphics, int mouseX, int mouseY, float partialTick) {
+        long nowNs = System.nanoTime();
+        float dtSeconds = lastFrameTimeNs == 0L
+                ? 0.016F
+                : Mth.clamp((nowNs - lastFrameTimeNs) / 1_000_000_000.0F, 0.001F, 0.1F);
+        lastFrameTimeNs = nowNs;
+
+        processDirtyCachesIfNeeded();
+        pollGlfwInputAndInteractions(mouseX, mouseY);
+        stepAnimationsAndScroll(dtSeconds);
+        processDirtyCachesIfNeeded();
+
+        resetBatchQueues();
+        enqueueBgQuad(0, 0, this.width, this.height, COLOR_SCREEN_BACKDROP);
+        drawRoundedRect(winX, winY, winW, winH, WINDOW_CORNER_RADIUS, COLOR_WINDOW_BG);
+
+        enqueueTopNavigationBar(dtSeconds, mouseX, mouseY);
+        if (activeTopTabIndex == 0) {
+            enqueueSubNavigationBar(dtSeconds, mouseX, mouseY);
+        } else if (activeTopTabIndex == 3) {
+            enqueueFriendsTopInputBar(mouseX, mouseY);
+        }
+
+        // Zero 1px divider lines: separation via clean glassmorphic spacing
+
+        if (activeTopTabIndex == 0 && maxScrollOffset > 1.0F) {
+            enqueueScrollbar();
+        }
+        flushBatchedRenderPasses(guiGraphics);
+
+        guiGraphics.enableScissor(listLeft, listTop, listRight, listBottom);
+        resetBatchQueues();
+
+        if (activeTopTabIndex == 0) {
+            enqueueScrollingModuleList(dtSeconds, mouseX, mouseY);
+            flushBatchedRenderPasses(guiGraphics);
+        } else if (activeTopTabIndex == 3) {
+            renderFriendsListPanel(guiGraphics, dtSeconds, mouseX, mouseY);
+        } else if (activeTopTabIndex == 4) {
+            enqueueClientAudioTabView(mouseX, mouseY);
+            flushBatchedRenderPasses(guiGraphics);
+        } else {
+            enqueueSecondaryTabView();
+            flushBatchedRenderPasses(guiGraphics);
+        }
+
+        guiGraphics.disableScissor();
+    }
+
+    private void stepAnimationsAndScroll(float dt) {
+        float scrollLerp = Mth.clamp(dt * 15.0F, 0.08F, 1.0F);
+        if (Math.abs(targetScrollOffset - scrollOffset) > 0.1F) {
+            scrollOffset += (targetScrollOffset - scrollOffset) * scrollLerp;
+        } else {
+            scrollOffset = targetScrollOffset;
+        }
+        if (Math.abs(friendTargetScrollOffset - friendScrollOffset) > 0.1F) {
+            friendScrollOffset += (friendTargetScrollOffset - friendScrollOffset) * scrollLerp;
+        } else {
+            friendScrollOffset = friendTargetScrollOffset;
+        }
+
+        float toggleRate = Mth.clamp(dt / 0.15F, 0.05F, 1.0F);
+        float expandLerp = Mth.clamp(dt * 14.0F, 0.08F, 1.0F);
+        searchFocusAnim = Mth.clamp(searchFocusAnim + (searchFocused ? toggleRate : -toggleRate), 0.0F, 1.0F);
+
+        for (int i = 0; i < filteredRowCount; i++) {
+            CachedModuleRow row = filteredRows[i];
+            float targetToggle = row.module.isEnabled() ? 1.0F : 0.0F;
+            if (row.toggleAnim < targetToggle) {
+                row.toggleAnim = Math.min(targetToggle, row.toggleAnim + toggleRate);
+            } else if (row.toggleAnim > targetToggle) {
+                row.toggleAnim = Math.max(targetToggle, row.toggleAnim - toggleRate);
+            }
+
+            float targetExpand = row.expanded ? 1.0F : 0.0F;
+            if (Math.abs(targetExpand - row.expandAnim) > 0.005F) {
+                row.expandAnim += (targetExpand - row.expandAnim) * expandLerp;
+                layoutDirty = true;
+            } else if (row.expandAnim != targetExpand) {
+                row.expandAnim = targetExpand;
+                layoutDirty = true;
+            }
+
+            int visCountNow = 0;
+            if (row.expanded || row.expandAnim > 0.02F || row.animatedDrawerHeight > 0.5F) {
+                for (int s = 0; s < row.settings.length; s++) {
+                    CachedSettingEntry se = row.settings[s];
+                    se.visible = se.setting.isVisible();
+                    if (se.visible) {
+                        visCountNow++;
+                    }
+                    if (se.type == 0 && se.setting instanceof BooleanSetting bs) {
+                        Object raw = ((Setting<?>) bs).getValue();
+                        float st = (raw instanceof Boolean b && b) ? 1.0F : 0.0F;
+                        if (se.toggleAnim < st) {
+                            se.toggleAnim = Math.min(st, se.toggleAnim + toggleRate);
+                        } else if (se.toggleAnim > st) {
+                            se.toggleAnim = Math.max(st, se.toggleAnim - toggleRate);
+                        }
+                    }
+                }
+            }
+            row.cachedVisibleSettingCount = visCountNow;
+            float targetDrawerH = (row.expanded && visCountNow > 0)
+                    ? (float) (visCountNow * SETTING_ROW_HEIGHT + 10)
+                    : 0.0F;
+            if (Math.abs(targetDrawerH - row.animatedDrawerHeight) > 0.25F) {
+                row.animatedDrawerHeight += (targetDrawerH - row.animatedDrawerHeight) * expandLerp;
+                layoutDirty = true;
+            } else if (row.animatedDrawerHeight != targetDrawerH) {
+                row.animatedDrawerHeight = targetDrawerH;
+                layoutDirty = true;
+            }
+        }
+    }
+
+    private void enqueueTopNavigationBar(float dt, int mouseX, int mouseY) {
+        drawRoundedRect(navContainerX, navContainerY, navContainerW, navContainerH, 6, COLOR_TOP_NAV_BG);
+
+        float hoverStep = Mth.clamp(dt / 0.15F, 0.05F, 1.0F);
+        int textY = navContainerY + (navContainerH - 8) / 2;
+        for (int i = 0; i < TOP_TABS.length; i++) {
+            int tx = topTabX[i];
+            int tw = topTabW[i];
+            boolean isActive = (i == activeTopTabIndex);
+            boolean isHovered = isHovered(mouseX, mouseY, tx, navContainerY + 2, tw, navContainerH - 4);
+
+            topTabHoverAnim[i] = Mth.clamp(topTabHoverAnim[i] + (isHovered ? hoverStep : -hoverStep), 0.0F, 1.0F);
+
+            if (isActive) {
+                drawRoundedRect(tx, navContainerY + 2, tw, navContainerH - 4, 5, COLOR_TOP_NAV_ACTIVE_PILL);
+            } else if (topTabHoverAnim[i] > 0.01F) {
+                int lerpedHoverBg = lerpColor(0x00222530, 0x88262A38, topTabHoverAnim[i]);
+                drawRoundedRect(tx, navContainerY + 2, tw, navContainerH - 4, 5, lerpedHoverBg);
+            }
+
+            int textColor = isActive
+                    ? COLOR_TEXT_BRIGHT_WHITE
+                    : lerpColor(COLOR_TEXT_DIMMED_GRAY, COLOR_TEXT_BRIGHT_WHITE, topTabHoverAnim[i]);
+            enqueueComponentText(topTabComponents[i], topTabTextX[i], textY, textColor);
+        }
+    }
+
+    private void enqueueSubNavigationBar(float dt, int mouseX, int mouseY) {
+        int searchBg = lerpColor(COLOR_SEARCH_BG, COLOR_SEARCH_BG_FOCUSED, searchFocusAnim);
+        drawRoundedRect(searchBoxX, searchBoxY, searchBoxW, searchBoxH, SEARCH_BAR_RADIUS, searchBg);
+
+        // Left-aligned magnifying glass icon inside the 10px-radius search bar
+        enqueueSearchMagnifierIcon(searchBoxX + 8, searchBoxY + 6, COLOR_TEXT_DIMMED_GRAY);
+
+        String displaySearch;
+        int searchTextCol;
+        if (searchQuery.isEmpty() && !searchFocused) {
+            displaySearch = "/ Search";
+            searchTextCol = COLOR_TEXT_DIMMED_GRAY;
+        } else {
+            boolean blink = (System.currentTimeMillis() / 500L) % 2L == 0L;
+            displaySearch = searchQuery + (searchFocused && blink ? "|" : "");
+            searchTextCol = COLOR_TEXT_BRIGHT_WHITE;
+        }
+        if (!displaySearch.equals(lastRenderedSearchString)) {
+            lastRenderedSearchString = displaySearch;
+            cachedSearchDisplayComponent = Component.literal(displaySearch).withStyle(nunitoRegularStyle);
+        }
+        enqueueComponentText(cachedSearchDisplayComponent, searchBoxX + 22, searchBoxY + 7, searchTextCol);
+
+        if (searchFocused || !searchQuery.isEmpty()) {
+            boolean clearHover = isHovered(mouseX, mouseY, searchClearBtnX, searchBtnY, 14, 14);
+            drawRoundedRect(searchClearBtnX, searchBtnY, 14, 14, 5, clearHover ? COLOR_BIND_BG_HOVER : 0xCC232632);
+            enqueueComponentText(clearXComponent, searchClearBtnX + 4, searchBtnY + 3, clearHover ? COLOR_TEXT_BRIGHT_WHITE : COLOR_TEXT_DIMMED_GRAY);
+
+            boolean bsHover = isHovered(mouseX, mouseY, searchBackspaceBtnX, searchBtnY, 16, 14);
+            drawRoundedRect(searchBackspaceBtnX, searchBtnY, 16, 14, 5, bsHover ? COLOR_BIND_BG_HOVER : 0xCC232632);
+            enqueueComponentText(backspaceLtComponent, searchBackspaceBtnX + 5, searchBtnY + 3, bsHover ? COLOR_TEXT_BRIGHT_WHITE : COLOR_TEXT_DIMMED_GRAY);
+        }
+
+        float hoverStep = Mth.clamp(dt / 0.15F, 0.05F, 1.0F);
+        int pillTextY = searchBoxY + (searchBoxH - 8) / 2;
+        for (int i = 0; i < CATEGORY_PILLS.length; i++) {
+            int px = categoryPillX[i];
+            int pw = categoryPillW[i];
+            if (px + pw > listRight) {
+                break;
+            }
+            boolean isActive = (i == activeCategoryIndex);
+            boolean isHovered = isHovered(mouseX, mouseY, px, searchBoxY + 1, pw, searchBoxH - 2);
+            categoryPillHoverAnim[i] = Mth.clamp(categoryPillHoverAnim[i] + (isHovered ? hoverStep : -hoverStep), 0.0F, 1.0F);
+
+            // Active category: Solid White background with Dark text.
+            // Inactive category: Transparent background (subtle alpha on hover) with White text.
+            if (isActive) {
+                drawRoundedRect(px, searchBoxY + 1, pw, searchBoxH - 2, CATEGORY_PILL_RADIUS, COLOR_PILL_ACTIVE_BG);
+            } else if (categoryPillHoverAnim[i] > 0.01F) {
+                int hoverPillBg = lerpColor(COLOR_PILL_INACTIVE_BG, COLOR_PILL_INACTIVE_HOVER, categoryPillHoverAnim[i]);
+                drawRoundedRect(px, searchBoxY + 1, pw, searchBoxH - 2, CATEGORY_PILL_RADIUS, hoverPillBg);
+            }
+
+            int pillTextCol = isActive ? COLOR_PILL_ACTIVE_TEXT : COLOR_TEXT_BRIGHT_WHITE;
+            enqueueComponentText(categoryPillComponents[i], categoryPillTextX[i], pillTextY, pillTextCol);
+        }
+    }
+
+    private void enqueueScrollingModuleList(float dt, int mouseX, int mouseY) {
+        int scrollInt = Math.round(scrollOffset);
+        boolean mouseInsideViewport = isHovered(mouseX, mouseY, listLeft, listTop, listRight - listLeft, listHeight);
+        int iconBoxSize = 28;
+        int iconBoxX = listLeft + 8;
+        int textStartX = iconBoxX + iconBoxSize + 10;
+        int toggleW = TOGGLE_PILL_WIDTH;
+        int toggleH = TOGGLE_PILL_HEIGHT;
+        int toggleX = listLeft + rowWidth - toggleW - 12;
+        int chevronX = toggleX - 14;
+        float hoverStep = Mth.clamp(dt / 0.15F, 0.05F, 1.0F);
+
+        for (int i = 0; i < filteredRowCount; i++) {
+            CachedModuleRow row = filteredRows[i];
+            int rowTop = listTop + row.cachedYOffset - scrollInt;
+            int rowBottom = rowTop + row.cachedTotalHeight;
+
+            if (rowBottom < listTop || rowTop > listBottom) {
+                row.wasHoveredLastFrame = false;
+                row.hoverAnim = Math.max(0.0F, row.hoverAnim - hoverStep);
+                continue;
+            }
+
+            boolean rowHeaderHovered = mouseInsideViewport
+                    && isHovered(mouseX, mouseY, listLeft, rowTop, rowWidth, ROW_HEIGHT);
+
+            if (rowHeaderHovered && !row.wasHoveredLastFrame) {
+                SoundUtil.playHoverTick();
+            }
+            row.wasHoveredLastFrame = rowHeaderHovered;
+
+            row.hoverAnim = Mth.clamp(row.hoverAnim + (rowHeaderHovered ? hoverStep : -hoverStep), 0.0F, 1.0F);
+
+            // Module Rows sit flush against each other with transparent backgrounds unless hovered:
+            // Draw a subtle dark rounded rectangle (6px radius) behind the row ONLY when hovered.
+            if (row.hoverAnim > 0.01F) {
+                int hoverBg = lerpColor(0x001C202E, COLOR_ROW_HOVER_BG, row.hoverAnim);
+                drawRoundedRect(listLeft, rowTop, rowWidth, row.cachedTotalHeight, ROW_AND_SEARCH_RADIUS, hoverBg);
+            }
+
+            // Far-Left Module Icon Badge: subtle dark rounded square (8px radius) + category icon
+            int iconBoxY = rowTop + (ROW_HEIGHT - iconBoxSize) / 2;
+            int iconBoxBg = lerpColor(COLOR_ICON_BOX_BG, COLOR_ICON_BOX_HOVER_BG, row.hoverAnim);
+            drawRoundedRect(iconBoxX, iconBoxY, iconBoxSize, iconBoxSize, ICON_BOX_RADIUS, iconBoxBg);
+            int iconFg = row.module.isEnabled() ? COLOR_TEXT_BRIGHT_WHITE : COLOR_TEXT_DIMMED_GRAY;
+            enqueueCategoryIcon(row.categoryPillIndex, iconBoxX + 7, iconBoxY + 7, iconFg);
+
+            // Typography: Module Name (0xFFFFFF) & Module Description (0xAAAAAA) in Nunito
+            enqueueComponentText(row.nunitoTitle, textStartX, rowTop + 9, COLOR_TEXT_BRIGHT_WHITE);
+            enqueueComponentText(row.nunitoRegularDesc, textStartX, rowTop + 24, COLOR_TEXT_DIMMED_GRAY);
+
+            // Action Macro Check (AutoLunge): Hide the ON/OFF toggle pill and show only the Keybind pill + chevron
+            boolean isActionMacro = isActionMacroRow(row);
+            int rowChevronX = isActionMacro ? (listLeft + rowWidth - 18) : chevronX;
+            int chevronY = rowTop + (ROW_HEIGHT - 8) / 2;
+            enqueueComponentText(
+                    row.expanded ? chevronExpandedComponent : chevronCollapsedComponent,
+                    rowChevronX,
+                    chevronY,
+                    COLOR_TEXT_DIMMED_GRAY
+            );
+
+            refreshModuleBindLabelIfNeeded(row, false);
+            boolean isBindingThis = (bindingRow == row);
+            Component bindComp = isBindingThis ? bindDotsComponent : row.cachedBindComponent;
+            int bindPillW = isBindingThis ? 28 : row.cachedBindPillWidth;
+            int bindPillH = 15;
+            int bindPillX = rowChevronX - bindPillW - 8;
+            int bindPillY = rowTop + (ROW_HEIGHT - bindPillH) / 2;
+            boolean bindHovered = mouseInsideViewport
+                    && isHovered(mouseX, mouseY, bindPillX, bindPillY, bindPillW, bindPillH);
+            row.bindHoverAnim = Mth.clamp(row.bindHoverAnim + (bindHovered ? hoverStep : -hoverStep), 0.0F, 1.0F);
+
+            int bindBg = isBindingThis
+                    ? COLOR_BIND_LISTENING
+                    : lerpColor(COLOR_BIND_BG, COLOR_BIND_BG_HOVER, row.bindHoverAnim);
+            drawRoundedRect(bindPillX, bindPillY, bindPillW, bindPillH, 6, bindBg);
+            int bindTextW = isBindingThis ? 12 : row.cachedBindTextWidth;
+            int bindTextCol = isBindingThis ? COLOR_TEXT_BRIGHT_WHITE : COLOR_TEXT_DIMMED_GRAY;
+            enqueueComponentText(bindComp, bindPillX + (bindPillW - bindTextW) / 2, bindPillY + 4, bindTextCol);
+
+            // iOS Pill Toggle Switch (Width = 24, Height = 12, Radius = 6) with animated solid white circle
+            if (!isActionMacro) {
+                int toggleY = rowTop + (ROW_HEIGHT - toggleH) / 2;
+                enqueueIosPillToggleSwitch(toggleX, toggleY, toggleW, toggleH, row.toggleAnim);
+            }
+
+            if (row.expandAnim > 0.02F && row.cachedVisibleSettingCount > 0) {
+                enqueueModuleSettingsDrawer(row, listLeft + 4, rowTop + ROW_HEIGHT, rowWidth - 8, mouseX, mouseY, mouseInsideViewport);
+            }
+        }
+    }
+
+    private void enqueueModuleSettingsDrawer(
+            CachedModuleRow row,
+            int drawerX,
+            int drawerY,
+            int drawerW,
+            int mouseX,
+            int mouseY,
+            boolean mouseInsideViewport
+    ) {
+        int drawerH = row.cachedTotalHeight - ROW_HEIGHT;
+        if (drawerH <= 4) {
+            return;
+        }
+
+        drawRoundedRect(drawerX, drawerY, drawerW, drawerH - 3, 5, COLOR_DRAWER_BG);
+
+        int curY = drawerY + 5;
+        for (int i = 0; i < row.settings.length; i++) {
+            CachedSettingEntry se = row.settings[i];
+            if (!se.visible) {
+                continue;
+            }
+            if (curY + SETTING_ROW_HEIGHT > drawerY + drawerH + 2) {
+                break;
+            }
+
+            enqueueSingleSettingRow(se, drawerX, curY, drawerW, mouseX, mouseY, mouseInsideViewport);
+            curY += SETTING_ROW_HEIGHT;
+        }
+    }
+
+    private void enqueueSingleSettingRow(
+            CachedSettingEntry se,
+            int drawerX,
+            int curY,
+            int drawerW,
+            int mouseX,
+            int mouseY,
+            boolean mouseInsideViewport
+    ) {
+        int labelX = drawerX + 14;
+        int labelY = curY + (SETTING_ROW_HEIGHT - 8) / 2;
+        enqueueComponentText(se.nameComponent, labelX, labelY, 0xFFD4D7E2);
+
+        switch (se.type) {
+            case 0 -> {
+                int swW = TOGGLE_PILL_WIDTH;
+                int swH = TOGGLE_PILL_HEIGHT;
+                int swX = drawerX + drawerW - swW - 14;
+                int swY = curY + (SETTING_ROW_HEIGHT - swH) / 2;
+                enqueueIosPillToggleSwitch(swX, swY, swW, swH, se.toggleAnim);
+            }
+            case 1 -> {
+                NumberSetting ns = (NumberSetting) se.setting;
+                double val = ns.getValue();
+                double min = ns.getMin();
+                double max = ns.getMax();
+                double ratio = max > min ? Mth.clamp((val - min) / (max - min), 0.0D, 1.0D) : 0.0D;
+
+                int trackW = 120;
+                int trackH = 4;
+                int trackX = drawerX + drawerW - trackW - 14;
+                int trackY = curY + (SETTING_ROW_HEIGHT - trackH) / 2;
+
+                updateCachedSliderStringIfNeeded(se);
+                int valStrX = trackX - se.cachedValueTextWidth - 8;
+                enqueueComponentText(se.cachedValueComponent, valStrX, labelY, COLOR_TEXT_DIMMED_GRAY);
+
+                drawRoundedRect(trackX, trackY, trackW, trackH, 2, COLOR_TOGGLE_OFF_BG);
+                int fillW = Math.max(2, (int) Math.round(trackW * ratio));
+                drawRoundedRect(trackX, trackY, fillW, trackH, 2, COLOR_PILL_ACTIVE_BG);
+
+                int knobX = trackX + fillW - 4;
+                int knobY = trackY - 2;
+                drawRoundedRect(knobX, knobY, 8, 8, 4, COLOR_TOGGLE_KNOB_ON);
+
+                if (activeDraggingSliderEntry == se) {
+                    activeSliderTrackX = trackX;
+                    activeSliderTrackW = trackW;
+                }
+            }
+            case 2 -> {
+                ModeSetting ms = (ModeSetting) se.setting;
+                String currentMode = ms.getValue();
+                int rightEdge = drawerX + drawerW - 14;
+                for (int m = se.modeOptions.length - 1; m >= 0; m--) {
+                    String modeLabel = se.modeOptions[m];
+                    int pw = se.modePillWidths[m];
+                    int px = rightEdge - pw;
+                    int py = curY + 4;
+                    boolean selected = modeLabel.equalsIgnoreCase(currentMode);
+                    boolean hovered = mouseInsideViewport && isHovered(mouseX, mouseY, px, py, pw, 18);
+                    int bg = selected ? COLOR_PILL_ACTIVE_BG : (hovered ? COLOR_BIND_BG_HOVER : COLOR_BIND_BG);
+                    int fg = selected ? COLOR_PILL_ACTIVE_TEXT : COLOR_TEXT_DIMMED_GRAY;
+                    drawRoundedRect(px, py, pw, 18, 4, bg);
+                    enqueueComponentText(se.modeOptionComponents[m], px + 6, py + 5, fg);
+                    rightEdge = px - 4;
+                }
+            }
+            case 3 -> {
+                MultiModeSetting mms = (MultiModeSetting) se.setting;
+                int rightEdge = drawerX + drawerW - 14;
+                int minPx = labelX + se.cachedNameWidth + 12;
+                for (int m = se.modeOptions.length - 1; m >= 0; m--) {
+                    String opt = se.modeOptions[m];
+                    int pw = se.modePillWidths[m];
+                    int px = rightEdge - pw;
+                    if (px < minPx) {
+                        break;
+                    }
+                    int py = curY + 4;
+                    boolean selected = mms.isSelected(opt);
+                    boolean hovered = mouseInsideViewport && isHovered(mouseX, mouseY, px, py, pw, 18);
+                    int bg = selected ? COLOR_PILL_ACTIVE_BG : (hovered ? COLOR_BIND_BG_HOVER : COLOR_BIND_BG);
+                    int fg = selected ? COLOR_PILL_ACTIVE_TEXT : COLOR_TEXT_DIMMED_GRAY;
+                    drawRoundedRect(px, py, pw, 18, 4, bg);
+                    enqueueComponentText(se.modeOptionComponents[m], px + 5, py + 5, fg);
+                    rightEdge = px - 3;
+                }
+            }
+        }
+    }
+
+    private static Method cachedFaceDrawMethod = null;
+    private static boolean faceDrawReflectionInit = false;
+
+    private void enqueueFriendsTopInputBar(int mouseX, int mouseY) {
+        int barY = winY + 42;
+        int barH = 22;
+
+        String bindLabelStr;
+        if (listeningForFriendBind) {
+            bindLabelStr = "Bind: [...]";
+        } else {
+            int fKey = FriendManager.getFriendBindKey();
+            bindLabelStr = "Bind: [" + formatBoundKeyDisplayName(fKey) + "]";
+        }
+        Component bindComp = Component.literal(bindLabelStr).withStyle(nunitoRegularStyle);
+        int bindLabelW = this.font.width(bindComp);
+        friendBindBtnW = Math.max(68, bindLabelW + 16);
+        friendBindBtnH = barH;
+        friendBindBtnX = listRight - friendBindBtnW;
+        friendBindBtnY = barY;
+
+        Component addComp = Component.literal("Add").withStyle(nunitoRegularStyle);
+        int addLabelW = this.font.width(addComp);
+        friendAddBtnW = Math.max(44, addLabelW + 18);
+        friendAddBtnH = barH;
+        friendAddBtnX = friendBindBtnX - friendAddBtnW - 6;
+        friendAddBtnY = barY;
+
+        friendInputBoxX = listLeft;
+        friendInputBoxY = barY;
+        friendInputBoxW = Math.max(120, friendAddBtnX - friendInputBoxX - 6);
+        friendInputBoxH = barH;
+
+        int inputBg = friendInputFocused ? COLOR_SEARCH_BG_FOCUSED : COLOR_SEARCH_BG;
+        drawRoundedRect(friendInputBoxX, friendInputBoxY, friendInputBoxW, friendInputBoxH, SEARCH_BAR_RADIUS, inputBg);
+
+        String displayInput;
+        int inputTextCol;
+        if (friendInputText.isEmpty() && !friendInputFocused) {
+            displayInput = "Enter username...";
+            inputTextCol = COLOR_TEXT_DIMMED_GRAY;
+        } else {
+            boolean blink = (System.currentTimeMillis() / 500L) % 2L == 0L;
+            displayInput = friendInputText + (friendInputFocused && blink ? "|" : "");
+            inputTextCol = COLOR_TEXT_BRIGHT_WHITE;
+        }
+        if (!displayInput.equals(lastRenderedFriendInputString)) {
+            lastRenderedFriendInputString = displayInput;
+            cachedFriendInputComponent = Component.literal(displayInput).withStyle(nunitoRegularStyle);
+        }
+        enqueueComponentText(cachedFriendInputComponent, friendInputBoxX + 10, friendInputBoxY + 7, inputTextCol);
+
+        boolean addHover = isHovered(mouseX, mouseY, friendAddBtnX, friendAddBtnY, friendAddBtnW, friendAddBtnH);
+        int addBg = addHover ? 0xFFE2E6F5 : COLOR_PILL_ACTIVE_BG;
+        drawRoundedRect(friendAddBtnX, friendAddBtnY, friendAddBtnW, friendAddBtnH, CATEGORY_PILL_RADIUS, addBg);
+        enqueueComponentText(
+                addComp,
+                friendAddBtnX + (friendAddBtnW - addLabelW) / 2,
+                friendAddBtnY + 7,
+                COLOR_PILL_ACTIVE_TEXT
+        );
+
+        boolean bindHover = isHovered(mouseX, mouseY, friendBindBtnX, friendBindBtnY, friendBindBtnW, friendBindBtnH);
+        int bindBg = listeningForFriendBind
+                ? COLOR_BIND_LISTENING
+                : (bindHover ? COLOR_BIND_BG_HOVER : COLOR_BIND_BG);
+        drawRoundedRect(friendBindBtnX, friendBindBtnY, friendBindBtnW, friendBindBtnH, CATEGORY_PILL_RADIUS, bindBg);
+        enqueueComponentText(
+                bindComp,
+                friendBindBtnX + (friendBindBtnW - bindLabelW) / 2,
+                friendBindBtnY + 7,
+                listeningForFriendBind ? COLOR_TEXT_BRIGHT_WHITE : COLOR_TEXT_DIMMED_GRAY
+        );
+    }
+
+    private void renderFriendsListPanel(GuiGraphics guiGraphics, float dt, int mouseX, int mouseY) {
+        List<FriendRecord> friends = FriendManager.getSortedFriends();
+        int friendRowH = 40;
+        int totalH = friends.size() * friendRowH;
+        friendMaxScrollOffset = Math.max(0.0F, (float) (totalH - listHeight));
+        friendTargetScrollOffset = Mth.clamp(friendTargetScrollOffset, 0.0F, friendMaxScrollOffset);
+        friendScrollOffset = Mth.clamp(friendScrollOffset, 0.0F, friendMaxScrollOffset);
+
+        if (friends.isEmpty()) {
+            Component emptyComp = Component.literal("No friends added yet. Enter a username above or use Bind in-game.")
+                    .withStyle(nunitoRegularStyle);
+            int ew = this.font.width(emptyComp);
+            enqueueComponentText(emptyComp, winX + (winW - ew) / 2, listTop + listHeight / 2 - 6, COLOR_TEXT_DIMMED_GRAY);
+            flushBatchedRenderPasses(guiGraphics);
+            return;
+        }
+
+        int scrollInt = Math.round(friendScrollOffset);
+        boolean mouseInside = isHovered(mouseX, mouseY, listLeft, listTop, listRight - listLeft, listHeight);
+        Component removeXComp = Component.literal("X").withStyle(nunitoRegularStyle);
+        int removeXW = this.font.width(removeXComp);
+
+        for (int i = 0; i < friends.size(); i++) {
+            FriendRecord rec = friends.get(i);
+            int rowTop = listTop + i * friendRowH - scrollInt;
+            int rowBottom = rowTop + friendRowH;
+            if (rowBottom < listTop || rowTop > listBottom) {
+                continue;
+            }
+
+            boolean rowHovered = mouseInside && isHovered(mouseX, mouseY, listLeft, rowTop, rowWidth, friendRowH);
+            if (rowHovered) {
+                drawRoundedRect(listLeft, rowTop, rowWidth, friendRowH, ROW_AND_SEARCH_RADIUS, COLOR_ROW_HOVER_BG);
+            }
+
+            int avatarSize = 24;
+            int avatarX = listLeft + 10;
+            int avatarY = rowTop + (friendRowH - avatarSize) / 2;
+            drawRoundedRect(avatarX - 1, avatarY - 1, avatarSize + 2, avatarSize + 2, 6, COLOR_ICON_BOX_BG);
+
+            int textX = avatarX + avatarSize + 10;
+            Component nameComp = Component.literal(rec.username).withStyle(nunitoRegularStyle);
+            enqueueComponentText(nameComp, textX, rowTop + 9, COLOR_TEXT_BRIGHT_WHITE);
+
+            String subText = (!rec.alias.isEmpty() && !rec.alias.equalsIgnoreCase(rec.username))
+                    ? ("Alias: " + rec.alias + "  •  UUID Verified")
+                    : "Ally Whitelisted  •  UUID Verified";
+            Component subComp = Component.literal(subText).withStyle(nunitoRegularStyle);
+            enqueueComponentText(subComp, textX, rowTop + 22, 0xFF00FFCC);
+
+            int remW = 28;
+            int remH = 18;
+            int remX = listLeft + rowWidth - remW - 10;
+            int remY = rowTop + (friendRowH - remH) / 2;
+            boolean remHover = mouseInside && isHovered(mouseX, mouseY, remX, remY, remW, remH);
+            int remBg = remHover ? 0xEE9E2A3B : COLOR_BIND_BG;
+            int remFg = remHover ? COLOR_TEXT_BRIGHT_WHITE : COLOR_TEXT_DIMMED_GRAY;
+            drawRoundedRect(remX, remY, remW, remH, 5, remBg);
+            enqueueComponentText(removeXComp, remX + (remW - removeXW) / 2, remY + 5, remFg);
+        }
+
+        flushBatchedRenderPasses(guiGraphics);
+
+        for (int i = 0; i < friends.size(); i++) {
+            FriendRecord rec = friends.get(i);
+            int rowTop = listTop + i * friendRowH - scrollInt;
+            int rowBottom = rowTop + friendRowH;
+            if (rowBottom < listTop || rowTop > listBottom) {
+                continue;
+            }
+            int avatarSize = 24;
+            int avatarX = listLeft + 10;
+            int avatarY = rowTop + (friendRowH - avatarSize) / 2;
+            drawFriendAvatar(guiGraphics, rec, avatarX, avatarY, avatarSize);
+        }
+    }
+
+    private void drawFriendAvatar(GuiGraphics guiGraphics, FriendRecord rec, int x, int y, int size) {
+        PlayerInfo info = FriendManager.resolveOnlineFriendPlayerInfo(rec.uuid, rec.username);
+        if (info != null) {
+            try {
+                if (!faceDrawReflectionInit) {
+                    faceDrawReflectionInit = true;
+                    for (Method m : PlayerFaceRenderer.class.getDeclaredMethods()) {
+                        Class<?>[] params = m.getParameterTypes();
+                        if (params.length == 5
+                                && params[0] == GuiGraphics.class
+                                && params[2] == int.class
+                                && params[3] == int.class
+                                && params[4] == int.class) {
+                            m.setAccessible(true);
+                            cachedFaceDrawMethod = m;
+                            break;
+                        }
+                    }
+                }
+                if (cachedFaceDrawMethod != null) {
+                    Object skinObj = info.getSkin();
+                    Class<?> skinParamType = cachedFaceDrawMethod.getParameterTypes()[1];
+                    if (skinObj != null && skinParamType.isAssignableFrom(skinObj.getClass())) {
+                        cachedFaceDrawMethod.invoke(null, guiGraphics, skinObj, x, y, size);
+                        return;
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        int seed = rec.username != null ? rec.username.toLowerCase(Locale.ROOT).hashCode() : 0;
+        int baseHueCol = 0xFF243447 | ((seed & 0x3F) << 16) | (((seed >> 6) & 0x3F) << 8);
+        guiGraphics.fill(x + 2, y + 2, x + size - 2, y + size - 2, baseHueCol);
+        guiGraphics.fill(x + 5, y + 9, x + 9, y + 13, 0xFF00FFCC);
+        guiGraphics.fill(x + size - 9, y + 9, x + size - 5, y + 13, 0xFF00FFCC);
+        guiGraphics.fill(x + 7, y + size - 7, x + size - 7, y + size - 5, 0xCCFFFFFF);
+    }
+
+    private void submitFriendInputNow() {
+        String trimmed = friendInputText != null ? friendInputText.trim() : "";
+        if (trimmed.isEmpty()) {
+            return;
+        }
+        boolean added = FriendManager.addFriendByNameOrAliasInput(trimmed);
+        friendInputText = "";
+        lastRenderedFriendInputString = "";
+        SoundUtil.playTogglePop(added);
+    }
+
+    private void enqueueClientAudioTabView(int mouseX, int mouseY) {
+        int cardY = listTop + 10;
+        int cardH = 68;
+        drawRoundedRect(listLeft, cardY, rowWidth, cardH, ROW_AND_SEARCH_RADIUS, COLOR_ROW_ODD_BG);
+        enqueueComponentText(clientAudioHeaderComponent, listLeft + 14, cardY + 10, COLOR_TEXT_BRIGHT_WHITE);
+
+        if (clientTabUiVolumeEntry != null) {
+            enqueueSingleSettingRow(
+                    clientTabUiVolumeEntry,
+                    listLeft,
+                    cardY + 32,
+                    rowWidth,
+                    mouseX,
+                    mouseY,
+                    true
+            );
+        }
+    }
+
+    private void enqueueSecondaryTabView() {
+        Component comp = cachedSecondaryTabComponents[activeTopTabIndex];
+        int msgW = cachedSecondaryTabMessageWidths[activeTopTabIndex];
+        int tx = winX + (winW - msgW) / 2;
+        int ty = listTop + listHeight / 2 - 6;
+        enqueueComponentText(comp, tx, ty, COLOR_TEXT_DIMMED_GRAY);
+    }
+
+    private void enqueueScrollbar() {
+        int barX = listRight - 3;
+        int barW = 3;
+        drawRoundedRect(barX, listTop, barW, listHeight, 1, 0x55222530);
+
+        float viewRatio = Mth.clamp((float) listHeight / (float) Math.max(listHeight, totalContentHeight), 0.12F, 1.0F);
+        int thumbH = Math.max(24, Math.round(listHeight * viewRatio));
+        float scrollProgress = maxScrollOffset > 0.0F ? (scrollOffset / maxScrollOffset) : 0.0F;
+        int thumbY = listTop + Math.round((listHeight - thumbH) * scrollProgress);
+
+        int thumbCol = draggingScrollbar ? COLOR_PILL_ACTIVE_BG : 0xAA7E8291;
+        drawRoundedRect(barX, thumbY, barW, thumbH, 1, thumbCol);
+    }
+
+    private void enqueueIosPillToggleSwitch(
+            int x,
+            int y,
+            int w,
+            int h,
+            float animProgress
+    ) {
+        float t = Mth.clamp(animProgress, 0.0F, 1.0F);
+        int trackColor = lerpColor(COLOR_TOGGLE_OFF_BG, COLOR_TOGGLE_ON_BG, t);
+        drawRoundedRect(x, y, w, h, TOGGLE_PILL_RADIUS, trackColor);
+
+        int knobSize = h - 4; // 8x8 circle inside 24x12 pill
+        int minKnobX = x + 2;
+        int maxKnobX = x + w - knobSize - 2;
+        int knobX = Math.round(Mth.lerp(t, minKnobX, maxKnobX));
+        int knobY = y + 2;
+
+        drawRoundedRect(knobX, knobY, knobSize, knobSize, knobSize / 2, 0xFFFFFFFF);
+    }
+
+    private void enqueueSearchMagnifierIcon(int ix, int iy, int color) {
+        // 7x7 circular lens + 3px diagonal handle
+        drawRoundedRect(ix, iy, 7, 7, 3, multiplyAlpha(color, 0.35F));
+        enqueueBgQuad(ix + 2, iy + 1, ix + 5, iy + 2, color);
+        enqueueBgQuad(ix + 2, iy + 5, ix + 5, iy + 6, color);
+        enqueueBgQuad(ix + 1, iy + 2, ix + 2, iy + 5, color);
+        enqueueBgQuad(ix + 5, iy + 2, ix + 6, iy + 5, color);
+        enqueueBgQuad(ix + 6, iy + 6, ix + 8, iy + 8, color);
+        enqueueBgQuad(ix + 7, iy + 7, ix + 9, iy + 9, color);
+    }
+
+    private void enqueueCategoryIcon(int categoryIndex, int ix, int iy, int color) {
+        int dimColor = multiplyAlpha(color, 0.55F);
+        switch (categoryIndex) {
+            case 1 -> {
+                // Combat: Crossed blade / crosshair emblem (14x14)
+                enqueueBgQuad(ix + 6, iy + 1, ix + 8, iy + 13, color);
+                enqueueBgQuad(ix + 1, iy + 6, ix + 13, iy + 8, color);
+                drawRoundedRect(ix + 4, iy + 4, 6, 6, 3, dimColor);
+            }
+            case 2 -> {
+                // Movement: Dual forward speed chevrons / wing (14x14)
+                enqueueBgQuad(ix + 2, iy + 3, ix + 5, iy + 5, dimColor);
+                enqueueBgQuad(ix + 4, iy + 5, ix + 7, iy + 9, color);
+                enqueueBgQuad(ix + 2, iy + 9, ix + 5, iy + 11, dimColor);
+                enqueueBgQuad(ix + 7, iy + 3, ix + 10, iy + 5, dimColor);
+                enqueueBgQuad(ix + 9, iy + 5, ix + 12, iy + 9, color);
+                enqueueBgQuad(ix + 7, iy + 9, ix + 10, iy + 11, dimColor);
+            }
+            case 3 -> {
+                // Render / Visual: Eye / lens prism (14x14)
+                drawRoundedRect(ix + 1, iy + 3, 12, 8, 4, dimColor);
+                drawRoundedRect(ix + 5, iy + 5, 4, 4, 2, color);
+            }
+            case 4 -> {
+                // Player: Head & shoulders silhouette (14x14)
+                drawRoundedRect(ix + 4, iy + 1, 6, 6, 3, color);
+                drawRoundedRect(ix + 2, iy + 8, 10, 5, 2, dimColor);
+            }
+            case 5 -> {
+                // World: Isometric block / globe grid (14x14)
+                drawRoundedRect(ix + 2, iy + 2, 10, 10, 3, dimColor);
+                enqueueBgQuad(ix + 4, iy + 6, ix + 10, iy + 8, color);
+                enqueueBgQuad(ix + 6, iy + 4, ix + 8, iy + 10, color);
+            }
+            default -> {
+                // Misc / Utility: 4-node module spark grid (14x14)
+                drawRoundedRect(ix + 2, iy + 2, 4, 4, 2, color);
+                drawRoundedRect(ix + 8, iy + 2, 4, 4, 2, dimColor);
+                drawRoundedRect(ix + 2, iy + 8, 4, 4, 2, dimColor);
+                drawRoundedRect(ix + 8, iy + 8, 4, 4, 2, color);
+            }
+        }
+    }
+
+    // =========================================================================
+    // Type-Safe Keybind Resolution & Reflection Helpers
+    // =========================================================================
+    private static void initModuleKeyReflection() {
+        if (moduleKeyReflectionInitialized) {
+            return;
+        }
+        moduleKeyReflectionInitialized = true;
+        try {
+            for (Method m : Module.class.getDeclaredMethods()) {
+                String n = m.getName().toLowerCase(Locale.ROOT);
+                if (m.getParameterCount() == 0 && m.getReturnType() == int.class
+                        && (n.contains("key") || n.contains("bind"))) {
+                    m.setAccessible(true);
+                    cachedModuleGetKeyMethod = m;
+                    break;
+                }
+            }
+            for (Method m : Module.class.getDeclaredMethods()) {
+                String n = m.getName().toLowerCase(Locale.ROOT);
+                if (m.getParameterCount() == 1 && m.getParameterTypes()[0] == int.class
+                        && (n.contains("key") || n.contains("bind"))) {
+                    m.setAccessible(true);
+                    cachedModuleSetKeyMethod = m;
+                    break;
+                }
+            }
+            for (Field f : Module.class.getDeclaredFields()) {
+                if (!Modifier.isStatic(f.getModifiers()) && f.getType() == int.class) {
+                    f.setAccessible(true);
+                    cachedModuleKeyField = f;
+                    String fn = f.getName().toLowerCase(Locale.ROOT);
+                    if (fn.contains("key") || fn.contains("bind")) {
+                        break;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static boolean isDedicatedKeybindSettingInstance(Setting<?> s) {
+        if (s == null
+                || s instanceof BooleanSetting
+                || s instanceof NumberSetting
+                || s instanceof ModeSetting
+                || s instanceof MultiModeSetting) {
+            return false;
+        }
+        String clsName = s.getClass().getSimpleName().toLowerCase(Locale.ROOT);
+        return clsName.contains("bind") || clsName.contains("key");
+    }
+
+    private static int getModuleBindKey(Module mod) {
+        if (mod == null) {
+            return -1;
+        }
+        if (mod instanceof LungeHelper) {
+            int macroKey = LungeHelper.getMacroBoundKey();
+            if (macroKey != -1 && macroKey != 0 && macroKey != GLFW.GLFW_KEY_UNKNOWN) {
+                return macroKey;
+            }
+        }
+        initModuleKeyReflection();
+        try {
+            if (cachedModuleGetKeyMethod != null) {
+                Object val = cachedModuleGetKeyMethod.invoke(mod);
+                if (val instanceof Number num) {
+                    int k = num.intValue();
+                    if (k != 0 && k != -1 && k != GLFW.GLFW_KEY_UNKNOWN) {
+                        return k;
+                    }
+                }
+            }
+            if (cachedModuleKeyField != null) {
+                int k = cachedModuleKeyField.getInt(mod);
+                if (k != 0 && k != -1 && k != GLFW.GLFW_KEY_UNKNOWN) {
+                    return k;
+                }
+            }
+            List<Setting<?>> rawSettings = mod.getSettings();
+            if (rawSettings != null) {
+                for (int i = 0; i < rawSettings.size(); i++) {
+                    Setting<?> s = rawSettings.get(i);
+                    if (isDedicatedKeybindSettingInstance(s)) {
+                        Object v = s.getValue();
+                        if (v instanceof Integer k && k != 0 && k != -1 && k != GLFW.GLFW_KEY_UNKNOWN) {
+                            return k;
+                        }
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return -1;
+    }
+
+    private static void setModuleBindKey(Module mod, int key) {
+        if (mod == null) {
+            return;
+        }
+        if (mod instanceof LungeHelper) {
+            LungeHelper.setMacroBoundKey(key);
+        }
+        initModuleKeyReflection();
+        try {
+            if (cachedModuleSetKeyMethod != null) {
+                cachedModuleSetKeyMethod.invoke(mod, key);
+            }
+            if (cachedModuleKeyField != null) {
+                cachedModuleKeyField.setInt(mod, key);
+            }
+            List<Setting<?>> rawSettings = mod.getSettings();
+            if (rawSettings != null) {
+                for (int i = 0; i < rawSettings.size(); i++) {
+                    Setting<?> s = rawSettings.get(i);
+                    if (isDedicatedKeybindSettingInstance(s)) {
+                        for (Method sm : s.getClass().getMethods()) {
+                            if (sm.getParameterCount() == 1
+                                    && (sm.getParameterTypes()[0] == int.class
+                                    || sm.getParameterTypes()[0] == Integer.class)) {
+                                try {
+                                    sm.setAccessible(true);
+                                    sm.invoke(s, key);
+                                } catch (Throwable ignored) {
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private int resolveEffectiveBindKey(CachedModuleRow row) {
+        if (row == null) {
+            return -1;
+        }
+        int modKey = getModuleBindKey(row.module);
+        if (modKey != -1 && modKey != 0 && modKey != GLFW.GLFW_KEY_UNKNOWN && row.boundKey == -1) {
+            row.boundKey = modKey;
+        }
+        return row.boundKey;
+    }
+
+    private void assignModuleBind(CachedModuleRow row, int newKey) {
+        if (row == null) {
+            return;
+        }
+        int normalized = (newKey == 0 || newKey == GLFW.GLFW_KEY_UNKNOWN) ? -1 : newKey;
+        row.boundKey = normalized;
+        if (isActionMacroRow(row)) {
+            LungeHelper.setMacroBoundKey(normalized);
+        }
+        setModuleBindKey(row.module, normalized);
+        refreshModuleBindLabelIfNeeded(row, true);
+    }
+
+    private static boolean isBindRelatedSetting(Setting<?> s, String sName) {
+        if (s == null) {
+            return false;
+        }
+        String clsName = s.getClass().getSimpleName().toLowerCase(Locale.ROOT);
+        if (clsName.contains("bind")) {
+            return true;
+        }
+        if (sName != null) {
+            String lower = sName.trim().toLowerCase(Locale.ROOT);
+            return lower.equals("bind")
+                    || lower.equals("keybind")
+                    || lower.equals("key")
+                    || lower.contains("bind");
+        }
+        return false;
+    }
+
+    private static double extractNumberSettingStep(NumberSetting ns) {
+        if (ns == null) {
+            return 0.1D;
+        }
+        try {
+            for (Method m : NumberSetting.class.getDeclaredMethods()) {
+                String n = m.getName().toLowerCase(Locale.ROOT);
+                if (m.getParameterCount() == 0
+                        && (m.getReturnType() == double.class || m.getReturnType() == float.class || Number.class.isAssignableFrom(m.getReturnType()))
+                        && !n.contains("min") && !n.contains("max") && !n.contains("val") && !n.contains("default")) {
+                    m.setAccessible(true);
+                    Object v = m.invoke(ns);
+                    if (v instanceof Number num && num.doubleValue() > 0.0D) {
+                        return num.doubleValue();
+                    }
+                }
+            }
+            for (Field f : NumberSetting.class.getDeclaredFields()) {
+                String n = f.getName().toLowerCase(Locale.ROOT);
+                if ((f.getType() == double.class || f.getType() == float.class)
+                        && !n.contains("min") && !n.contains("max") && !n.contains("val") && !n.contains("default")) {
+                    f.setAccessible(true);
+                    double v = f.getDouble(ns);
+                    if (v > 0.0D) {
+                        return v;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return 0.1D;
+    }
+
+    private static String[] extractMultiModeOptions(MultiModeSetting mms) {
+        if (mms == null) {
+            return new String[0];
+        }
+        try {
+            for (Method m : MultiModeSetting.class.getDeclaredMethods()) {
+                if (m.getParameterCount() == 0) {
+                    m.setAccessible(true);
+                    if (m.getReturnType() == String[].class) {
+                        String[] arr = (String[]) m.invoke(mms);
+                        if (arr != null && arr.length > 0) {
+                            return arr;
+                        }
+                    } else if (Collection.class.isAssignableFrom(m.getReturnType())) {
+                        Collection<?> col = (Collection<?>) m.invoke(mms);
+                        if (col != null && !col.isEmpty()) {
+                            List<String> out = new ArrayList<>(col.size());
+                            for (Object o : col) {
+                                if (o != null) {
+                                    out.add(o.toString());
+                                }
+                            }
+                            if (!out.isEmpty()) {
+                                return out.toArray(new String[0]);
+                            }
+                        }
+                    }
+                }
+            }
+            for (Field f : MultiModeSetting.class.getDeclaredFields()) {
+                f.setAccessible(true);
+                Object val = f.get(mms);
+                if (val instanceof String[] arr && arr.length > 0) {
+                    return arr;
+                }
+                if (val instanceof Collection<?> col && !col.isEmpty()) {
+                    List<String> out = new ArrayList<>(col.size());
+                    for (Object o : col) {
+                        if (o != null) {
+                            out.add(o.toString());
+                        }
+                    }
+                    if (!out.isEmpty()) {
+                        return out.toArray(new String[0]);
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return new String[0];
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void toggleMultiModeOption(MultiModeSetting mms, String opt) {
+        if (mms == null || opt == null) {
+            return;
+        }
+        try {
+            for (Method m : MultiModeSetting.class.getDeclaredMethods()) {
+                String n = m.getName().toLowerCase(Locale.ROOT);
+                if (m.getParameterCount() == 1 && m.getParameterTypes()[0] == String.class
+                        && (n.contains("toggle") || n.contains("select") || n.contains("click"))) {
+                    m.setAccessible(true);
+                    m.invoke(mms, opt);
+                    return;
+                }
+                if (m.getParameterCount() == 2
+                        && m.getParameterTypes()[0] == String.class
+                        && m.getParameterTypes()[1] == boolean.class) {
+                    m.setAccessible(true);
+                    m.invoke(mms, opt, !mms.isSelected(opt));
+                    return;
+                }
+            }
+            Object rawVal = mms.getValue();
+            if (rawVal instanceof Collection<?> col) {
+                Collection<String> strCol = (Collection<String>) col;
+                if (strCol.contains(opt)) {
+                    strCol.remove(opt);
+                } else {
+                    strCol.add(opt);
+                }
+                return;
+            }
+            for (Field f : MultiModeSetting.class.getDeclaredFields()) {
+                f.setAccessible(true);
+                Object val = f.get(mms);
+                if (val instanceof Collection<?> col) {
+                    String[] allOpts = extractMultiModeOptions(mms);
+                    if (col.size() == allOpts.length && col.contains(opt)) {
+                        continue;
+                    }
+                    Collection<String> strCol = (Collection<String>) col;
+                    if (strCol.contains(opt)) {
+                        strCol.remove(opt);
+                    } else {
+                        strCol.add(opt);
+                    }
+                    return;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void rebuildModuleCacheFromRegistry() {
+        List<Module> rawDiscovered = discoverClientModules();
+        List<Module> discovered = new ArrayList<>(rawDiscovered.size() + 2);
+
+        java.util.Set<String> seenModuleNames = new java.util.HashSet<>();
+        boolean hasLungeHelper = false;
+        boolean hasSilentAura = false;
+        boolean hasAutoMace = false;
+        boolean hasAutoElytra = false;
+        for (int i = 0; i < rawDiscovered.size(); i++) {
+            Module m = rawDiscovered.get(i);
+            if (m == null) {
+                continue;
+            }
+            String mName = m.getName() != null ? m.getName() : m.getClass().getSimpleName();
+            String clsName = m.getClass().getSimpleName();
+            // Hide legacy Aura / AuraModule / AutoLunge / AutoSpear duplicates
+            if ("Aura".equalsIgnoreCase(mName) || "AuraModule".equalsIgnoreCase(mName)
+                    || "AutoLunge".equalsIgnoreCase(clsName) || "AutoSpear".equalsIgnoreCase(clsName)
+                    || "AutoLunge".equalsIgnoreCase(mName) || "AutoSpear".equalsIgnoreCase(mName)) {
+                continue;
+            }
+            if (m instanceof LungeHelper || "LungeHelper".equalsIgnoreCase(mName)) {
+                if (hasLungeHelper) {
+                    continue;
+                }
+                hasLungeHelper = true;
+            }
+            if (m instanceof SilentAura || "SilentAura".equalsIgnoreCase(mName)) {
+                if (hasSilentAura) {
+                    continue;
+                }
+                hasSilentAura = true;
+            }
+            if (m instanceof MaceTarget || "AutoMace".equalsIgnoreCase(mName) || "MaceTarget".equalsIgnoreCase(mName)) {
+                if (hasAutoMace) {
+                    continue;
+                }
+                hasAutoMace = true;
+            }
+            if (m instanceof ElytraTarget || "AutoElytra".equalsIgnoreCase(mName) || "ElytraTarget".equalsIgnoreCase(mName)) {
+                if (hasAutoElytra) {
+                    continue;
+                }
+                hasAutoElytra = true;
+            }
+            String dedupKey = mName.trim().toLowerCase(Locale.ROOT);
+            if (!seenModuleNames.add(dedupKey)) {
+                continue;
+            }
+            discovered.add(m);
+        }
+        if (!hasSilentAura && seenModuleNames.add("silentaura")) {
+            try {
+                discovered.add(SilentAura.getInstance());
+            } catch (Throwable ignored) {
+            }
+        }
+        if (!hasLungeHelper && seenModuleNames.add("lungehelper")) {
+            try {
+                discovered.add(LungeHelper.getInstance());
+            } catch (Throwable ignored) {
+            }
+        }
+        if (!hasAutoMace && seenModuleNames.add("automace")) {
+            try {
+                MaceTarget mt = MaceTarget.getInstance() != null ? MaceTarget.getInstance() : new MaceTarget();
+                discovered.add(mt);
+            } catch (Throwable ignored) {
+            }
+        }
+        if (!hasAutoElytra && seenModuleNames.add("autoelytra")) {
+            try {
+                ElytraTarget et = ElytraTarget.getInstance() != null ? ElytraTarget.getInstance() : new ElytraTarget();
+                discovered.add(et);
+            } catch (Throwable ignored) {
+            }
+        }
+
+        discovered.sort(Comparator.comparing(m -> (m != null && m.getName() != null) ? m.getName().toLowerCase(Locale.ROOT) : ""));
+
+        int total = discovered.size();
+        allModuleRows = new CachedModuleRow[total];
+        filteredRows = new CachedModuleRow[total];
+
+        for (int i = 0; i < total; i++) {
+            Module mod = discovered.get(i);
+            String safeName = (mod.getName() != null && !mod.getName().isEmpty())
+                    ? mod.getName()
+                    : mod.getClass().getSimpleName();
+            String safeDesc = extractModuleDescription(mod, safeName);
+            int catIdx = (mod instanceof LungeHelper) ? 1 : mapCategoryToPillIndex(mod.getCategory());
+            CachedSettingEntry[] settings = extractModuleSettings(mod, safeName);
+            int initialKey = getModuleBindKey(mod);
+            allModuleRows[i] = new CachedModuleRow(mod, safeName, safeDesc, catIdx, settings, initialKey);
+        }
+    }
+
+    private List<Module> discoverClientModules() {
+        List<Module> result = new ArrayList<>();
+        String[] candidateRepoClasses = new String[]{
+                "attrium.ru.Main",
+                "attrium.ru.manager.Manager",
+                "attrium.ru.api.module.ModuleRepository",
+                "attrium.ru.api.module.ModuleManager",
+                "attrium.ru.manager.ModuleManager"
+        };
+
+        for (String className : candidateRepoClasses) {
+            try {
+                Class<?> cls = Class.forName(className);
+                extractModulesFromClassOrInstance(cls, null, result);
+                if (!result.isEmpty()) {
+                    return result;
+                }
+                for (Field f : cls.getDeclaredFields()) {
+                    if (Modifier.isStatic(f.getModifiers())) {
+                        f.setAccessible(true);
+                        Object singleton = f.get(null);
+                        if (singleton != null) {
+                            extractModulesFromClassOrInstance(singleton.getClass(), singleton, result);
+                            if (!result.isEmpty()) {
+                                return result;
+                            }
+                        }
+                    }
+                }
+                for (Method m : cls.getDeclaredMethods()) {
+                    if (Modifier.isStatic(m.getModifiers()) && m.getParameterCount() == 0
+                            && (m.getName().equalsIgnoreCase("getInstance") || m.getName().equalsIgnoreCase("instance"))) {
+                        m.setAccessible(true);
+                        Object singleton = m.invoke(null);
+                        if (singleton != null) {
+                            extractModulesFromClassOrInstance(singleton.getClass(), singleton, result);
+                            if (!result.isEmpty()) {
+                                return result;
+                            }
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        return result;
+    }
+
+    private void extractModulesFromClassOrInstance(Class<?> cls, Object instanceObj, List<Module> out) {
+        if (cls == null) {
+            return;
+        }
+        try {
+            for (Field f : cls.getDeclaredFields()) {
+                boolean isStatic = Modifier.isStatic(f.getModifiers());
+                if (!isStatic && instanceObj == null) {
+                    continue;
+                }
+                f.setAccessible(true);
+                Object val = f.get(isStatic ? null : instanceObj);
+                if (val == null) {
+                    continue;
+                }
+                if (val instanceof List<?> list && !list.isEmpty() && list.get(0) instanceof Module) {
+                    for (Object item : list) {
+                        if (item instanceof Module mod && !out.contains(mod)) {
+                            out.add(mod);
+                        }
+                    }
+                    if (!out.isEmpty()) {
+                        return;
+                    }
+                }
+                String typeName = val.getClass().getSimpleName().toLowerCase(Locale.ROOT);
+                if (typeName.contains("module") || typeName.contains("manager") || typeName.contains("repository")) {
+                    extractModulesFromObjectDirect(val, out);
+                    if (!out.isEmpty()) {
+                        return;
+                    }
+                }
+            }
+            for (Method m : cls.getDeclaredMethods()) {
+                boolean isStatic = Modifier.isStatic(m.getModifiers());
+                if ((!isStatic && instanceObj == null) || m.getParameterCount() != 0) {
+                    continue;
+                }
+                m.setAccessible(true);
+                Object val = m.invoke(isStatic ? null : instanceObj);
+                if (val instanceof List<?> list && !list.isEmpty() && list.get(0) instanceof Module) {
+                    for (Object item : list) {
+                        if (item instanceof Module mod && !out.contains(mod)) {
+                            out.add(mod);
+                        }
+                    }
+                    if (!out.isEmpty()) {
+                        return;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void extractModulesFromObjectDirect(Object managerObj, List<Module> out) {
+        Class<?> cls = managerObj.getClass();
+        while (cls != null && cls != Object.class) {
+            for (Field f : cls.getDeclaredFields()) {
+                try {
+                    f.setAccessible(true);
+                    Object val = f.get(managerObj);
+                    if (val instanceof List<?> list && !list.isEmpty() && list.get(0) instanceof Module) {
+                        for (Object item : list) {
+                            if (item instanceof Module mod && !out.contains(mod)) {
+                                out.add(mod);
+                            }
+                        }
+                        return;
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+            cls = cls.getSuperclass();
+        }
+    }
+
+    private String extractModuleDescription(Module mod, String fallbackName) {
+        try {
+            for (Method m : Module.class.getDeclaredMethods()) {
+                if (m.getParameterCount() == 0 && m.getReturnType() == String.class
+                        && !m.getName().equals("getName") && !m.getName().equals("toString")) {
+                    m.setAccessible(true);
+                    Object res = m.invoke(mod);
+                    if (res instanceof String s && !s.isEmpty()) {
+                        return s;
+                    }
+                }
+            }
+            for (Field f : Module.class.getDeclaredFields()) {
+                if (f.getType() == String.class && !f.getName().equalsIgnoreCase("name")) {
+                    f.setAccessible(true);
+                    Object res = f.get(mod);
+                    if (res instanceof String s && !s.isEmpty()) {
+                        return s;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return "Configure " + fallbackName + " module settings";
+    }
+
+    private CachedSettingEntry[] extractModuleSettings(Module mod, String modName) {
+        List<CachedSettingEntry> list = new ArrayList<>();
+        if (modName != null && (modName.toLowerCase(Locale.ROOT).contains("sound") || modName.toLowerCase(Locale.ROOT).contains("gui"))) {
+            list.add(new CachedSettingEntry(SoundUtil.UI_VOLUME_SETTING, "UI Volume", 1, 0.05D, new String[0]));
+        }
+        try {
+            List<Setting<?>> rawSettings = mod.getSettings();
+            if (rawSettings != null) {
+                for (int i = 0; i < rawSettings.size(); i++) {
+                    Setting<?> s = rawSettings.get(i);
+                    if (s == null) {
+                        continue;
+                    }
+                    String sName = s.getName();
+                    if (sName != null && (sName.startsWith("_") || sName.equalsIgnoreCase("UI Volume"))) {
+                        continue;
+                    }
+                    if (isBindRelatedSetting(s, sName)) {
+                        continue;
+                    }
+
+                    int type = -1;
+                    double step = 0.1D;
+                    String[] opts = null;
+
+                    if (s instanceof BooleanSetting) {
+                        type = 0;
+                    } else if (s instanceof NumberSetting ns) {
+                        type = 1;
+                        step = extractNumberSettingStep(ns);
+                    } else if (s instanceof ModeSetting ms) {
+                        type = 2;
+                        List<String> modes = ms.getModes();
+                        opts = modes != null ? modes.toArray(new String[0]) : new String[0];
+                    } else if (s instanceof MultiModeSetting mms) {
+                        type = 3;
+                        opts = extractMultiModeOptions(mms);
+                    }
+                    if (type != -1) {
+                        list.add(new CachedSettingEntry(s, sName, type, step, opts));
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return list.toArray(new CachedSettingEntry[0]);
+    }
+
+    private int mapCategoryToPillIndex(ModuleCategory cat) {
+        if (cat == null) {
+            return 1;
+        }
+        String name = cat.name().toUpperCase(Locale.ROOT);
+        if (name.contains("COMBAT")) {
+            return 1;
+        }
+        if (name.contains("MOVE")) {
+            return 2;
+        }
+        if (name.contains("VISUAL") || name.contains("RENDER")) {
+            return 3;
+        }
+        if (name.contains("PLAYER")) {
+            return 4;
+        }
+        if (name.contains("WORLD")) {
+            return 5;
+        }
+        return 6;
+    }
+
+    private void ensureGlfwCallbacksHooked() {
+        Minecraft mc = Minecraft.getInstance();
+        if (mc == null || mc.getWindow() == null) {
+            return;
+        }
+        long windowHandle = mc.getWindow().handle();
+        if (windowHandle == 0L || hookedWindowHandle == windowHandle) {
+            return;
+        }
+        hookedWindowHandle = windowHandle;
+
+        prevKeyCallback = GLFW.glfwSetKeyCallback(windowHandle, (window, key, scancode, action, mods) -> {
+            Minecraft client = Minecraft.getInstance();
+            if (client != null) {
+                if (client.screen instanceof GlassClickGuiScreen gui) {
+                    if (gui.handleGlfwKeyCallback(key, scancode, action, mods)) {
+                        return;
+                    }
+                } else if (client.screen == null && action == GLFW.GLFW_PRESS) {
+                    getInstance().onGlobalKeyPressFromCallback(key);
+                }
+            }
+            if (prevKeyCallback != null) {
+                prevKeyCallback.invoke(window, key, scancode, action, mods);
+            }
+        });
+
+        prevCharCallback = GLFW.glfwSetCharCallback(windowHandle, (window, codepoint) -> {
+            Minecraft client = Minecraft.getInstance();
+            if (client != null && client.screen instanceof GlassClickGuiScreen gui) {
+                if (gui.handleGlfwCharCallback(codepoint)) {
+                    return;
+                }
+            }
+            if (prevCharCallback != null) {
+                prevCharCallback.invoke(window, codepoint);
+            }
+        });
+    }
+
+    private boolean handleGlfwKeyCallback(int key, int scancode, int action, int mods) {
+        if (action != GLFW.GLFW_PRESS && action != GLFW.GLFW_REPEAT) {
+            return false;
+        }
+
+        if (listeningForFriendBind) {
+            if (key == GLFW.GLFW_KEY_ESCAPE || key == GLFW.GLFW_KEY_BACKSPACE || key == GLFW.GLFW_KEY_DELETE) {
+                FriendManager.setFriendBindKey(-1);
+                SoundUtil.playTogglePop(false);
+            } else if (key >= GLFW.GLFW_KEY_SPACE && key <= GLFW.GLFW_KEY_LAST) {
+                FriendManager.setFriendBindKey(key);
+                SoundUtil.playTogglePop(true);
+            }
+            listeningForFriendBind = false;
+            waitingForBindRelease = false;
+            return true;
+        }
+
+        if (bindingRow != null) {
+            if (key == GLFW.GLFW_KEY_ESCAPE || key == GLFW.GLFW_KEY_BACKSPACE || key == GLFW.GLFW_KEY_DELETE) {
+                assignModuleBind(bindingRow, -1);
+                SoundUtil.playTogglePop(false);
+            } else if (key >= GLFW.GLFW_KEY_SPACE && key <= GLFW.GLFW_KEY_LAST) {
+                assignModuleBind(bindingRow, key);
+                SoundUtil.playTogglePop(true);
+            }
+            bindingRow = null;
+            waitingForBindRelease = false;
+            return true;
+        }
+
+        if (friendInputFocused && activeTopTabIndex == 3) {
+            if (key == GLFW.GLFW_KEY_BACKSPACE) {
+                if (!friendInputText.isEmpty()) {
+                    friendInputText = friendInputText.substring(0, friendInputText.length() - 1);
+                }
+                return true;
+            }
+            if (key == GLFW.GLFW_KEY_DELETE) {
+                friendInputText = "";
+                return true;
+            }
+            if (key == GLFW.GLFW_KEY_ENTER || key == GLFW.GLFW_KEY_KP_ENTER) {
+                submitFriendInputNow();
+                return true;
+            }
+            if (key == GLFW.GLFW_KEY_ESCAPE) {
+                friendInputFocused = false;
+                return true;
+            }
+            if (key == GLFW.GLFW_KEY_SPACE) {
+                appendFriendInputCharFromKey(' ');
+                return true;
+            }
+            if (key >= GLFW.GLFW_KEY_A && key <= GLFW.GLFW_KEY_Z && (mods & (GLFW.GLFW_MOD_CONTROL | GLFW.GLFW_MOD_ALT)) == 0) {
+                boolean shift = (mods & GLFW.GLFW_MOD_SHIFT) != 0;
+                char ch = (char) ((shift ? 'A' : 'a') + (key - GLFW.GLFW_KEY_A));
+                appendFriendInputCharFromKey(ch);
+                return true;
+            }
+            if (key >= GLFW.GLFW_KEY_0 && key <= GLFW.GLFW_KEY_9 && (mods & (GLFW.GLFW_MOD_CONTROL | GLFW.GLFW_MOD_ALT)) == 0) {
+                char ch = (char) ('0' + (key - GLFW.GLFW_KEY_0));
+                appendFriendInputCharFromKey(ch);
+                return true;
+            }
+            if (key == GLFW.GLFW_KEY_MINUS) {
+                boolean shift = (mods & GLFW.GLFW_MOD_SHIFT) != 0;
+                appendFriendInputCharFromKey(shift ? '_' : '-');
+                return true;
+            }
+            return true;
+        }
+
+        if (!searchFocused && action == GLFW.GLFW_PRESS && key == GLFW.GLFW_KEY_SLASH) {
+            searchFocused = true;
+            lastKeyAppendedChar = '/';
+            lastKeyAppendTimeNs = System.nanoTime();
+            SoundUtil.playClick();
+            return true;
+        }
+
+        if (searchFocused) {
+            if (key == GLFW.GLFW_KEY_BACKSPACE) {
+                deleteLastSearchChar();
+                return true;
+            }
+            if (key == GLFW.GLFW_KEY_DELETE) {
+                if (!searchQuery.isEmpty()) {
+                    searchQuery = "";
+                    searchQueryLower = "";
+                    targetScrollOffset = 0.0F;
+                    filterDirty = true;
+                }
+                return true;
+            }
+            if (key == GLFW.GLFW_KEY_ENTER || key == GLFW.GLFW_KEY_KP_ENTER || key == GLFW.GLFW_KEY_ESCAPE) {
+                searchFocused = false;
+                return true;
+            }
+            if (key == GLFW.GLFW_KEY_SPACE) {
+                appendSearchCharFromKey(' ');
+                return true;
+            }
+            if (key >= GLFW.GLFW_KEY_A && key <= GLFW.GLFW_KEY_Z && (mods & (GLFW.GLFW_MOD_CONTROL | GLFW.GLFW_MOD_ALT)) == 0) {
+                boolean shift = (mods & GLFW.GLFW_MOD_SHIFT) != 0;
+                char ch = (char) ((shift ? 'A' : 'a') + (key - GLFW.GLFW_KEY_A));
+                appendSearchCharFromKey(ch);
+                return true;
+            }
+            if (key >= GLFW.GLFW_KEY_0 && key <= GLFW.GLFW_KEY_9 && (mods & (GLFW.GLFW_MOD_CONTROL | GLFW.GLFW_MOD_ALT)) == 0) {
+                char ch = (char) ('0' + (key - GLFW.GLFW_KEY_0));
+                appendSearchCharFromKey(ch);
+                return true;
+            }
+            if (key == GLFW.GLFW_KEY_MINUS) {
+                boolean shift = (mods & GLFW.GLFW_MOD_SHIFT) != 0;
+                appendSearchCharFromKey(shift ? '_' : '-');
+                return true;
+            }
+            return true;
+        }
+
+        if (key == GLFW.GLFW_KEY_DOWN) {
+            targetScrollOffset = Mth.clamp(targetScrollOffset + 18.0F, 0.0F, maxScrollOffset);
+            return true;
+        }
+        if (key == GLFW.GLFW_KEY_UP) {
+            targetScrollOffset = Mth.clamp(targetScrollOffset - 18.0F, 0.0F, maxScrollOffset);
+            return true;
+        }
+        if (key == GLFW.GLFW_KEY_PAGE_DOWN) {
+            targetScrollOffset = Mth.clamp(targetScrollOffset + listHeight * 0.75F, 0.0F, maxScrollOffset);
+            return true;
+        }
+        if (key == GLFW.GLFW_KEY_PAGE_UP) {
+            targetScrollOffset = Mth.clamp(targetScrollOffset - listHeight * 0.75F, 0.0F, maxScrollOffset);
+            return true;
+        }
+
+        return false;
+    }
+
+
+    private boolean handleGlfwCharCallback(int codepoint) {
+        if (friendInputFocused && activeTopTabIndex == 3) {
+            if (codepoint < 32 || codepoint == 127) {
+                return true;
+            }
+            char ch = (char) codepoint;
+            long nowNs = System.nanoTime();
+            if (Character.toLowerCase(ch) == Character.toLowerCase(lastKeyAppendedChar)
+                    && (nowNs - lastKeyAppendTimeNs) < 25_000_000L) {
+                lastKeyAppendedChar = 0;
+                return true;
+            }
+            appendFriendInputCharRaw(ch);
+            return true;
+        }
+        if (!searchFocused) {
+            return false;
+        }
+        if (codepoint < 32 || codepoint == 127) {
+            return true;
+        }
+        char ch = (char) codepoint;
+        long nowNs = System.nanoTime();
+        if (Character.toLowerCase(ch) == Character.toLowerCase(lastKeyAppendedChar)
+                && (nowNs - lastKeyAppendTimeNs) < 25_000_000L) {
+            lastKeyAppendedChar = 0;
+            return true;
+        }
+        appendSearchCharRaw(ch);
+        return true;
+    }
+
+    private void appendFriendInputCharFromKey(char ch) {
+        lastKeyAppendedChar = ch;
+        lastKeyAppendTimeNs = System.nanoTime();
+        appendFriendInputCharRaw(ch);
+    }
+
+    private void appendFriendInputCharRaw(char ch) {
+        if (friendInputText.length() >= 36) {
+            return;
+        }
+        if (Character.isLetterOrDigit(ch) || ch == '_' || ch == '-' || ch == ' ') {
+            friendInputText += ch;
+        }
+    }
+
+    private void appendSearchCharFromKey(char ch) {
+        lastKeyAppendedChar = ch;
+        lastKeyAppendTimeNs = System.nanoTime();
+        appendSearchCharRaw(ch);
+    }
+
+    private void appendSearchCharRaw(char ch) {
+        if (searchQuery.length() >= 28) {
+            return;
+        }
+        searchQuery += ch;
+        searchQueryLower = searchQuery.toLowerCase(Locale.ROOT);
+        targetScrollOffset = 0.0F;
+        filterDirty = true;
+    }
+
+    private void deleteLastSearchChar() {
+        if (!searchQuery.isEmpty()) {
+            searchQuery = searchQuery.substring(0, searchQuery.length() - 1);
+            searchQueryLower = searchQuery.toLowerCase(Locale.ROOT);
+            targetScrollOffset = 0.0F;
+            filterDirty = true;
+        }
+    }
+
+    private void pollGlfwInputAndInteractions(int mouseX, int mouseY) {
+        ensureGlfwCallbacksHooked();
+        long windowHandle = GLFW.glfwGetCurrentContext();
+        if (windowHandle == 0L) {
+            return;
+        }
+
+        if (listeningForFriendBind) {
+            if (waitingForBindRelease) {
+                if (GLFW.glfwGetMouseButton(windowHandle, GLFW.GLFW_MOUSE_BUTTON_LEFT) != GLFW.GLFW_PRESS
+                        && GLFW.glfwGetMouseButton(windowHandle, GLFW.GLFW_MOUSE_BUTTON_RIGHT) != GLFW.GLFW_PRESS) {
+                    waitingForBindRelease = false;
+                }
+                return;
+            }
+            for (int btn = GLFW.GLFW_MOUSE_BUTTON_MIDDLE; btn <= GLFW.GLFW_MOUSE_BUTTON_8; btn++) {
+                if (GLFW.glfwGetMouseButton(windowHandle, btn) == GLFW.GLFW_PRESS) {
+                    FriendManager.setFriendBindKey(-100 - btn);
+                    listeningForFriendBind = false;
+                    SoundUtil.playTogglePop(true);
+                    return;
+                }
+            }
+            return;
+        }
+
+        if (bindingRow != null) {
+            if (waitingForBindRelease) {
+                if (GLFW.glfwGetMouseButton(windowHandle, GLFW.GLFW_MOUSE_BUTTON_LEFT) != GLFW.GLFW_PRESS
+                        && GLFW.glfwGetMouseButton(windowHandle, GLFW.GLFW_MOUSE_BUTTON_RIGHT) != GLFW.GLFW_PRESS) {
+                    waitingForBindRelease = false;
+                }
+                return;
+            }
+            for (int btn = GLFW.GLFW_MOUSE_BUTTON_MIDDLE; btn <= GLFW.GLFW_MOUSE_BUTTON_8; btn++) {
+                if (GLFW.glfwGetMouseButton(windowHandle, btn) == GLFW.GLFW_PRESS) {
+                    assignModuleBind(bindingRow, -100 - btn);
+                    bindingRow = null;
+                    SoundUtil.playTogglePop(true);
+                    return;
+                }
+            }
+            return;
+        }
+
+        boolean leftDown = GLFW.glfwGetMouseButton(windowHandle, GLFW.GLFW_MOUSE_BUTTON_LEFT) == GLFW.GLFW_PRESS;
+        boolean rightDown = GLFW.glfwGetMouseButton(windowHandle, GLFW.GLFW_MOUSE_BUTTON_RIGHT) == GLFW.GLFW_PRESS;
+        boolean leftClicked = leftDown && !wasLeftMouseDown;
+        boolean rightClicked = rightDown && !wasRightMouseDown;
+        wasLeftMouseDown = leftDown;
+        wasRightMouseDown = rightDown;
+
+        if (leftDown) {
+            if (activeDraggingSliderEntry != null && activeSliderTrackW > 0) {
+                NumberSetting ns = (NumberSetting) activeDraggingSliderEntry.setting;
+                double ratio = Mth.clamp((double) (mouseX - activeSliderTrackX) / (double) activeSliderTrackW, 0.0D, 1.0D);
+                double rawVal = ns.getMin() + ratio * (ns.getMax() - ns.getMin());
+                double inc = activeDraggingSliderEntry.step;
+                if (inc > 0.0D) {
+                    rawVal = Math.round(rawVal / inc) * inc;
+                }
+                ns.setValue(Mth.clamp(rawVal, ns.getMin(), ns.getMax()));
+                updateCachedSliderStringIfNeeded(activeDraggingSliderEntry);
+                return;
+            }
+            if (draggingScrollbar && maxScrollOffset > 0.0F) {
+                float deltaY = mouseY - scrollbarDragStartMouseY;
+                float scrollScale = maxScrollOffset / (float) Math.max(1, listHeight - 30);
+                targetScrollOffset = Mth.clamp(scrollbarDragStartOffset + deltaY * scrollScale, 0.0F, maxScrollOffset);
+                scrollOffset = targetScrollOffset;
+                return;
+            }
+        } else {
+            activeDraggingSliderEntry = null;
+            draggingScrollbar = false;
+        }
+
+        if (!leftClicked && !rightClicked) {
+            return;
+        }
+
+        if (leftClicked) {
+            for (int i = 0; i < TOP_TABS.length; i++) {
+                if (isHovered(mouseX, mouseY, topTabX[i], navContainerY, topTabW[i], navContainerH)) {
+                    if (activeTopTabIndex != i) {
+                        activeTopTabIndex = i;
+                        SoundUtil.playClick();
+                    }
+                    return;
+                }
+            }
+
+            if (isHovered(mouseX, mouseY, searchBoxX, searchBoxY, searchBoxW, searchBoxH)) {
+                if (searchFocused || !searchQuery.isEmpty()) {
+                    if (isHovered(mouseX, mouseY, searchClearBtnX, searchBtnY, 14, 14)) {
+                        if (!searchQuery.isEmpty()) {
+                            searchQuery = "";
+                            searchQueryLower = "";
+                            targetScrollOffset = 0.0F;
+                            filterDirty = true;
+                        }
+                        searchFocused = true;
+                        SoundUtil.playClick();
+                        return;
+                    }
+                    if (isHovered(mouseX, mouseY, searchBackspaceBtnX, searchBtnY, 16, 14)) {
+                        deleteLastSearchChar();
+                        searchFocused = true;
+                        SoundUtil.playClick();
+                        return;
+                    }
+                }
+                if (!searchFocused) {
+                    searchFocused = true;
+                    SoundUtil.playClick();
+                }
+                return;
+            } else {
+                searchFocused = false;
+            }
+
+            for (int i = 0; i < CATEGORY_PILLS.length; i++) {
+                int px = categoryPillX[i];
+                int pw = categoryPillW[i];
+                if (px + pw <= listRight && isHovered(mouseX, mouseY, px, searchBoxY, pw, searchBoxH)) {
+                    if (activeCategoryIndex != i) {
+                        activeCategoryIndex = i;
+                        targetScrollOffset = 0.0F;
+                        scrollOffset = 0.0F;
+                        filterDirty = true;
+                        SoundUtil.playClick();
+                    }
+                    return;
+                }
+            }
+
+            if (maxScrollOffset > 1.0F && isHovered(mouseX, mouseY, listRight - 6, listTop, 8, listHeight)) {
+                draggingScrollbar = true;
+                scrollbarDragStartMouseY = mouseY;
+                scrollbarDragStartOffset = scrollOffset;
+                return;
+            }
+        }
+
+        if (activeTopTabIndex == 3) {
+            handleFriendsTabClick(mouseX, mouseY, leftClicked, rightClicked);
+            return;
+        }
+        if (activeTopTabIndex == 0 && isHovered(mouseX, mouseY, listLeft, listTop, listRight - listLeft, listHeight)) {
+            handleModuleListClick(mouseX, mouseY, leftClicked, rightClicked);
+        } else if (activeTopTabIndex == 4 && clientTabUiVolumeEntry != null) {
+            int rowY = listTop + 42;
+            if (isHovered(mouseX, mouseY, listLeft, rowY, rowWidth, SETTING_ROW_HEIGHT)) {
+                handleSettingRowClick(clientTabUiVolumeEntry, listLeft, rowY, rowWidth, mouseX, mouseY, leftClicked);
+            }
+        }
+    }
+
+    private void handleFriendsTabClick(int mouseX, int mouseY, boolean leftClicked, boolean rightClicked) {
+        if (!leftClicked && !rightClicked) {
+            return;
+        }
+        if (isHovered(mouseX, mouseY, friendInputBoxX, friendInputBoxY, friendInputBoxW, friendInputBoxH)) {
+            friendInputFocused = true;
+            searchFocused = false;
+            SoundUtil.playClick();
+            return;
+        } else {
+            friendInputFocused = false;
+        }
+
+        if (leftClicked && isHovered(mouseX, mouseY, friendAddBtnX, friendAddBtnY, friendAddBtnW, friendAddBtnH)) {
+            submitFriendInputNow();
+            return;
+        }
+
+        if (isHovered(mouseX, mouseY, friendBindBtnX, friendBindBtnY, friendBindBtnW, friendBindBtnH)) {
+            if (rightClicked) {
+                FriendManager.setFriendBindKey(-1);
+                listeningForFriendBind = false;
+                SoundUtil.playTogglePop(false);
+            } else {
+                listeningForFriendBind = true;
+                waitingForBindRelease = true;
+                SoundUtil.playClick();
+            }
+            return;
+        }
+
+        if (leftClicked && isHovered(mouseX, mouseY, listLeft, listTop, listRight - listLeft, listHeight)) {
+            List<FriendRecord> friends = FriendManager.getSortedFriends();
+            int friendRowH = 40;
+            int scrollInt = Math.round(friendScrollOffset);
+            for (int i = 0; i < friends.size(); i++) {
+                FriendRecord rec = friends.get(i);
+                int rowTop = listTop + i * friendRowH - scrollInt;
+                int rowBottom = rowTop + friendRowH;
+                if (rowBottom < listTop || rowTop > listBottom) {
+                    continue;
+                }
+                int remW = 28;
+                int remH = 18;
+                int remX = listLeft + rowWidth - remW - 10;
+                int remY = rowTop + (friendRowH - remH) / 2;
+                if (isHovered(mouseX, mouseY, remX, remY, remW, remH)) {
+                    FriendManager.removeFriend(rec.uuid);
+                    SoundUtil.playTogglePop(false);
+                    return;
+                }
+            }
+        }
+    }
+
+    private void handleModuleListClick(int mouseX, int mouseY, boolean leftClicked, boolean rightClicked) {
+        int scrollInt = Math.round(scrollOffset);
+        int toggleW = TOGGLE_PILL_WIDTH;
+        int toggleH = TOGGLE_PILL_HEIGHT;
+        int toggleX = listLeft + rowWidth - toggleW - 12;
+        int chevronX = toggleX - 14;
+
+        for (int i = 0; i < filteredRowCount; i++) {
+            CachedModuleRow row = filteredRows[i];
+            int rowTop = listTop + row.cachedYOffset - scrollInt;
+            int rowBottom = rowTop + row.cachedTotalHeight;
+            if (rowBottom < listTop || rowTop > listBottom) {
+                continue;
+            }
+
+            if (isHovered(mouseX, mouseY, listLeft, rowTop, rowWidth, ROW_HEIGHT)) {
+                boolean isActionMacro = isActionMacroRow(row);
+                int rowChevronX = isActionMacro ? (listLeft + rowWidth - 18) : chevronX;
+                int toggleY = rowTop + (ROW_HEIGHT - toggleH) / 2;
+                int bindPillW = row.cachedBindPillWidth;
+                int bindPillH = 15;
+                int bindPillX = rowChevronX - bindPillW - 8;
+                int bindPillY = rowTop + (ROW_HEIGHT - bindPillH) / 2;
+
+                if ((leftClicked || rightClicked) && isHovered(mouseX, mouseY, bindPillX, bindPillY, bindPillW, bindPillH)) {
+                    bindingRow = row;
+                    waitingForBindRelease = true;
+                    SoundUtil.playClick();
+                    return;
+                }
+
+                if (isActionMacro) {
+                    // Action macro (AutoLunge) has no ON/OFF toggle; clicking the row expands/collapses settings
+                    if ((leftClicked || rightClicked) && row.settings.length > 0) {
+                        row.expanded = !row.expanded;
+                        layoutDirty = true;
+                        SoundUtil.playClick();
+                    }
+                    return;
+                }
+
+                if ((leftClicked || rightClicked) && isHovered(mouseX, mouseY, toggleX - 2, toggleY - 2, toggleW + 4, toggleH + 4)) {
+                    row.module.toggle();
+                    SoundUtil.playTogglePop(row.module.isEnabled());
+                    return;
+                }
+
+                if (rightClicked) {
+                    row.module.toggle();
+                    SoundUtil.playTogglePop(row.module.isEnabled());
+                    return;
+                }
+
+                if (leftClicked) {
+                    if (row.settings.length > 0) {
+                        row.expanded = !row.expanded;
+                        layoutDirty = true;
+                        SoundUtil.playClick();
+                    }
+                    return;
+                }
+            }
+
+            if (row.expanded && row.expandAnim > 0.5F
+                    && isHovered(mouseX, mouseY, listLeft, rowTop + ROW_HEIGHT, rowWidth, row.cachedTotalHeight - ROW_HEIGHT)) {
+                int drawerX = listLeft + 4;
+                int drawerW = rowWidth - 8;
+                int curY = rowTop + ROW_HEIGHT + 5;
+
+                for (int s = 0; s < row.settings.length; s++) {
+                    CachedSettingEntry se = row.settings[s];
+                    if (!se.visible) {
+                        continue;
+                    }
+                    if (isHovered(mouseX, mouseY, drawerX, curY, drawerW, SETTING_ROW_HEIGHT)) {
+                        handleSettingRowClick(se, drawerX, curY, drawerW, mouseX, mouseY, leftClicked);
+                        layoutDirty = true;
+                        return;
+                    }
+                    curY += SETTING_ROW_HEIGHT;
+                }
+            }
+        }
+    }
+
+    private void handleSettingRowClick(
+            CachedSettingEntry se,
+            int drawerX,
+            int curY,
+            int drawerW,
+            int mouseX,
+            int mouseY,
+            boolean leftClicked
+    ) {
+        switch (se.type) {
+            case 0 -> {
+                if (leftClicked) {
+                    BooleanSetting bs = (BooleanSetting) se.setting;
+                    Object raw = ((Setting<?>) bs).getValue();
+                    boolean curState = (raw instanceof Boolean b) ? b : (raw instanceof Number n && n.intValue() > 0);
+                    boolean nextState = !curState;
+                    bs.setValue(nextState);
+                    SoundUtil.playTogglePop(nextState);
+                }
+            }
+            case 1 -> {
+                if (leftClicked) {
+                    NumberSetting ns = (NumberSetting) se.setting;
+                    int trackW = 120;
+                    int trackX = drawerX + drawerW - trackW - 14;
+                    activeDraggingSliderEntry = se;
+                    activeSliderTrackX = trackX;
+                    activeSliderTrackW = trackW;
+                    double ratio = Mth.clamp((double) (mouseX - trackX) / (double) trackW, 0.0D, 1.0D);
+                    double rawVal = ns.getMin() + ratio * (ns.getMax() - ns.getMin());
+                    double inc = se.step;
+                    if (inc > 0.0D) {
+                        rawVal = Math.round(rawVal / inc) * inc;
+                    }
+                    ns.setValue(Mth.clamp(rawVal, ns.getMin(), ns.getMax()));
+                    updateCachedSliderStringIfNeeded(se);
+                    SoundUtil.playClick();
+                }
+            }
+            case 2 -> {
+                ModeSetting ms = (ModeSetting) se.setting;
+                int rightEdge = drawerX + drawerW - 14;
+                for (int m = se.modeOptions.length - 1; m >= 0; m--) {
+                    String modeLabel = se.modeOptions[m];
+                    int pw = se.modePillWidths[m];
+                    int px = rightEdge - pw;
+                    int py = curY + 4;
+                    if (isHovered(mouseX, mouseY, px, py, pw, 18)) {
+                        ms.setValue(modeLabel);
+                        SoundUtil.playClick();
+                        return;
+                    }
+                    rightEdge = px - 4;
+                }
+                if (leftClicked && se.modeOptions.length > 0) {
+                    List<String> modes = ms.getModes();
+                    int idx = modes.indexOf(ms.getValue());
+                    ms.setValue(modes.get((idx + 1) % modes.size()));
+                    SoundUtil.playClick();
+                }
+            }
+            case 3 -> {
+                MultiModeSetting mms = (MultiModeSetting) se.setting;
+                int rightEdge = drawerX + drawerW - 14;
+                for (int m = se.modeOptions.length - 1; m >= 0; m--) {
+                    String opt = se.modeOptions[m];
+                    int pw = se.modePillWidths[m];
+                    int px = rightEdge - pw;
+                    int py = curY + 4;
+                    if (isHovered(mouseX, mouseY, px, py, pw, 18)) {
+                        toggleMultiModeOption(mms, opt);
+                        SoundUtil.playTogglePop(mms.isSelected(opt));
+                        return;
+                    }
+                    rightEdge = px - 3;
+                }
+            }
+        }
+    }
+
+    private void refreshModuleBindLabelIfNeeded(CachedModuleRow row, boolean forceRecalcWidth) {
+        int key = resolveEffectiveBindKey(row);
+        if (!forceRecalcWidth && key == row.lastObservedKey) {
+            return;
+        }
+        row.lastObservedKey = key;
+        row.cachedBindText = formatBoundKeyDisplayName(key);
+        row.cachedBindComponent = Component.literal(row.cachedBindText).withStyle(nunitoRegularStyle);
+        if (this.font != null) {
+            row.cachedBindTextWidth = this.font.width(row.cachedBindComponent);
+            row.cachedBindPillWidth = Math.max(30, row.cachedBindTextWidth + 12);
+        }
+    }
+
+    private static String formatBoundKeyDisplayName(int key) {
+        if (key == GLFW.GLFW_KEY_UNKNOWN || key == 0 || key == -1) {
+            return "NONE";
+        }
+        if (key < -1) {
+            int btn = -100 - key;
+            return "M" + (btn + 1);
+        }
+        switch (key) {
+            case GLFW.GLFW_KEY_LEFT_SHIFT -> {
+                return "LSHIFT";
+            }
+            case GLFW.GLFW_KEY_RIGHT_SHIFT -> {
+                return "RSHIFT";
+            }
+            case GLFW.GLFW_KEY_LEFT_CONTROL -> {
+                return "LCTRL";
+            }
+            case GLFW.GLFW_KEY_RIGHT_CONTROL -> {
+                return "RCTRL";
+            }
+            case GLFW.GLFW_KEY_LEFT_ALT -> {
+                return "LALT";
+            }
+            case GLFW.GLFW_KEY_RIGHT_ALT -> {
+                return "RALT";
+            }
+            case GLFW.GLFW_KEY_SPACE -> {
+                return "SPACE";
+            }
+            case GLFW.GLFW_KEY_TAB -> {
+                return "TAB";
+            }
+            case GLFW.GLFW_KEY_CAPS_LOCK -> {
+                return "CAPS";
+            }
+            default -> {
+            }
+        }
+        try {
+            String localized = InputConstants.Type.KEYSYM.getOrCreate(key).getDisplayName().getString();
+            if (localized != null && !localized.isBlank() && !localized.startsWith("key.keyboard.")) {
+                return localized.trim().toUpperCase(Locale.ROOT);
+            }
+        } catch (Throwable ignored) {
+        }
+        try {
+            String glfwName = GLFW.glfwGetKeyName(key, 0);
+            if (glfwName != null && !glfwName.isBlank()) {
+                return glfwName.trim().toUpperCase(Locale.ROOT);
+            }
+        } catch (Throwable ignored) {
+        }
+        return "KEY " + key;
+    }
+
+    private static String formatSliderValue(double value, double increment) {
+        if (increment >= 1.0D) {
+            return Integer.toString((int) Math.round(value));
+        }
+        if (increment >= 0.1D) {
+            return String.format(Locale.ROOT, "%.1f", value);
+        }
+        return String.format(Locale.ROOT, "%.2f", value);
+    }
+
+    private static boolean isHovered(int mouseX, int mouseY, int x, int y, int w, int h) {
+        return mouseX >= x && mouseX <= (x + w) && mouseY >= y && mouseY <= (y + h);
+    }
+}

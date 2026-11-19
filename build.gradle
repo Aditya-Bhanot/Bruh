@@ -6,11 +6,11 @@ plugins {
 import org.gradle.jvm.toolchain.JavaLanguageVersion
 
 version = '1.0.0'
-group = 'releon.ru'
+group = 'attrium.ru'
 
 def localBuildRoot = System.getenv("LOCALAPPDATA")
 if (localBuildRoot != null && !localBuildRoot.isBlank()) {
-	layout.buildDirectory = file("${localBuildRoot}/Releon/gradle-build")
+	layout.buildDirectory = file("${localBuildRoot}/Attrium/gradle-build")
 }
 
 repositories {
