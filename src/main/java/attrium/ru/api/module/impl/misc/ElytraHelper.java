@@ -7,7 +7,6 @@ import net.minecraft.network.protocol.game.ServerboundPlayerCommandPacket;
 import net.minecraft.network.protocol.game.ServerboundSetCarriedItemPacket;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.EquipmentSlot;
-import net.minecraft.world.inventory.ClickType;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import org.lwjgl.glfw.GLFW;
@@ -41,7 +40,6 @@ import java.util.concurrent.ThreadLocalRandom;
 public class ElytraHelper extends Module {
     private static ElytraHelper instance;
 
-    private static final int CHEST_ARMOR_MENU_SLOT = 6;
     private static final int BASE_SWAP_COOLDOWN_TICKS = 4;
 
     private enum SwapPhase {
@@ -243,7 +241,8 @@ public class ElytraHelper extends Module {
                 ? findBestChestplateSlot(client)
                 : findBestElytraSlot(client);
 
-        if (slot < 0 || slot >= 36) {
+        // Strictly hotbar-only (slots 0..8): never pull or swap items from main inventory (9..35)
+        if (slot < 0 || slot >= 9) {
             return;
         }
 
@@ -251,24 +250,11 @@ public class ElytraHelper extends Module {
         this.targetArmorSlot = slot;
         this.previousHotbarSlot = client.player.getInventory().getSelectedSlot();
 
-        if (slot < 9) {
-            // Legit visible hotbar swap: switch to armor slot in client view first
-            selectHotbarSlotWithPacket(client, slot);
-            this.phaseTicksElapsed = 0;
-            this.requiredPhaseTicks = computeStageDelayTicks();
-            this.phase = SwapPhase.WAIT_BEFORE_EQUIP;
-        } else {
-            // Inventory slot (9..35): clean 3-click swap into chest slot 6
-            int containerId = client.player.inventoryMenu.containerId;
-            client.gameMode.handleInventoryMouseClick(containerId, slot, 0, ClickType.PICKUP, client.player);
-            client.gameMode.handleInventoryMouseClick(containerId, CHEST_ARMOR_MENU_SLOT, 0, ClickType.PICKUP, client.player);
-            client.gameMode.handleInventoryMouseClick(containerId, slot, 0, ClickType.PICKUP, client.player);
-            tryStartAirGlide(client);
-            nextAllowedSwapTick = clientTickCounter + BASE_SWAP_COOLDOWN_TICKS;
-            this.targetArmorSlot = -1;
-            this.previousHotbarSlot = -1;
-            this.phase = SwapPhase.IDLE;
-        }
+        // Legit visible hotbar swap: switch to armor slot in client view first
+        selectHotbarSlotWithPacket(client, slot);
+        this.phaseTicksElapsed = 0;
+        this.requiredPhaseTicks = computeStageDelayTicks();
+        this.phase = SwapPhase.WAIT_BEFORE_EQUIP;
     }
 
     private void advanceSwapSequence(Minecraft client) {
@@ -348,8 +334,8 @@ public class ElytraHelper extends Module {
 
     private int findBestElytraSlot(Minecraft client) {
         int fallbackBroken = -1;
-        // Prefer hotbar (0..8) first for legit visible slot swap, then main inventory (9..35)
-        for (int i = 0; i < 36; i++) {
+        // Strictly hotbar-only (0..8): never use main inventory (9..35)
+        for (int i = 0; i < 9; i++) {
             ItemStack stack = client.player.getInventory().getItem(i);
             if (!stack.isEmpty() && stack.is(Items.ELYTRA)) {
                 if (stack.getDamageValue() < stack.getMaxDamage() - 1) {
@@ -366,24 +352,16 @@ public class ElytraHelper extends Module {
     private int findBestChestplateSlot(Minecraft client) {
         int bestHotbarSlot = -1;
         int bestHotbarTier = -1;
-        int bestInvSlot = -1;
-        int bestInvTier = -1;
-        for (int i = 0; i < 36; i++) {
+        // Strictly hotbar-only (0..8): never use main inventory (9..35)
+        for (int i = 0; i < 9; i++) {
             ItemStack stack = client.player.getInventory().getItem(i);
             int tier = getChestplateTier(stack);
-            if (tier > 0) {
-                if (i < 9) {
-                    if (tier > bestHotbarTier) {
-                        bestHotbarTier = tier;
-                        bestHotbarSlot = i;
-                    }
-                } else if (tier > bestInvTier) {
-                    bestInvTier = tier;
-                    bestInvSlot = i;
-                }
+            if (tier > bestHotbarTier) {
+                bestHotbarTier = tier;
+                bestHotbarSlot = i;
             }
         }
-        return bestHotbarSlot != -1 ? bestHotbarSlot : bestInvSlot;
+        return bestHotbarSlot;
     }
 
     private int getChestplateTier(ItemStack stack) {

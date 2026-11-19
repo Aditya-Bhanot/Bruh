@@ -284,10 +284,10 @@ public class ActionManager {
         if (mc.player == null || mc.player.getInventory() == null || item == null) {
             return -1;
         }
-        for (int i = 0; i < 36; i++) {
+        for (int i = 0; i < 9; i++) {
             ItemStack stack = mc.player.getInventory().getItem(i);
             if (!stack.isEmpty() && (stack.is(item) || stack.getItem() == item)) {
-                return i < 9 ? i + 36 : i;
+                return i + 36;
             }
         }
         return -1;
@@ -298,13 +298,10 @@ public class ActionManager {
             return;
         }
         int containerId = mc.player.inventoryMenu.containerId;
+        // Strictly hotbar-only (container slots 36..44 = hotbar 0..8); never touch main inventory (9..35)
         if (containerSlot >= 36 && containerSlot <= 44) {
             int hotbarIndex = containerSlot - 36;
             mc.gameMode.handleInventoryMouseClick(containerId, 6, hotbarIndex, ClickType.SWAP, mc.player);
-        } else {
-            mc.gameMode.handleInventoryMouseClick(containerId, containerSlot, 0, ClickType.PICKUP, mc.player);
-            mc.gameMode.handleInventoryMouseClick(containerId, 6, 0, ClickType.PICKUP, mc.player);
-            mc.gameMode.handleInventoryMouseClick(containerId, containerSlot, 0, ClickType.PICKUP, mc.player);
         }
     }
 }

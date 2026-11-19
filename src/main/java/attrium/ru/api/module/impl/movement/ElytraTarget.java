@@ -814,7 +814,7 @@ public final class ElytraTarget extends Module {
                 || !MaceTarget.isEntityAllowedByAutoMaceTargets(mc, target)) {
             return false;
         }
-        if (!ActionManager.hasLineOfSight(mc, target)) {
+        if (getValidChestplateSlot() == -1 || !ActionManager.hasLineOfSight(mc, target)) {
             return false;
         }
 
