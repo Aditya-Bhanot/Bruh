@@ -2612,20 +2612,6 @@ public class GlassClickGuiScreen extends Screen {
             return true;
         }
 
-        if (configInputFocused && activeTopTabIndex == 1) {
-            if (codepoint < 32 || codepoint == 127) {
-                return true;
-            }
-            char ch = (char) codepoint;
-            long nowNs = System.nanoTime();
-            if (Character.toLowerCase(ch) == Character.toLowerCase(lastKeyAppendedChar)
-                    && (nowNs - lastKeyAppendTimeNs) < 25_000_000L) {
-                lastKeyAppendedChar = 0;
-                return true;
-            }
-            appendConfigInputCharRaw(ch);
-            return true;
-        }
         if (friendInputFocused && activeTopTabIndex == 3) {
             if (key == GLFW.GLFW_KEY_BACKSPACE) {
                 if (!friendInputText.isEmpty()) {
@@ -2739,6 +2725,20 @@ public class GlassClickGuiScreen extends Screen {
 
 
     private boolean handleGlfwCharCallback(int codepoint) {
+        if (configInputFocused && activeTopTabIndex == 1) {
+            if (codepoint < 32 || codepoint == 127) {
+                return true;
+            }
+            char ch = (char) codepoint;
+            long nowNs = System.nanoTime();
+            if (Character.toLowerCase(ch) == Character.toLowerCase(lastKeyAppendedChar)
+                    && (nowNs - lastKeyAppendTimeNs) < 25_000_000L) {
+                lastKeyAppendedChar = 0;
+                return true;
+            }
+            appendConfigInputCharRaw(ch);
+            return true;
+        }
         if (friendInputFocused && activeTopTabIndex == 3) {
             if (codepoint < 32 || codepoint == 127) {
                 return true;
@@ -3616,7 +3616,7 @@ public class GlassClickGuiScreen extends Screen {
                     if (rec != null && rec.uuid != null) {
                         JsonObject fObj = new JsonObject();
                         fObj.addProperty("uuid", rec.uuid.toString());
-                        fObj.addProperty("name", rec.name != null ? rec.name : "");
+                        fObj.addProperty("name", rec.username != null ? rec.username : "");
                         friendsArr.add(fObj);
                     }
                 }
