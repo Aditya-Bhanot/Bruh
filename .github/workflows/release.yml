@@ -1,0 +1,36 @@
+name: Auto Build and Release JAR
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build-jar:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download project code
+        uses: actions/checkout@v4
+
+      # Installs Java 21 (Change '21' to '17' or '11' if your project uses an older Java version)
+      - name: Install Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      # Gives Gradle permission to run and builds the .jar inside "build/libs"
+      - name: Build the JAR
+        run: |
+          chmod +x gradlew
+          ./gradlew build -x test
+
+      # Grabs the .jar file from "build/libs" and attaches it to your Release
+      - name: Upload JAR to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/libs/Attrium-Tech-1.0.0.jar
+          
