@@ -1,23 +1,22 @@
-# Build artifacts & binaries
-build/
-bin/
-out/
-target/
-*.class
-*.jar
-*.war
-*.ear
-*.apk
-*.aar
+# Gradle & build outputs
+/.gradle/
+/build/
+/target/
+/out/
 
-# Gradle caches
-.gradle/
-gradle-app.setting
+# Minecraft runtime folder
+/run/
 
-# IDE & OS cache files
-.idea/
+# IDE & editor files
+/.idea/
 *.iml
-.vscode/
+/.vscode/
+/.settings/
+/.project
+/.classpath
+
+# OS & temporary files
 .DS_Store
+Thumbs.db
 *.log
 *.tmp

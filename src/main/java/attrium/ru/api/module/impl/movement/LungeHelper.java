@@ -1,23 +1,21 @@
 package attrium.ru.api.module.impl.movement;
 
 import com.mojang.blaze3d.platform.InputConstants;
-import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.network.protocol.game.ServerboundPlayerActionPacket;
 import net.minecraft.network.protocol.game.ServerboundSetCarriedItemPacket;
-import net.minecraft.network.protocol.game.ServerboundSwingPacket;
 import net.minecraft.world.InteractionHand;
-import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
-import net.minecraft.world.item.Items;
-import net.minecraft.world.item.TridentItem;
 import org.lwjgl.glfw.GLFW;
 import attrium.ru.api.events.annotation.SubscribeEvent;
 import attrium.ru.api.events.impl.DrawEvent;
 import attrium.ru.api.events.impl.TickEvent;
 import attrium.ru.api.module.Module;
 import attrium.ru.api.module.ModuleCategory;
-import attrium.ru.api.module.impl.combat.MaceTarget;
 import attrium.ru.api.settings.impl.BooleanSetting;
 import attrium.ru.api.settings.impl.ModeSetting;
 import attrium.ru.api.settings.impl.NumberSetting;
@@ -29,37 +27,26 @@ import java.util.Locale;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
- * LungeHelper Module (Single Canonical Module — AutoLunge & AutoSpear Eradicated)
- * (Minecraft 1.21.11 Official Mojang Mappings):
+ * LungeHelper Module (Spear-Only — Minecraft 1.21.11 Official Mojang Mappings):
  *
- * Uses `AutoMaceSlotSystem.swapSlot(slot, true)` with the 3-Stage Tick-Delayed Slot Swap:
- *   1. Tick 0 (On Bind Press): Record `previousSlot = mc.player.getInventory().getSelectedSlot();`
- *      and call `AutoMaceSlotSystem.swapSlot(lungeSlot, true);`.
- *   2. Tick 1 (Next Tick): Confirm slot with `if (activeLungeSlot >= 0 && activeLungeSlot < 9 && client.player.getInventory().getSelectedSlot() != activeLungeSlot) client.player.getInventory().setSelectedSlot(activeLungeSlot);` and send
- *      `PlayerInteractItemC2SPacket` (`mc.gameMode.useItem(mc.player, InteractionHand.MAIN_HAND)` + `mc.player.swing(InteractionHand.MAIN_HAND)`).
- *   3. Tick 2 & Tick 3 (Wait Strictly 2 Ticks After Use Packet): Wait 2 full ticks after the use packet
- *      is sent before calling `if (previousSlot >= 0 && previousSlot < 9 && client.player.getInventory().getSelectedSlot() != previousSlot) client.player.getInventory().setSelectedSlot(previousSlot);`.
+ * Single, legit-looking Spear Lunge Swap (works on ground AND in midair):
+ *   1. Waits until the player's attack strength bar is 100% charged (`getAttackStrengthScale(0.5F) >= 1.0F`).
+ *   2. Tick 0 (Lunge Tick):
+ *        a) Visibly switches client hotbar slot to the Spear (`setSelectedSlot(spearSlot)`)
+ *           and sends `ServerboundSetCarriedItemPacket(spearSlot)` (C09) FIRST.
+ *        b) Dispatches `ServerboundPlayerActionPacket(Action.STAB, BlockPos.ZERO, Direction.DOWN)`
+ *           + `player.swing(InteractionHand.MAIN_HAND)` + `player.resetAttackStrengthTicker()`.
+ *   3. Tick 1-2 (Visible Legit Hold): Keeps the Spear visibly selected in client view for 2 ticks (~100ms)
+ *      so the hotbar highlight and first-person Spear jab animation clearly appear on screen.
+ *   4. Tick 2 (Clean Swap-Back): Visibly switches back to the return/cooldown slot so your fast
+ *      carrier slot recharges the attack bar for the next ground or midair lunge.
  */
 public class LungeHelper extends Module {
     private static LungeHelper instance;
 
-    public static final class AutoMace {
-        private AutoMace() {
-        }
-
-        public static boolean isEnabled() {
-            return MaceTarget.isAutoMaceEnabled();
-        }
-
-        public static boolean canExecuteStrike() {
-            return MaceTarget.canExecuteStrike();
-        }
-    }
-
     private enum LungePhase {
         IDLE,
-        TICK_1_SEND_USE_PACKET,
-        WAIT_2_TICKS_BEFORE_REVERT
+        HOLD_VISIBLE_SPEAR_BEFORE_SWAP_BACK
     }
 
     // ==================== 1. LungeHelper Configuration UI ====================
@@ -72,19 +59,19 @@ public class LungeHelper extends Module {
 
     private final BooleanSetting holdToSpam = register(new BooleanSetting(
             "Hold To Spam",
-            "Continuously repeat the lunge sequence while holding the keybind (respecting tick cooldowns)",
+            "Continuously repeat the Spear lunge every time your attack bar reaches 100% while holding the keybind",
             false
     ));
 
     private final BooleanSetting swapBack = register(new BooleanSetting(
             "Swap Back",
-            "Restore the previously held hotbar item 2 ticks after the lunge use packet is sent",
+            "Visibly return to your previously held hotbar slot after the Spear jab",
             true
     ));
 
     private final BooleanSetting swapBackToSelectedSlot = register(new BooleanSetting(
             "SwapBack To Selected Slot",
-            "Override standard Swap Back and force the hotbar to return to a defined slot (1-9)",
+            "Override standard Swap Back and always return to a specific hotbar slot (1-9)",
             false
     ));
 
@@ -103,7 +90,7 @@ public class LungeHelper extends Module {
 
     private final NumberSetting minRandomTicks = register(new NumberSetting(
             "Min Random (Ticks)",
-            "Minimum client ticks (0 - 10) to wait between lunges",
+            "Minimum extra client ticks (0 - 10) to wait between repeated lunges",
             2.0D,
             0.0D,
             10.0D,
@@ -112,7 +99,7 @@ public class LungeHelper extends Module {
 
     private final NumberSetting maxRandomTicks = register(new NumberSetting(
             "Max Random (Ticks)",
-            "Maximum client ticks (0 - 10) to wait between lunges",
+            "Maximum extra client ticks (0 - 10) to wait between repeated lunges",
             5.0D,
             0.0D,
             10.0D,
@@ -121,7 +108,7 @@ public class LungeHelper extends Module {
 
     private final ModeSetting cooldownSlotSelector = register(new ModeSetting(
             "Cooldown Slot",
-            "Hotbar slot (1-9) the client swaps to for weapon attribute/cooldown while holding the bind",
+            "Fast-recharge hotbar slot (1-9) to hold between lunges (e.g. empty hand or food)",
             "None",
             "None", "1", "2", "3", "4", "5", "6", "7", "8", "9"
     ));
@@ -135,23 +122,20 @@ public class LungeHelper extends Module {
             1.0D
     ));
 
-    // ==================== 2. Multi-Tick State Machine Fields ====================
+    // ==================== 2. State Fields ====================
 
     private static volatile int syncedGuiBoundKey = -1;
+    private static volatile boolean callbackPressLatched = false;
     private static Field cachedModuleKeyField = null;
     private static Method cachedModuleGetKeyMethod = null;
     private static boolean moduleKeyReflectionInit = false;
 
-    private LungePhase lungePhase = LungePhase.IDLE;
-    private int activeLungeSlot = -1;
-    private int previousSlot = -1;
-    private int ticksSinceSlotSwap = 0;
-    private int requiredPreSwingTicks = 1;
-    private int ticksSinceUseSent = 0;
-    private static Method cachedStartAttackMethod = null;
-    private static boolean startAttackReflectionInit = false;
-    private boolean pendingRevertAfterWait = false;
+    private LungePhase phase = LungePhase.IDLE;
+    private int pendingReturnSlot = -1;
+    private int visibleHoldTicks = 0;
 
+    private boolean pendingSingleLunge = false;
+    private int pendingWaitTicks = 0;
     private boolean wasBindPressedLastTick = false;
     private boolean singleLungeFiredThisHold = false;
     private long lastTickProcessedGameTime = -1L;
@@ -159,11 +143,11 @@ public class LungeHelper extends Module {
     private int clientTickCounter = 0;
     private int nextAllowedLungeTick = 0;
 
-    private static final int POST_USE_HOLD_TICKS = 2;
-    private static final int BASE_LUNGE_COOLDOWN_TICKS = 4;
+    private static final int VISIBLE_SPEAR_HOLD_TICKS = 2;
+    private static final int MAX_PENDING_WAIT_TICKS = 25;
 
     public LungeHelper() {
-        super("LungeHelper", "Keybind-driven Spear/Trident/Mace Lunge macro with AutoMaceSlotSystem sync & 2-tick revert delay", ModuleCategory.COMBAT);
+        super("LungeHelper", "Keybind-driven Spear-only legit Lunge swap macro for Minecraft 1.21.11", ModuleCategory.COMBAT);
         instance = this;
 
         this.savedLungeKeyCode.visibleWhen(() -> false);
@@ -198,6 +182,16 @@ public class LungeHelper extends Module {
         return syncedGuiBoundKey;
     }
 
+    public static void onMacroKeyPressedFromCallback(int key) {
+        if (key == -1 || key == 0 || key == GLFW.GLFW_KEY_UNKNOWN) {
+            return;
+        }
+        int bound = getMacroBoundKey();
+        if (bound == key) {
+            callbackPressLatched = true;
+        }
+    }
+
     public static void tickMacroGlobal(Minecraft client, int guiBoundKey) {
         if (guiBoundKey != -1 && guiBoundKey != 0 && guiBoundKey != GLFW.GLFW_KEY_UNKNOWN) {
             syncedGuiBoundKey = guiBoundKey;
@@ -214,21 +208,18 @@ public class LungeHelper extends Module {
 
     @Override
     protected void onDisable() {
-        Minecraft client = Minecraft.getInstance();
-        if (client != null && client.player != null && previousSlot >= 0 && previousSlot < 9) {
-            restorePreviousSlotLegit(client);
-        }
         resetState();
     }
 
     private void resetState() {
-        this.lungePhase = LungePhase.IDLE;
-        this.activeLungeSlot = -1;
-        this.previousSlot = -1;
-        this.ticksSinceUseSent = 0;
-        this.pendingRevertAfterWait = false;
+        this.phase = LungePhase.IDLE;
+        this.pendingReturnSlot = -1;
+        this.visibleHoldTicks = 0;
+        this.pendingSingleLunge = false;
+        this.pendingWaitTicks = 0;
         this.wasBindPressedLastTick = false;
         this.singleLungeFiredThisHold = false;
+        callbackPressLatched = false;
     }
 
     @SubscribeEvent
@@ -264,256 +255,199 @@ public class LungeHelper extends Module {
         lastTickProcessedGameTime = currentGameTime;
         clientTickCounter++;
 
-        if (AutoMace.isEnabled() && AutoMace.canExecuteStrike()) {
-            return;
-        }
-
         if (client.screen != null) {
-            if (lungePhase == LungePhase.IDLE && (wasBindPressedLastTick || previousSlot != -1)) {
-                restorePreviousSlotLegit(client);
-                resetState();
+            callbackPressLatched = false;
+            wasBindPressedLastTick = false;
+            pendingSingleLunge = false;
+            if (phase == LungePhase.HOLD_VISIBLE_SPEAR_BEFORE_SWAP_BACK) {
+                completeVisibleSwapBack(client);
             }
             return;
         }
 
-        boolean keyPressed = isLungeKeybindDown(client);
-        boolean risingEdge = keyPressed && !wasBindPressedLastTick;
-        boolean fallingEdge = !keyPressed && wasBindPressedLastTick;
-        wasBindPressedLastTick = keyPressed;
+        boolean callbackTap = callbackPressLatched;
+        callbackPressLatched = false;
+
+        boolean keyDown = isLungeKeybindDown(client);
+        boolean risingEdge = (keyDown && !wasBindPressedLastTick) || callbackTap;
+        wasBindPressedLastTick = keyDown;
 
         if (risingEdge) {
-            if (this.previousSlot < 0 || this.previousSlot > 8) {
-                this.previousSlot = client.player.getInventory().getSelectedSlot();
-            }
             this.singleLungeFiredThisHold = false;
-            this.pendingRevertAfterWait = false;
+            this.pendingSingleLunge = true;
+            this.pendingWaitTicks = 0;
         }
 
-        if (fallingEdge) {
-            this.pendingRevertAfterWait = true;
+        if (!keyDown) {
+            this.singleLungeFiredThisHold = false;
         }
 
-        if (lungePhase != LungePhase.IDLE) {
-            advanceMultiTickLungeState(client, keyPressed);
-            return;
-        }
-
-        if (!keyPressed) {
-            if (pendingRevertAfterWait || previousSlot != -1) {
-                restorePreviousSlotLegit(client);
-                resetState();
+        // Stage 2: Keep Spear visibly selected in client view for 2 ticks (~100ms), then swap back cleanly
+        if (phase == LungePhase.HOLD_VISIBLE_SPEAR_BEFORE_SWAP_BACK) {
+            visibleHoldTicks++;
+            if (visibleHoldTicks >= VISIBLE_SPEAR_HOLD_TICKS) {
+                completeVisibleSwapBack(client);
             }
             return;
         }
 
-        boolean shouldStartLunge = risingEdge || Boolean.TRUE.equals(holdToSpam.getValue());
-        if (!Boolean.TRUE.equals(holdToSpam.getValue()) && singleLungeFiredThisHold) {
+        boolean wantsSpam = keyDown && Boolean.TRUE.equals(holdToSpam.getValue());
+        boolean wantsSingle = pendingSingleLunge && !singleLungeFiredThisHold;
+
+        if (!wantsSpam && !wantsSingle) {
+            return;
+        }
+
+        if (pendingSingleLunge) {
+            pendingWaitTicks++;
+            if (pendingWaitTicks > MAX_PENDING_WAIT_TICKS) {
+                pendingSingleLunge = false;
+                return;
+            }
+        }
+
+        // Do not fire while eating, blocking with shield, or charging a Spear
+        if (client.player.isUsingItem()) {
+            return;
+        }
+
+        int spearSlot = findSpearHotbarSlot(client);
+        if (spearSlot == -1) {
+            pendingSingleLunge = false;
+            return;
+        }
+
+        if (isSpearOnCooldown(client, spearSlot) || clientTickCounter < nextAllowedLungeTick) {
             int cooldownSlot = getSelectedCooldownSlotIndex();
             if (cooldownSlot >= 0 && cooldownSlot < 9) {
-                if (cooldownSlot >= 0 && cooldownSlot < 9 && client.player.getInventory().getSelectedSlot() != cooldownSlot) client.player.getInventory().setSelectedSlot(cooldownSlot);
+                selectHotbarSlotWithPacket(client, cooldownSlot);
             }
             return;
         }
 
-        if (shouldStartLunge) {
-            initiateTickZeroSlotSwap(client);
-        }
-    }
-
-    private void initiateTickZeroSlotSwap(Minecraft client) {
-        int cooldownSlot = getSelectedCooldownSlotIndex();
-        int lungeSlot = findSpearHotbarSlot(client);
-        // Strictly Spear-only: if no Spear is in the hotbar (0-8), never lunge with any other item
-        if (lungeSlot == -1) {
-            return;
-        }
-
-        if (isSpearOnCooldown(client, lungeSlot) || clientTickCounter < nextAllowedLungeTick) {
-            if (cooldownSlot >= 0 && cooldownSlot < 9 && client.player.getInventory().getSelectedSlot() != cooldownSlot) {
-                client.player.getInventory().setSelectedSlot(cooldownSlot);
-                if (client.player.connection != null) {
-                    client.player.connection.send(new ServerboundSetCarriedItemPacket(cooldownSlot));
-                }
+        // Vanilla 1.21.11 requires a 100% charged attack bar for Spear STAB / Lunge (works on ground and in air)
+        if (client.player.getAttackStrengthScale(0.5F) < 1.0F) {
+            int cooldownSlot = getSelectedCooldownSlotIndex();
+            if (cooldownSlot >= 0 && cooldownSlot < 9) {
+                selectHotbarSlotWithPacket(client, cooldownSlot);
             }
             return;
         }
 
-        if (previousSlot < 0 || previousSlot > 8) {
-            previousSlot = client.player.getInventory().getSelectedSlot();
-        }
-        activeLungeSlot = lungeSlot;
+        // Stage 1: Visibly swap to Spear (C09) + dispatch Action.STAB + swing
+        executeLegitVisibleSpearLunge(client, spearSlot);
 
-        // Stage 1 (Tick 0): Send UpdateSelectedSlotC2SPacket (C09) to Spear slot FIRST
-        if (client.player.getInventory().getSelectedSlot() != activeLungeSlot) {
-            client.player.getInventory().setSelectedSlot(activeLungeSlot);
-            if (client.player.connection != null) {
-                client.player.connection.send(new ServerboundSetCarriedItemPacket(activeLungeSlot));
-            }
-        }
-        ticksSinceSlotSwap = 0;
-        // 1-2 tick humanization delay between C09 slot swap and Spear jab/swing to prevent BadPackets/AutoSwitch flags
-        requiredPreSwingTicks = Boolean.TRUE.equals(randomization.getValue())
-                ? ThreadLocalRandom.current().nextInt(1, 3)
-                : 1;
-        ticksSinceUseSent = 0;
-        lungePhase = LungePhase.TICK_1_SEND_USE_PACKET;
-    }
-
-    private void advanceMultiTickLungeState(Minecraft client, boolean keyStillHeld) {
-        switch (lungePhase) {
-            case TICK_1_SEND_USE_PACKET -> {
-                if (activeLungeSlot < 0 || activeLungeSlot >= 9
-                        || !isSpearItem(client.player.getInventory().getItem(activeLungeSlot))) {
-                    lungePhase = LungePhase.IDLE;
-                    activeLungeSlot = -1;
-                    restorePreviousSlotLegit(client);
-                    return;
-                }
-
-                // Wait 1-2 ticks after C09 slot swap so the server has registered the Spear before the attack arrives
-                ticksSinceSlotSwap++;
-                if (ticksSinceSlotSwap < requiredPreSwingTicks) {
-                    return;
-                }
-
-                if (client.player.getInventory().getSelectedSlot() != activeLungeSlot) {
-                    client.player.getInventory().setSelectedSlot(activeLungeSlot);
-                    if (client.player.connection != null) {
-                        client.player.connection.send(new ServerboundSetCarriedItemPacket(activeLungeSlot));
-                    }
-                }
-
-                // Stage 2: Execute native Minecraft 1.21.11 Spear Jab Attack (piercingAttack + HandSwingC2SPacket)
-                triggerNativeSpearLungeAttack(client);
-
-                singleLungeFiredThisHold = true;
-                ticksSinceUseSent = 0;
-                lungePhase = LungePhase.WAIT_2_TICKS_BEFORE_REVERT;
-            }
-
-            case WAIT_2_TICKS_BEFORE_REVERT -> {
-                ticksSinceUseSent++;
-                if (ticksSinceUseSent < POST_USE_HOLD_TICKS) {
-                    return;
-                }
-
-                int extraTicks = Boolean.TRUE.equals(randomization.getValue()) ? computeRandomizedDelayTicks() : 0;
-                nextAllowedLungeTick = clientTickCounter + BASE_LUNGE_COOLDOWN_TICKS + extraTicks;
-                lungePhase = LungePhase.IDLE;
-                activeLungeSlot = -1;
-
-                // Stage 3: Clean swap-back after 2-tick post-swing hold
-                if (!keyStillHeld || pendingRevertAfterWait) {
-                    restorePreviousSlotLegit(client);
-                    pendingRevertAfterWait = false;
-                } else {
-                    int cooldownSlot = getSelectedCooldownSlotIndex();
-                    if (cooldownSlot >= 0 && cooldownSlot < 9) {
-                        if (client.player.getInventory().getSelectedSlot() != cooldownSlot) {
-                            client.player.getInventory().setSelectedSlot(cooldownSlot);
-                            if (client.player.connection != null) {
-                                client.player.connection.send(new ServerboundSetCarriedItemPacket(cooldownSlot));
-                            }
-                        }
-                    } else if (Boolean.TRUE.equals(swapBack.getValue()) && !Boolean.TRUE.equals(holdToSpam.getValue())) {
-                        restorePreviousSlotLegit(client);
-                    }
-                }
-            }
-
-            default -> lungePhase = LungePhase.IDLE;
-        }
+        pendingSingleLunge = false;
+        singleLungeFiredThisHold = true;
+        int extraTicks = Boolean.TRUE.equals(randomization.getValue()) ? computeRandomizedDelayTicks() : 0;
+        nextAllowedLungeTick = clientTickCounter + VISIBLE_SPEAR_HOLD_TICKS + extraTicks;
     }
 
     /**
-     * Triggers Minecraft 1.21.11's native Spear Jab / Lunge attack (`Minecraft#startAttack()`),
-     * which dispatches the Spear piercing attack + `ServerboundSwingPacket` cleanly after the C09 slot packet.
-     * Works on FCL/Android even when touch buttons or custom keybinds are used.
+     * Legit-looking Spear Lunge Swap (works on ground AND in midair):
+     * Visibly selects the Spear slot on the client hotbar, sends C09 -> Action.STAB -> Swing,
+     * and holds the Spear visibly for 2 ticks before swapping back to the carrier/return slot.
      */
-    private void triggerNativeSpearLungeAttack(Minecraft client) {
-        if (client == null || client.player == null) {
+    private void executeLegitVisibleSpearLunge(Minecraft client, int spearSlot) {
+        if (client == null || client.player == null || client.player.connection == null) {
             return;
         }
-        try {
-            if (!startAttackReflectionInit) {
-                startAttackReflectionInit = true;
-                for (Method m : Minecraft.class.getDeclaredMethods()) {
-                    if (m.getParameterCount() == 0 && m.getReturnType() == boolean.class) {
-                        String n = m.getName();
-                        if (n.equals("startAttack") || n.equals("method_1536")) {
-                            m.setAccessible(true);
-                            cachedStartAttackMethod = m;
-                            break;
-                        }
-                    }
-                }
-            }
-            if (cachedStartAttackMethod != null) {
-                cachedStartAttackMethod.invoke(client);
-                return;
-            }
-        } catch (Throwable ignored) {
+
+        int currentSlot = client.player.getInventory().getSelectedSlot();
+        int returnSlot = resolveReturnSlot(currentSlot, spearSlot);
+
+        // 1. Visibly switch to Spear slot & send C09 FIRST
+        if (currentSlot != spearSlot) {
+            selectHotbarSlotWithPacket(client, spearSlot);
         }
 
-        // Fallback: click keyAttack AND ensure HandSwingC2SPacket is sent
-        if (client.options != null && client.options.keyAttack != null) {
-            KeyMapping.click(client.options.keyAttack.getDefaultKey());
-        }
+        // 2. Dispatch Minecraft 1.21.11 Spear Jab / Lunge packet + swing + reset attack ticker
+        client.player.connection.send(new ServerboundPlayerActionPacket(
+                ServerboundPlayerActionPacket.Action.STAB,
+                BlockPos.ZERO,
+                Direction.DOWN
+        ));
         client.player.swing(InteractionHand.MAIN_HAND);
-        if (client.player.connection != null) {
-            client.player.connection.send(new ServerboundSwingPacket(InteractionHand.MAIN_HAND));
+        client.player.resetAttackStrengthTicker();
+
+        // 3. Keep Spear visibly held for 2 ticks before swapping back so client view looks legit
+        if (returnSlot >= 0 && returnSlot < 9 && returnSlot != spearSlot) {
+            this.pendingReturnSlot = returnSlot;
+            this.visibleHoldTicks = 0;
+            this.phase = LungePhase.HOLD_VISIBLE_SPEAR_BEFORE_SWAP_BACK;
+        } else {
+            this.pendingReturnSlot = -1;
+            this.visibleHoldTicks = 0;
+            this.phase = LungePhase.IDLE;
         }
     }
 
-    private void restorePreviousSlotLegit(Minecraft client) {
+    private void completeVisibleSwapBack(Minecraft client) {
+        if (pendingReturnSlot >= 0 && pendingReturnSlot < 9) {
+            selectHotbarSlotWithPacket(client, pendingReturnSlot);
+        }
+        pendingReturnSlot = -1;
+        visibleHoldTicks = 0;
+        phase = LungePhase.IDLE;
+    }
+
+    private int resolveReturnSlot(int previousHeldSlot, int spearSlot) {
+        if (Boolean.TRUE.equals(swapBackToSelectedSlot.getValue())) {
+            return getSelectedReturnSlotIndex();
+        }
+        int cooldownSlot = getSelectedCooldownSlotIndex();
+        if (cooldownSlot >= 0 && cooldownSlot < 9) {
+            return cooldownSlot;
+        }
+        if (Boolean.TRUE.equals(swapBack.getValue()) && previousHeldSlot >= 0 && previousHeldSlot < 9) {
+            return previousHeldSlot;
+        }
+        return spearSlot;
+    }
+
+    private void selectHotbarSlotWithPacket(Minecraft client, int targetSlot) {
         if (client == null || client.player == null || client.player.getInventory() == null) {
             return;
         }
-
-        if (Boolean.TRUE.equals(swapBackToSelectedSlot.getValue())) {
-            int targetSlot = getSelectedReturnSlotIndex();
-            if (targetSlot >= 0 && targetSlot < 9) {
-                if (client.player.getInventory().getSelectedSlot() != targetSlot) {
-                    client.player.getInventory().setSelectedSlot(targetSlot);
-                    if (client.player.connection != null) {
-                        client.player.connection.send(new ServerboundSetCarriedItemPacket(targetSlot));
-                    }
-                }
-                previousSlot = -1;
-                return;
+        if (targetSlot < 0 || targetSlot >= 9) {
+            return;
+        }
+        if (client.player.getInventory().getSelectedSlot() != targetSlot) {
+            client.player.getInventory().setSelectedSlot(targetSlot);
+            if (client.player.connection != null) {
+                client.player.connection.send(new ServerboundSetCarriedItemPacket(targetSlot));
             }
         }
-
-        if (Boolean.TRUE.equals(swapBack.getValue()) && previousSlot >= 0 && previousSlot < 9) {
-            if (client.player.getInventory().getSelectedSlot() != previousSlot) {
-                client.player.getInventory().setSelectedSlot(previousSlot);
-                if (client.player.connection != null) {
-                    client.player.connection.send(new ServerboundSetCarriedItemPacket(previousSlot));
-                }
-            }
-        }
-        previousSlot = -1;
     }
 
     private int findSpearHotbarSlot(Minecraft client) {
         if (client == null || client.player == null || client.player.getInventory() == null) {
             return -1;
         }
+        int fallbackSpear = -1;
         for (int i = 0; i < 9; i++) {
-            if (isSpearItem(client.player.getInventory().getItem(i))) {
-                return i;
+            ItemStack stack = client.player.getInventory().getItem(i);
+            if (isSpearItem(stack)) {
+                if (!stack.getEnchantments().isEmpty()) {
+                    return i;
+                }
+                if (fallbackSpear == -1) {
+                    fallbackSpear = i;
+                }
             }
         }
-        return -1;
+        return fallbackSpear;
     }
 
-    /**
-     * Strictly matches Minecraft 1.21.11 Spear items ONLY (wooden_spear, stone_spear, iron_spear,
-     * golden_spear, diamond_spear, netherite_spear, etc.) — never Tridents, Maces, or Wind Charges.
-     */
     private boolean isSpearItem(ItemStack stack) {
         if (stack == null || stack.isEmpty()) {
             return false;
+        }
+        try {
+            if (stack.get(DataComponents.PIERCING_WEAPON) != null) {
+                return true;
+            }
+        } catch (Throwable ignored) {
         }
         Object key = BuiltInRegistries.ITEM.getKey(stack.getItem());
         if (key != null) {

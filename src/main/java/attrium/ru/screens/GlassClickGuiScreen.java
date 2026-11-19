@@ -498,6 +498,50 @@ public class GlassClickGuiScreen extends Screen {
      * Identifies whether a module row is a pure keybind-driven Action Macro (AutoLunge)
      * rather than an ON/OFF toggleable module.
      */
+    private static boolean isElytraHelperRow(CachedModuleRow row) {
+        if (row == null) return false;
+        if ("ElytraHelper".equalsIgnoreCase(row.name)) return true;
+        return row.module != null && "ElytraHelper".equalsIgnoreCase(row.module.getClass().getSimpleName());
+    }
+
+    private static void invokeStaticMacroTick(Module mod, Minecraft mc, int key) {
+        if (mod == null) return;
+        try {
+            Method m = mod.getClass().getMethod("tickMacroGlobal", Minecraft.class, int.class);
+            m.invoke(null, mc, key);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static void invokeStaticMacroSetKey(Module mod, int key) {
+        if (mod == null) return;
+        try {
+            Method m = mod.getClass().getMethod("setMacroBoundKey", int.class);
+            m.invoke(null, key);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static int invokeStaticMacroGetKey(Module mod) {
+        if (mod == null) return -1;
+        try {
+            Method m = mod.getClass().getMethod("getMacroBoundKey");
+            Object v = m.invoke(null);
+            if (v instanceof Number n) return n.intValue();
+        } catch (Throwable ignored) {
+        }
+        return -1;
+    }
+
+    private static void invokeStaticMacroCallback(Module mod, int key) {
+        if (mod == null) return;
+        try {
+            Method m = mod.getClass().getMethod("onMacroKeyPressedFromCallback", int.class);
+            m.invoke(null, key);
+        } catch (Throwable ignored) {
+        }
+    }
+
     private static boolean isActionMacroRow(CachedModuleRow row) {
         if (row == null) {
             return false;
@@ -505,7 +549,8 @@ public class GlassClickGuiScreen extends Screen {
         return (row.module instanceof LungeHelper)
                 || "LungeHelper".equalsIgnoreCase(row.name)
                 || "AutoLunge".equalsIgnoreCase(row.name)
-                || "Lunge".equalsIgnoreCase(row.name);
+                || "Lunge".equalsIgnoreCase(row.name)
+                || "ElytraHelper".equalsIgnoreCase(row.name);
     }
 
     @Override
@@ -590,10 +635,14 @@ public class GlassClickGuiScreen extends Screen {
             CachedModuleRow row = gui.allModuleRows[i];
             int key = gui.resolveEffectiveBindKey(row);
 
-            // AutoLunge is a pure keybind-driven Action Macro (single press or Hold-to-Spam + memory slot swap)
+            // Action Macros (LungeHelper & ElytraHelper): pure keybind-driven macros with no ON/OFF toggle
             if (isActionMacroRow(row)) {
-                lungeRowHandled = true;
-                LungeHelper.tickMacroGlobal(mc, key);
+                if (isElytraHelperRow(row)) {
+                    invokeStaticMacroTick(row.module, mc, key);
+                } else {
+                    lungeRowHandled = true;
+                    LungeHelper.tickMacroGlobal(mc, key);
+                }
                 continue;
             }
 
@@ -663,8 +712,16 @@ public class GlassClickGuiScreen extends Screen {
             if ("ClickGUI".equalsIgnoreCase(row.name) || "ClickGui".equalsIgnoreCase(row.name)) {
                 continue;
             }
-            // Skip AutoLunge here so it is handled as an Action Macro in pollGlobalKeybinds() rather than toggled ON/OFF
+            // Forward GLFW key press directly to Action Macros (LungeHelper & ElytraHelper)
             if (isActionMacroRow(row)) {
+                int boundMacro = resolveEffectiveBindKey(row);
+                if (boundMacro == key) {
+                    if (isElytraHelperRow(row)) {
+                        invokeStaticMacroCallback(row.module, key);
+                    } else {
+                        LungeHelper.onMacroKeyPressedFromCallback(key);
+                    }
+                }
                 continue;
             }
             int bound = resolveEffectiveBindKey(row);
@@ -1800,6 +1857,11 @@ public class GlassClickGuiScreen extends Screen {
             if (macroKey != -1 && macroKey != 0 && macroKey != GLFW.GLFW_KEY_UNKNOWN) {
                 return macroKey;
             }
+        } else if ("ElytraHelper".equalsIgnoreCase(mod.getClass().getSimpleName())) {
+            int macroKey = invokeStaticMacroGetKey(mod);
+            if (macroKey != -1 && macroKey != 0 && macroKey != GLFW.GLFW_KEY_UNKNOWN) {
+                return macroKey;
+            }
         }
         initModuleKeyReflection();
         try {
@@ -1841,6 +1903,8 @@ public class GlassClickGuiScreen extends Screen {
         }
         if (mod instanceof LungeHelper) {
             LungeHelper.setMacroBoundKey(key);
+        } else if ("ElytraHelper".equalsIgnoreCase(mod.getClass().getSimpleName())) {
+            invokeStaticMacroSetKey(mod, key);
         }
         initModuleKeyReflection();
         try {
@@ -1891,7 +1955,11 @@ public class GlassClickGuiScreen extends Screen {
         int normalized = (newKey == 0 || newKey == GLFW.GLFW_KEY_UNKNOWN) ? -1 : newKey;
         row.boundKey = normalized;
         if (isActionMacroRow(row)) {
-            LungeHelper.setMacroBoundKey(normalized);
+            if (isElytraHelperRow(row)) {
+                invokeStaticMacroSetKey(row.module, normalized);
+            } else {
+                LungeHelper.setMacroBoundKey(normalized);
+            }
         }
         setModuleBindKey(row.module, normalized);
         refreshModuleBindLabelIfNeeded(row, true);
