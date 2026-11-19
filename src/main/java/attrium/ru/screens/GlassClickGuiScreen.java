@@ -11,6 +11,7 @@ import net.minecraft.util.Mth;
 import net.minecraft.world.item.Items;
 import org.lwjgl.glfw.GLFW;
 import java.nio.file.Path;
+import java.util.stream.Stream;
 import java.nio.file.Files;
 import java.nio.charset.StandardCharsets;
 import org.lwjgl.glfw.GLFWMouseButtonCallback;
@@ -362,6 +363,23 @@ public class GlassClickGuiScreen extends Screen {
     // Friends Tab State (Index 3 — Replaced "Theme" Tab)
     private boolean friendInputFocused = false;
     private String friendInputText = "";
+
+    // Configs Tab State (activeTopTabIndex == 1)
+    private String configInputText = "";
+    private boolean configInputFocused = false;
+    private String lastRenderedConfigInputString = "";
+    private Component cachedConfigInputComponent = Component.empty();
+    private int configInputBoxX = 0, configInputBoxY = 0, configInputBoxW = 0, configInputBoxH = 0;
+    private int configSaveBtnX = 0, configSaveBtnY = 0, configSaveBtnW = 0, configSaveBtnH = 0;
+    private int configReloadBtnX = 0, configReloadBtnY = 0, configReloadBtnW = 0, configReloadBtnH = 0;
+    private float configScrollOffset = 0.0F;
+    private float configTargetScrollOffset = 0.0F;
+    private float configMaxScrollOffset = 0.0F;
+    private String activeConfigName = "default";
+    private String configStatusMessage = "";
+    private long configStatusExpireMs = 0L;
+    private final List<String> cachedConfigNames = new ArrayList<>();
+    private long lastConfigListRefreshMs = 0L;
     private Component cachedFriendInputComponent = Component.literal("Enter username...");
     private String lastRenderedFriendInputString = "";
     private boolean listeningForFriendBind = false;
@@ -1093,6 +1111,8 @@ public class GlassClickGuiScreen extends Screen {
         enqueueTopNavigationBar(dtSeconds, mouseX, mouseY);
         if (activeTopTabIndex == 0) {
             enqueueSubNavigationBar(dtSeconds, mouseX, mouseY);
+        } else if (activeTopTabIndex == 1) {
+            enqueueConfigsTopInputBar(mouseX, mouseY);
         } else if (activeTopTabIndex == 3) {
             enqueueFriendsTopInputBar(mouseX, mouseY);
         }
@@ -1110,6 +1130,8 @@ public class GlassClickGuiScreen extends Screen {
         if (activeTopTabIndex == 0) {
             enqueueScrollingModuleList(dtSeconds, mouseX, mouseY);
             flushBatchedRenderPasses(guiGraphics);
+        } else if (activeTopTabIndex == 1) {
+            renderConfigsListPanel(guiGraphics, dtSeconds, mouseX, mouseY);
         } else if (activeTopTabIndex == 3) {
             renderFriendsListPanel(guiGraphics, dtSeconds, mouseX, mouseY);
         } else if (activeTopTabIndex == 4) {
@@ -2552,6 +2574,58 @@ public class GlassClickGuiScreen extends Screen {
             return true;
         }
 
+        if (configInputFocused && activeTopTabIndex == 1) {
+            if (key == GLFW.GLFW_KEY_BACKSPACE) {
+                if (!configInputText.isEmpty()) {
+                    configInputText = configInputText.substring(0, configInputText.length() - 1);
+                }
+                return true;
+            }
+            if (key == GLFW.GLFW_KEY_DELETE) {
+                configInputText = "";
+                return true;
+            }
+            if (key == GLFW.GLFW_KEY_ENTER || key == GLFW.GLFW_KEY_KP_ENTER) {
+                submitConfigSaveFromInput();
+                return true;
+            }
+            if (key == GLFW.GLFW_KEY_ESCAPE) {
+                configInputFocused = false;
+                return true;
+            }
+            if (key >= GLFW.GLFW_KEY_A && key <= GLFW.GLFW_KEY_Z && (mods & (GLFW.GLFW_MOD_CONTROL | GLFW.GLFW_MOD_ALT)) == 0) {
+                boolean shift = (mods & GLFW.GLFW_MOD_SHIFT) != 0;
+                char ch = (char) ((shift ? 'A' : 'a') + (key - GLFW.GLFW_KEY_A));
+                appendConfigInputCharFromKey(ch);
+                return true;
+            }
+            if (key >= GLFW.GLFW_KEY_0 && key <= GLFW.GLFW_KEY_9 && (mods & (GLFW.GLFW_MOD_CONTROL | GLFW.GLFW_MOD_ALT)) == 0) {
+                char ch = (char) ('0' + (key - GLFW.GLFW_KEY_0));
+                appendConfigInputCharFromKey(ch);
+                return true;
+            }
+            if (key == GLFW.GLFW_KEY_MINUS) {
+                boolean shift = (mods & GLFW.GLFW_MOD_SHIFT) != 0;
+                appendConfigInputCharFromKey(shift ? '_' : '-');
+                return true;
+            }
+            return true;
+        }
+
+        if (configInputFocused && activeTopTabIndex == 1) {
+            if (codepoint < 32 || codepoint == 127) {
+                return true;
+            }
+            char ch = (char) codepoint;
+            long nowNs = System.nanoTime();
+            if (Character.toLowerCase(ch) == Character.toLowerCase(lastKeyAppendedChar)
+                    && (nowNs - lastKeyAppendTimeNs) < 25_000_000L) {
+                lastKeyAppendedChar = 0;
+                return true;
+            }
+            appendConfigInputCharRaw(ch);
+            return true;
+        }
         if (friendInputFocused && activeTopTabIndex == 3) {
             if (key == GLFW.GLFW_KEY_BACKSPACE) {
                 if (!friendInputText.isEmpty()) {
@@ -2887,6 +2961,10 @@ public class GlassClickGuiScreen extends Screen {
             }
         }
 
+        if (activeTopTabIndex == 1) {
+            handleConfigsTabClick(mouseX, mouseY, leftClicked, rightClicked);
+            return;
+        }
         if (activeTopTabIndex == 3) {
             handleFriendsTabClick(mouseX, mouseY, leftClicked, rightClicked);
             return;
@@ -3221,91 +3299,401 @@ public class GlassClickGuiScreen extends Screen {
         return base.resolve("attrium_config.json");
     }
 
-    public void saveConfigNow() {
-        if (allModuleRows == null || allModuleRows.length == 0) {
+    private static Path getConfigsDirectoryPath() {
+        Minecraft mc = Minecraft.getInstance();
+        Path base = (mc != null && mc.gameDirectory != null)
+                ? mc.gameDirectory.toPath()
+                : Path.of(".");
+        return base.resolve("attrium_configs");
+    }
+
+    private static String sanitizeConfigName(String raw) {
+        if (raw == null) {
+            return "";
+        }
+        String cleaned = raw.trim().replaceAll("[^a-zA-Z0-9_-]", "");
+        if (cleaned.length() > 28) {
+            cleaned = cleaned.substring(0, 28);
+        }
+        return cleaned;
+    }
+
+    private void setConfigStatus(String message) {
+        this.configStatusMessage = message != null ? message : "";
+        this.configStatusExpireMs = System.currentTimeMillis() + 3000L;
+    }
+
+    private void appendConfigInputCharFromKey(char ch) {
+        lastKeyAppendedChar = ch;
+        lastKeyAppendTimeNs = System.nanoTime();
+        appendConfigInputCharRaw(ch);
+    }
+
+    private void appendConfigInputCharRaw(char ch) {
+        if (configInputText.length() >= 28) {
             return;
         }
+        if (Character.isLetterOrDigit(ch) || ch == '_' || ch == '-') {
+            configInputText += ch;
+        }
+    }
+
+    private void refreshSavedConfigList(boolean force) {
+        long now = System.currentTimeMillis();
+        if (!force && (now - lastConfigListRefreshMs) < 1000L && !cachedConfigNames.isEmpty()) {
+            return;
+        }
+        lastConfigListRefreshMs = now;
+        cachedConfigNames.clear();
+        cachedConfigNames.add("default");
         try {
-            JsonObject root = new JsonObject();
-            root.addProperty("friendBindKey", FriendManager.getFriendBindKey());
-            if (clientTabUiVolumeEntry != null && clientTabUiVolumeEntry.setting instanceof NumberSetting volNs) {
-                root.addProperty("uiVolume", volNs.getValue());
-            }
-
-            JsonObject modulesObj = new JsonObject();
-            for (CachedModuleRow row : allModuleRows) {
-                if (row == null || row.module == null || row.name == null) {
-                    continue;
-                }
-                JsonObject mObj = new JsonObject();
-                if (!isActionMacroRow(row)) {
-                    mObj.addProperty("enabled", row.module.isEnabled());
-                }
-                int bindKey = resolveEffectiveBindKey(row);
-                mObj.addProperty("key", bindKey);
-
-                JsonObject settingsObj = new JsonObject();
-                for (CachedSettingEntry se : row.settings) {
-                    if (se == null || se.setting == null || se.name == null) {
-                        continue;
-                    }
-                    if (se.type == 0 && se.setting instanceof BooleanSetting bs) {
-                        Object raw = ((Setting<?>) bs).getValue();
-                        boolean bVal = (raw instanceof Boolean b) ? b : (raw instanceof Number n && n.intValue() > 0);
-                        settingsObj.addProperty(se.name, bVal);
-                    } else if (se.type == 1 && se.setting instanceof NumberSetting ns) {
-                        settingsObj.addProperty(se.name, ns.getValue());
-                    } else if (se.type == 2 && se.setting instanceof ModeSetting ms) {
-                        if (ms.getValue() != null) {
-                            settingsObj.addProperty(se.name, ms.getValue());
-                        }
-                    } else if (se.type == 3 && se.setting instanceof MultiModeSetting mms) {
-                        JsonArray arr = new JsonArray();
-                        for (String opt : se.modeOptions) {
-                            if (mms.isSelected(opt)) {
-                                arr.add(opt);
+            Path dir = getConfigsDirectoryPath();
+            if (Files.isDirectory(dir)) {
+                List<String> extras = new ArrayList<>();
+                try (Stream<Path> stream = Files.list(dir)) {
+                    stream.forEach(p -> {
+                        String fn = p.getFileName().toString();
+                        if (fn.endsWith(".json")) {
+                            String name = fn.substring(0, fn.length() - 5);
+                            if (!name.isEmpty() && !"default".equalsIgnoreCase(name)) {
+                                extras.add(name);
                             }
                         }
-                        settingsObj.add(se.name, arr);
-                    }
+                    });
                 }
-                mObj.add("settings", settingsObj);
-                modulesObj.add(row.name, mObj);
+                extras.sort(String.CASE_INSENSITIVE_ORDER);
+                cachedConfigNames.addAll(extras);
             }
-            root.add("modules", modulesObj);
-
-            Path cfg = getConfigFilePath();
-            Files.writeString(cfg, CONFIG_GSON.toJson(root), StandardCharsets.UTF_8);
         } catch (Throwable ignored) {
         }
     }
 
-    public void loadConfigIfPresent() {
-        if (configLoadedOnce || allModuleRows == null || allModuleRows.length == 0) {
+    private void submitConfigSaveFromInput() {
+        String name = sanitizeConfigName(configInputText);
+        if (name.isEmpty()) {
+            name = activeConfigName != null && !activeConfigName.isEmpty() ? activeConfigName : "default";
+        }
+        if (saveNamedConfig(name)) {
+            configInputText = "";
+            setConfigStatus("Saved config '" + name + "'");
+            SoundUtil.playTogglePop(true);
+        }
+    }
+
+    private void enqueueConfigsTopInputBar(int mouseX, int mouseY) {
+        int barY = winY + 42;
+        int barH = 24;
+
+        Component reloadComp = Component.literal("Reload").withStyle(nunitoRegularStyle);
+        int reloadLabelW = this.font.width(reloadComp);
+        configReloadBtnW = Math.max(54, reloadLabelW + 18);
+        configReloadBtnH = barH;
+        configReloadBtnX = listRight - configReloadBtnW;
+        configReloadBtnY = barY;
+
+        Component saveComp = Component.literal("Save").withStyle(nunitoRegularStyle);
+        int saveLabelW = this.font.width(saveComp);
+        configSaveBtnW = Math.max(48, saveLabelW + 18);
+        configSaveBtnH = barH;
+        configSaveBtnX = configReloadBtnX - configSaveBtnW - 6;
+        configSaveBtnY = barY;
+
+        configInputBoxX = listLeft;
+        configInputBoxY = barY;
+        configInputBoxW = Math.max(120, configSaveBtnX - configInputBoxX - 6);
+        configInputBoxH = barH;
+
+        int inputBg = configInputFocused ? COLOR_SEARCH_BG_FOCUSED : COLOR_SEARCH_BG;
+        drawRoundedRect(configInputBoxX, configInputBoxY, configInputBoxW, configInputBoxH, SEARCH_BAR_RADIUS, inputBg);
+
+        String displayInput;
+        int inputTextCol;
+        if (configInputText.isEmpty() && !configInputFocused) {
+            displayInput = "Enter config name...";
+            inputTextCol = COLOR_TEXT_DIMMED_GRAY;
+        } else {
+            boolean blink = (System.currentTimeMillis() / 500L) % 2L == 0L;
+            displayInput = configInputText + (configInputFocused && blink ? "|" : "");
+            inputTextCol = COLOR_TEXT_BRIGHT_WHITE;
+        }
+        if (!displayInput.equals(lastRenderedConfigInputString)) {
+            lastRenderedConfigInputString = displayInput;
+            cachedConfigInputComponent = Component.literal(displayInput).withStyle(nunitoRegularStyle);
+        }
+        enqueueComponentText(cachedConfigInputComponent, configInputBoxX + 10, configInputBoxY + 7, inputTextCol);
+
+        boolean saveHover = isHovered(mouseX, mouseY, configSaveBtnX, configSaveBtnY, configSaveBtnW, configSaveBtnH);
+        int saveBg = saveHover ? 0xFFE2E6F5 : COLOR_PILL_ACTIVE_BG;
+        drawRoundedRect(configSaveBtnX, configSaveBtnY, configSaveBtnW, configSaveBtnH, CATEGORY_PILL_RADIUS, saveBg);
+        enqueueComponentText(
+                saveComp,
+                configSaveBtnX + (configSaveBtnW - saveLabelW) / 2,
+                configSaveBtnY + 7,
+                COLOR_PILL_ACTIVE_TEXT
+        );
+
+        boolean reloadHover = isHovered(mouseX, mouseY, configReloadBtnX, configReloadBtnY, configReloadBtnW, configReloadBtnH);
+        int reloadBg = reloadHover ? COLOR_BIND_BG_HOVER : COLOR_BIND_BG;
+        drawRoundedRect(configReloadBtnX, configReloadBtnY, configReloadBtnW, configReloadBtnH, CATEGORY_PILL_RADIUS, reloadBg);
+        enqueueComponentText(
+                reloadComp,
+                configReloadBtnX + (configReloadBtnW - reloadLabelW) / 2,
+                configReloadBtnY + 7,
+                COLOR_TEXT_BRIGHT_WHITE
+        );
+    }
+
+    private void renderConfigsListPanel(GuiGraphics guiGraphics, float dt, int mouseX, int mouseY) {
+        refreshSavedConfigList(false);
+
+        int statusOffset = 0;
+        if (!configStatusMessage.isEmpty() && System.currentTimeMillis() < configStatusExpireMs) {
+            Component st = Component.literal(configStatusMessage).withStyle(nunitoRegularStyle);
+            enqueueComponentText(st, listLeft + 4, listTop + 4, 0xFF9BE5A8);
+            statusOffset = 18;
+        }
+
+        int cfgRowH = 40;
+        int totalH = statusOffset + cachedConfigNames.size() * cfgRowH;
+        configMaxScrollOffset = Math.max(0.0F, (float) (totalH - listHeight));
+        configTargetScrollOffset = Mth.clamp(configTargetScrollOffset, 0.0F, configMaxScrollOffset);
+        configScrollOffset += (configTargetScrollOffset - configScrollOffset) * Math.min(1.0F, dt * 16.0F);
+        configScrollOffset = Mth.clamp(configScrollOffset, 0.0F, configMaxScrollOffset);
+
+        int scrollInt = Math.round(configScrollOffset);
+        for (int i = 0; i < cachedConfigNames.size(); i++) {
+            String cfgName = cachedConfigNames.get(i);
+            int rowTop = listTop + statusOffset + i * cfgRowH - scrollInt;
+            int rowBottom = rowTop + cfgRowH;
+            if (rowBottom < listTop || rowTop > listBottom) {
+                continue;
+            }
+
+            boolean isActive = cfgName.equalsIgnoreCase(activeConfigName);
+            boolean rowHover = isHovered(mouseX, mouseY, listLeft, rowTop, rowWidth, cfgRowH - 4);
+            int rowBg = rowHover ? COLOR_ROW_HOVER_BG : (isActive ? 0x26FFFFFF : 0x14FFFFFF);
+            drawRoundedRect(listLeft, rowTop, rowWidth, cfgRowH - 4, ROW_AND_SEARCH_RADIUS, rowBg);
+
+            String label = isActive ? (cfgName + "  (Active)") : cfgName;
+            Component nameComp = Component.literal(label).withStyle(nunitoRegularStyle);
+            enqueueComponentText(nameComp, listLeft + 12, rowTop + 7, isActive ? COLOR_TEXT_BRIGHT_WHITE : 0xFFD6DCE8);
+
+            String sub = "default".equalsIgnoreCase(cfgName)
+                    ? "Auto-saved client profile (attrium_config.json)"
+                    : "Saved profile (attrium_configs/" + cfgName + ".json)";
+            Component subComp = Component.literal(sub).withStyle(nunitoRegularStyle);
+            enqueueComponentText(subComp, listLeft + 12, rowTop + 20, COLOR_TEXT_DIMMED_GRAY);
+
+            boolean isDefault = "default".equalsIgnoreCase(cfgName);
+            int rightX = listLeft + rowWidth - 10;
+            int btnH = 18;
+            int btnY = rowTop + (cfgRowH - 4 - btnH) / 2;
+
+            if (!isDefault) {
+                int delW = 24;
+                int delX = rightX - delW;
+                boolean delHover = isHovered(mouseX, mouseY, delX, btnY, delW, btnH);
+                drawRoundedRect(delX, btnY, delW, btnH, 6, delHover ? 0xCCF05454 : 0x66D64545);
+                Component delComp = Component.literal("X").withStyle(nunitoRegularStyle);
+                enqueueComponentText(delComp, delX + (delW - this.font.width(delComp)) / 2, btnY + 5, COLOR_TEXT_BRIGHT_WHITE);
+                rightX = delX - 6;
+            }
+
+            int saveW = 42;
+            int saveX = rightX - saveW;
+            boolean saveHover = isHovered(mouseX, mouseY, saveX, btnY, saveW, btnH);
+            drawRoundedRect(saveX, btnY, saveW, btnH, 6, saveHover ? COLOR_BIND_BG_HOVER : COLOR_BIND_BG);
+            Component saveComp = Component.literal("Save").withStyle(nunitoRegularStyle);
+            enqueueComponentText(saveComp, saveX + (saveW - this.font.width(saveComp)) / 2, btnY + 5, COLOR_TEXT_BRIGHT_WHITE);
+            rightX = saveX - 6;
+
+            int loadW = 44;
+            int loadX = rightX - loadW;
+            boolean loadHover = isHovered(mouseX, mouseY, loadX, btnY, loadW, btnH);
+            drawRoundedRect(loadX, btnY, loadW, btnH, 6, loadHover ? 0xFFE2E6F5 : COLOR_PILL_ACTIVE_BG);
+            Component loadComp = Component.literal("Load").withStyle(nunitoRegularStyle);
+            enqueueComponentText(loadComp, loadX + (loadW - this.font.width(loadComp)) / 2, btnY + 5, COLOR_PILL_ACTIVE_TEXT);
+        }
+
+        flushBatchedRenderPasses(guiGraphics);
+    }
+
+    private void handleConfigsTabClick(int mouseX, int mouseY, boolean leftClicked, boolean rightClicked) {
+        if (!leftClicked && !rightClicked) {
             return;
         }
-        configLoadedOnce = true;
+        if (isHovered(mouseX, mouseY, configInputBoxX, configInputBoxY, configInputBoxW, configInputBoxH)) {
+            configInputFocused = true;
+            friendInputFocused = false;
+            searchFocused = false;
+            SoundUtil.playClick();
+            return;
+        } else {
+            configInputFocused = false;
+        }
+
+        if (leftClicked && isHovered(mouseX, mouseY, configSaveBtnX, configSaveBtnY, configSaveBtnW, configSaveBtnH)) {
+            submitConfigSaveFromInput();
+            return;
+        }
+
+        if (leftClicked && isHovered(mouseX, mouseY, configReloadBtnX, configReloadBtnY, configReloadBtnW, configReloadBtnH)) {
+            refreshSavedConfigList(true);
+            loadNamedConfig(activeConfigName);
+            setConfigStatus("Reloaded '" + activeConfigName + "'");
+            SoundUtil.playClick();
+            return;
+        }
+
+        if (leftClicked && isHovered(mouseX, mouseY, listLeft, listTop, listRight - listLeft, listHeight)) {
+            refreshSavedConfigList(false);
+            int statusOffset = (!configStatusMessage.isEmpty() && System.currentTimeMillis() < configStatusExpireMs) ? 18 : 0;
+            int cfgRowH = 40;
+            int scrollInt = Math.round(configScrollOffset);
+            for (int i = 0; i < cachedConfigNames.size(); i++) {
+                String cfgName = cachedConfigNames.get(i);
+                int rowTop = listTop + statusOffset + i * cfgRowH - scrollInt;
+                int rowBottom = rowTop + cfgRowH;
+                if (rowBottom < listTop || rowTop > listBottom) {
+                    continue;
+                }
+                boolean isDefault = "default".equalsIgnoreCase(cfgName);
+                int rightX = listLeft + rowWidth - 10;
+                int btnH = 18;
+                int btnY = rowTop + (cfgRowH - 4 - btnH) / 2;
+
+                if (!isDefault) {
+                    int delW = 24;
+                    int delX = rightX - delW;
+                    if (isHovered(mouseX, mouseY, delX, btnY, delW, btnH)) {
+                        deleteNamedConfig(cfgName);
+                        setConfigStatus("Deleted '" + cfgName + "'");
+                        SoundUtil.playTogglePop(false);
+                        return;
+                    }
+                    rightX = delX - 6;
+                }
+
+                int saveW = 42;
+                int saveX = rightX - saveW;
+                if (isHovered(mouseX, mouseY, saveX, btnY, saveW, btnH)) {
+                    if (saveNamedConfig(cfgName)) {
+                        setConfigStatus("Saved '" + cfgName + "'");
+                        SoundUtil.playTogglePop(true);
+                    }
+                    return;
+                }
+                rightX = saveX - 6;
+
+                int loadW = 44;
+                int loadX = rightX - loadW;
+                if (isHovered(mouseX, mouseY, loadX, btnY, loadW, btnH)) {
+                    if (loadNamedConfig(cfgName)) {
+                        setConfigStatus("Loaded '" + cfgName + "'");
+                        SoundUtil.playTogglePop(true);
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
+    private JsonObject serializeFullClientConfig() {
+        JsonObject root = new JsonObject();
+        root.addProperty("activeProfile", activeConfigName != null ? activeConfigName : "default");
+        root.addProperty("activeCategoryIndex", activeCategoryIndex);
+        root.addProperty("friendBindKey", FriendManager.getFriendBindKey());
+        if (clientTabUiVolumeEntry != null && clientTabUiVolumeEntry.setting instanceof NumberSetting volNs) {
+            root.addProperty("uiVolume", volNs.getValue());
+        }
+
+        // Save FriendManager entries
+        JsonArray friendsArr = new JsonArray();
         try {
-            Path cfg = getConfigFilePath();
-            if (!Files.exists(cfg)) {
-                return;
+            List<FriendRecord> friends = FriendManager.getSortedFriends();
+            if (friends != null) {
+                for (FriendRecord rec : friends) {
+                    if (rec != null && rec.uuid != null) {
+                        JsonObject fObj = new JsonObject();
+                        fObj.addProperty("uuid", rec.uuid.toString());
+                        fObj.addProperty("name", rec.name != null ? rec.name : "");
+                        friendsArr.add(fObj);
+                    }
+                }
             }
-            String json = Files.readString(cfg, StandardCharsets.UTF_8);
-            JsonElement parsed = JsonParser.parseString(json);
-            if (!parsed.isJsonObject()) {
-                return;
+        } catch (Throwable ignored) {
+        }
+        root.add("friends", friendsArr);
+
+        // Save ALL modules (enabled state, keybinds, expanded state, and every setting)
+        JsonObject modulesObj = new JsonObject();
+        for (CachedModuleRow row : allModuleRows) {
+            if (row == null || row.module == null || row.name == null) {
+                continue;
             }
-            JsonObject root = parsed.getAsJsonObject();
-            if (root.has("friendBindKey") && root.get("friendBindKey").isJsonPrimitive()) {
-                FriendManager.setFriendBindKey(root.get("friendBindKey").getAsInt());
+            JsonObject mObj = new JsonObject();
+            if (!isActionMacroRow(row)) {
+                mObj.addProperty("enabled", row.module.isEnabled());
             }
-            if (root.has("uiVolume") && clientTabUiVolumeEntry != null && clientTabUiVolumeEntry.setting instanceof NumberSetting volNs) {
-                volNs.setValue(Mth.clamp(root.get("uiVolume").getAsDouble(), volNs.getMin(), volNs.getMax()));
-                updateCachedSliderStringIfNeeded(clientTabUiVolumeEntry);
+            mObj.addProperty("key", resolveEffectiveBindKey(row));
+            mObj.addProperty("expanded", row.expanded);
+
+            JsonObject settingsObj = new JsonObject();
+            for (CachedSettingEntry se : row.settings) {
+                if (se == null || se.setting == null || se.name == null) {
+                    continue;
+                }
+                if (se.type == 0 && se.setting instanceof BooleanSetting bs) {
+                    Object raw = ((Setting<?>) bs).getValue();
+                    boolean bVal = (raw instanceof Boolean b) ? b : (raw instanceof Number n && n.intValue() > 0);
+                    settingsObj.addProperty(se.name, bVal);
+                } else if (se.type == 1 && se.setting instanceof NumberSetting ns) {
+                    settingsObj.addProperty(se.name, ns.getValue());
+                } else if (se.type == 2 && se.setting instanceof ModeSetting ms) {
+                    if (ms.getValue() != null) {
+                        settingsObj.addProperty(se.name, ms.getValue());
+                    }
+                } else if (se.type == 3 && se.setting instanceof MultiModeSetting mms) {
+                    JsonArray arr = new JsonArray();
+                    for (String opt : se.modeOptions) {
+                        if (mms.isSelected(opt)) {
+                            arr.add(opt);
+                        }
+                    }
+                    settingsObj.add(se.name, arr);
+                }
             }
-            if (!root.has("modules") || !root.get("modules").isJsonObject()) {
-                return;
+            mObj.add("settings", settingsObj);
+            modulesObj.add(row.name, mObj);
+        }
+        root.add("modules", modulesObj);
+        return root;
+    }
+
+    private boolean applyConfigJsonObject(JsonObject root) {
+        if (root == null || allModuleRows == null || allModuleRows.length == 0) {
+            return false;
+        }
+        if (root.has("activeProfile") && root.get("activeProfile").isJsonPrimitive()) {
+            String prof = sanitizeConfigName(root.get("activeProfile").getAsString());
+            if (!prof.isEmpty()) {
+                activeConfigName = prof;
             }
+        }
+        if (root.has("activeCategoryIndex") && root.get("activeCategoryIndex").isJsonPrimitive()) {
+            int idx = root.get("activeCategoryIndex").getAsInt();
+            if (idx >= 0 && idx < CATEGORY_PILLS.length) {
+                activeCategoryIndex = idx;
+            }
+        }
+        if (root.has("friendBindKey") && root.get("friendBindKey").isJsonPrimitive()) {
+            FriendManager.setFriendBindKey(root.get("friendBindKey").getAsInt());
+        }
+        if (root.has("uiVolume") && clientTabUiVolumeEntry != null && clientTabUiVolumeEntry.setting instanceof NumberSetting volNs) {
+            volNs.setValue(Mth.clamp(root.get("uiVolume").getAsDouble(), volNs.getMin(), volNs.getMax()));
+            updateCachedSliderStringIfNeeded(clientTabUiVolumeEntry);
+        }
+        if (root.has("modules") && root.get("modules").isJsonObject()) {
             JsonObject modulesObj = root.getAsJsonObject("modules");
             for (CachedModuleRow row : allModuleRows) {
                 if (row == null || row.module == null || row.name == null || !modulesObj.has(row.name)) {
@@ -3324,6 +3712,9 @@ public class GlassClickGuiScreen extends Screen {
                     }
                     setModuleBindKey(row.module, row.boundKey);
                     refreshModuleBindLabelIfNeeded(row, true);
+                }
+                if (mObj.has("expanded") && mObj.get("expanded").isJsonPrimitive()) {
+                    row.expanded = mObj.get("expanded").getAsBoolean();
                 }
                 if (!isActionMacroRow(row) && mObj.has("enabled") && mObj.get("enabled").isJsonPrimitive()) {
                     boolean wantEnabled = mObj.get("enabled").getAsBoolean();
@@ -3369,11 +3760,105 @@ public class GlassClickGuiScreen extends Screen {
                     }
                 }
             }
-            filterDirty = true;
-            layoutDirty = true;
-        loadConfigIfPresent();
+        }
+        filterDirty = true;
+        layoutDirty = true;
+        return true;
+    }
+
+    public boolean saveNamedConfig(String name) {
+        if (allModuleRows == null || allModuleRows.length == 0) {
+            return false;
+        }
+        String safe = sanitizeConfigName(name);
+        if (safe.isEmpty()) {
+            safe = "default";
+        }
+        try {
+            activeConfigName = safe;
+            JsonObject root = serializeFullClientConfig();
+            String json = CONFIG_GSON.toJson(root);
+            // Always update default attrium_config.json so it persists on next launch
+            Files.writeString(getConfigFilePath(), json, StandardCharsets.UTF_8);
+            if (!"default".equalsIgnoreCase(safe)) {
+                Path dir = getConfigsDirectoryPath();
+                Files.createDirectories(dir);
+                Files.writeString(dir.resolve(safe + ".json"), json, StandardCharsets.UTF_8);
+            }
+            refreshSavedConfigList(true);
+            return true;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    public boolean loadNamedConfig(String name) {
+        String safe = sanitizeConfigName(name);
+        if (safe.isEmpty()) {
+            safe = "default";
+        }
+        try {
+            Path target = "default".equalsIgnoreCase(safe)
+                    ? getConfigFilePath()
+                    : getConfigsDirectoryPath().resolve(safe + ".json");
+            if (!Files.exists(target)) {
+                return false;
+            }
+            String json = Files.readString(target, StandardCharsets.UTF_8);
+            JsonElement parsed = JsonParser.parseString(json);
+            if (!parsed.isJsonObject()) {
+                return false;
+            }
+            activeConfigName = safe;
+            boolean ok = applyConfigJsonObject(parsed.getAsJsonObject());
+            if (ok && !"default".equalsIgnoreCase(safe)) {
+                // Persist loaded profile as the active default for next game startup
+                Files.writeString(getConfigFilePath(), CONFIG_GSON.toJson(serializeFullClientConfig()), StandardCharsets.UTF_8);
+            }
+            return ok;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    public void deleteNamedConfig(String name) {
+        String safe = sanitizeConfigName(name);
+        if (safe.isEmpty() || "default".equalsIgnoreCase(safe)) {
+            return;
+        }
+        try {
+            Path target = getConfigsDirectoryPath().resolve(safe + ".json");
+            Files.deleteIfExists(target);
+            if (safe.equalsIgnoreCase(activeConfigName)) {
+                activeConfigName = "default";
+            }
+            refreshSavedConfigList(true);
         } catch (Throwable ignored) {
         }
     }
 
+    public void saveConfigNow() {
+        saveNamedConfig(activeConfigName != null && !activeConfigName.isEmpty() ? activeConfigName : "default");
+    }
+
+    public void loadConfigIfPresent() {
+        if (configLoadedOnce || allModuleRows == null || allModuleRows.length == 0) {
+            return;
+        }
+        configLoadedOnce = true;
+        try {
+            Path cfg = getConfigFilePath();
+            if (!Files.exists(cfg)) {
+                return;
+            }
+            String json = Files.readString(cfg, StandardCharsets.UTF_8);
+            JsonElement parsed = JsonParser.parseString(json);
+            if (!parsed.isJsonObject()) {
+                return;
+            }
+            applyConfigJsonObject(parsed.getAsJsonObject());
+            refreshSavedConfigList(true);
+        } catch (Throwable ignored) {
+        }
+    }
 }
