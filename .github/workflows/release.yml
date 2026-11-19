@@ -1,9 +1,10 @@
-name: Build and Release JAR
+name: Rolling JAR Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches:
+      - master
+      - main
 
 permissions:
   contents: write
@@ -29,8 +30,15 @@ jobs:
       - name: Build JAR with Gradle
         run: ./gradlew build --no-daemon
 
-      - name: Create GitHub Release and Upload JAR
-        uses: softprops/action-gh-release@v2
-        with:
-          files: build/libs/*.jar
-          generate_release_notes: true
+      - name: Remove sources JAR
+        run: rm -f build/libs/*-sources.jar
+
+      - name: Replace Single Rolling Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete latest --yes || true
+          git push origin :refs/tags/latest || true
+          gh release create latest build/libs/*.jar \
+            --title "Attrium Client (Latest)" \
+            --notes "Latest build from commit $(git rev-parse --short HEAD)"

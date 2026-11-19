@@ -4,12 +4,15 @@ import com.mojang.blaze3d.platform.InputConstants;
 import net.minecraft.client.Minecraft;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.protocol.game.ServerboundPlayerCommandPacket;
+import net.minecraft.network.protocol.game.ServerboundSetCarriedItemPacket;
+import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.inventory.ClickType;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import org.lwjgl.glfw.GLFW;
 import attrium.ru.api.events.annotation.SubscribeEvent;
+import attrium.ru.api.events.impl.DrawEvent;
 import attrium.ru.api.events.impl.TickEvent;
 import attrium.ru.api.module.Module;
 import attrium.ru.api.module.ModuleCategory;
@@ -20,25 +23,61 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.Locale;
+import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * ElytraHelper Module (Pure Keybind-Driven Action Macro — No ON/OFF Toggle, No Rocket Option)
  * (Minecraft 1.21.11 Official Mojang Mappings):
  *
- * Works identically to LungeHelper in ClickGUI (Keybind pill only, no ON/OFF switch).
- * Pressing the bound key cleanly swaps between your Chestplate and Elytra, with optional
- * automatic glide activation when equipping the Elytra in midair.
+ * Legit Hotbar Slot Swap Sequence (with optional tick randomization):
+ *   1. If the target Elytra or Chestplate is in the hotbar (0-8):
+ *        - Tick 0: Visibly switches client hotbar slot to the armor item (C09).
+ *        - Tick +delay (1 tick default, or randomized Min..Max ticks): Equips via
+ *          `gameMode.useItem(MAIN_HAND)` + `player.swing(MAIN_HAND)` (and starts glide if airborne).
+ *        - Tick +delay: Visibly switches back to the previously held hotbar slot.
+ *   2. If the target Elytra or Chestplate is in the main inventory (9-35):
+ *        - Performs a clean inventory click swap into chest armor slot 6 (with optional tick delay).
  */
 public class ElytraHelper extends Module {
     private static ElytraHelper instance;
 
     private static final int CHEST_ARMOR_MENU_SLOT = 6;
-    private static final int SWAP_COOLDOWN_TICKS = 4;
+    private static final int BASE_SWAP_COOLDOWN_TICKS = 4;
+
+    private enum SwapPhase {
+        IDLE,
+        WAIT_BEFORE_EQUIP,
+        WAIT_BEFORE_RETURN_SLOT
+    }
 
     private final BooleanSetting autoStartGlide = register(new BooleanSetting(
             "Auto Glide",
             "Automatically start gliding if you swap to an Elytra while airborne",
             true
+    ));
+
+    private final BooleanSetting randomization = register(new BooleanSetting(
+            "Randomization",
+            "Randomize the tick delay between slot switch, equip, and swap-back to look legit",
+            false
+    ));
+
+    private final NumberSetting minRandomTicks = register(new NumberSetting(
+            "Min Random (Ticks)",
+            "Minimum ticks (1 - 10) between legit hotbar swap stages",
+            1.0D,
+            1.0D,
+            10.0D,
+            1.0D
+    ));
+
+    private final NumberSetting maxRandomTicks = register(new NumberSetting(
+            "Max Random (Ticks)",
+            "Maximum ticks (1 - 10) between legit hotbar swap stages",
+            3.0D,
+            1.0D,
+            10.0D,
+            1.0D
     ));
 
     private final NumberSetting savedElytraKeyCode = register(new NumberSetting(
@@ -56,15 +95,24 @@ public class ElytraHelper extends Module {
     private static Method cachedModuleGetKeyMethod = null;
     private static boolean moduleKeyReflectionInit = false;
 
+    private SwapPhase phase = SwapPhase.IDLE;
+    private int targetArmorSlot = -1;
+    private int previousHotbarSlot = -1;
+    private boolean equippingElytra = false;
+    private int phaseTicksElapsed = 0;
+    private int requiredPhaseTicks = 1;
+
     private boolean wasBindPressedLastTick = false;
     private long lastTickProcessedGameTime = -1L;
     private int clientTickCounter = 0;
     private int nextAllowedSwapTick = 0;
 
     public ElytraHelper() {
-        super("ElytraHelper", "Keybind-driven Chestplate <-> Elytra swap macro (no rocket option)", ModuleCategory.MOVEMENT);
+        super("ElytraHelper", "Keybind-driven legit Chestplate <-> Elytra swap macro with tick randomization", ModuleCategory.MOVEMENT);
         instance = this;
         this.savedElytraKeyCode.visibleWhen(() -> false);
+        this.minRandomTicks.visibleWhen(this.randomization::getValue);
+        this.maxRandomTicks.visibleWhen(this.randomization::getValue);
     }
 
     public static ElytraHelper getInstance() {
@@ -118,8 +166,24 @@ public class ElytraHelper extends Module {
 
     @Override
     protected void onDisable() {
+        resetState();
+    }
+
+    private void resetState() {
+        phase = SwapPhase.IDLE;
+        targetArmorSlot = -1;
+        previousHotbarSlot = -1;
+        equippingElytra = false;
+        phaseTicksElapsed = 0;
         wasBindPressedLastTick = false;
         callbackPressLatched = false;
+    }
+
+    @SubscribeEvent
+    public void onDraw(DrawEvent event) {
+        if (minRandomTicks.getValue() > maxRandomTicks.getValue()) {
+            maxRandomTicks.setValue(minRandomTicks.getValue());
+        }
     }
 
     @SubscribeEvent
@@ -132,8 +196,7 @@ public class ElytraHelper extends Module {
 
     public void processClientTick(Minecraft client) {
         if (client == null || client.player == null || client.level == null || client.gameMode == null) {
-            wasBindPressedLastTick = false;
-            callbackPressLatched = false;
+            resetState();
             return;
         }
 
@@ -145,8 +208,10 @@ public class ElytraHelper extends Module {
         clientTickCounter++;
 
         if (client.screen != null) {
-            wasBindPressedLastTick = false;
-            callbackPressLatched = false;
+            if (phase == SwapPhase.WAIT_BEFORE_RETURN_SLOT && previousHotbarSlot >= 0 && previousHotbarSlot < 9) {
+                selectHotbarSlotWithPacket(client, previousHotbarSlot);
+            }
+            resetState();
             return;
         }
 
@@ -157,40 +222,95 @@ public class ElytraHelper extends Module {
         boolean risingEdge = (keyDown && !wasBindPressedLastTick) || callbackTap;
         wasBindPressedLastTick = keyDown;
 
-        if (!risingEdge || clientTickCounter < nextAllowedSwapTick) {
+        // Advance active legit multi-tick hotbar swap sequence
+        if (phase != SwapPhase.IDLE) {
+            advanceSwapSequence(client);
             return;
         }
 
-        if (performChestplateElytraSwap(client)) {
-            nextAllowedSwapTick = clientTickCounter + SWAP_COOLDOWN_TICKS;
+        if (!risingEdge || clientTickCounter < nextAllowedSwapTick || client.player.isUsingItem()) {
+            return;
         }
+
+        beginLegitChestplateElytraSwap(client);
     }
 
-    private boolean performChestplateElytraSwap(Minecraft client) {
+    private void beginLegitChestplateElytraSwap(Minecraft client) {
         ItemStack chest = client.player.getItemBySlot(EquipmentSlot.CHEST);
         boolean wearingElytra = !chest.isEmpty() && chest.is(Items.ELYTRA);
 
-        int targetInvSlot = wearingElytra
+        int slot = wearingElytra
                 ? findBestChestplateSlot(client)
                 : findBestElytraSlot(client);
 
-        if (targetInvSlot < 0 || targetInvSlot >= 36) {
-            return false;
+        if (slot < 0 || slot >= 36) {
+            return;
         }
 
-        int containerId = client.player.inventoryMenu.containerId;
-        if (targetInvSlot < 9) {
-            // 1-click legit hotbar swap directly into chest armor slot 6
-            client.gameMode.handleInventoryMouseClick(containerId, CHEST_ARMOR_MENU_SLOT, targetInvSlot, ClickType.SWAP, client.player);
+        this.equippingElytra = !wearingElytra;
+        this.targetArmorSlot = slot;
+        this.previousHotbarSlot = client.player.getInventory().getSelectedSlot();
+
+        if (slot < 9) {
+            // Legit visible hotbar swap: switch to armor slot in client view first
+            selectHotbarSlotWithPacket(client, slot);
+            this.phaseTicksElapsed = 0;
+            this.requiredPhaseTicks = computeStageDelayTicks();
+            this.phase = SwapPhase.WAIT_BEFORE_EQUIP;
         } else {
-            // Standard 3-click inventory swap between slot targetInvSlot (9..35) and chest slot 6
-            client.gameMode.handleInventoryMouseClick(containerId, targetInvSlot, 0, ClickType.PICKUP, client.player);
+            // Inventory slot (9..35): clean 3-click swap into chest slot 6
+            int containerId = client.player.inventoryMenu.containerId;
+            client.gameMode.handleInventoryMouseClick(containerId, slot, 0, ClickType.PICKUP, client.player);
             client.gameMode.handleInventoryMouseClick(containerId, CHEST_ARMOR_MENU_SLOT, 0, ClickType.PICKUP, client.player);
-            client.gameMode.handleInventoryMouseClick(containerId, targetInvSlot, 0, ClickType.PICKUP, client.player);
+            client.gameMode.handleInventoryMouseClick(containerId, slot, 0, ClickType.PICKUP, client.player);
+            tryStartAirGlide(client);
+            nextAllowedSwapTick = clientTickCounter + BASE_SWAP_COOLDOWN_TICKS;
+            this.targetArmorSlot = -1;
+            this.previousHotbarSlot = -1;
+            this.phase = SwapPhase.IDLE;
         }
+    }
 
-        // If we just equipped an Elytra while airborne and Auto Glide is enabled, start gliding
-        if (!wearingElytra && Boolean.TRUE.equals(autoStartGlide.getValue())
+    private void advanceSwapSequence(Minecraft client) {
+        switch (phase) {
+            case WAIT_BEFORE_EQUIP -> {
+                phaseTicksElapsed++;
+                if (phaseTicksElapsed < requiredPhaseTicks) {
+                    return;
+                }
+                if (targetArmorSlot >= 0 && targetArmorSlot < 9) {
+                    selectHotbarSlotWithPacket(client, targetArmorSlot);
+                    // Right-click equip the held Elytra / Chestplate legitimately
+                    client.gameMode.useItem(client.player, InteractionHand.MAIN_HAND);
+                    client.player.swing(InteractionHand.MAIN_HAND);
+                    tryStartAirGlide(client);
+                }
+                phaseTicksElapsed = 0;
+                requiredPhaseTicks = computeStageDelayTicks();
+                phase = SwapPhase.WAIT_BEFORE_RETURN_SLOT;
+            }
+
+            case WAIT_BEFORE_RETURN_SLOT -> {
+                phaseTicksElapsed++;
+                if (phaseTicksElapsed < requiredPhaseTicks) {
+                    return;
+                }
+                if (previousHotbarSlot >= 0 && previousHotbarSlot < 9) {
+                    selectHotbarSlotWithPacket(client, previousHotbarSlot);
+                }
+                nextAllowedSwapTick = clientTickCounter + BASE_SWAP_COOLDOWN_TICKS;
+                targetArmorSlot = -1;
+                previousHotbarSlot = -1;
+                phaseTicksElapsed = 0;
+                phase = SwapPhase.IDLE;
+            }
+
+            default -> phase = SwapPhase.IDLE;
+        }
+    }
+
+    private void tryStartAirGlide(Minecraft client) {
+        if (equippingElytra && Boolean.TRUE.equals(autoStartGlide.getValue())
                 && !client.player.onGround()
                 && !client.player.isFallFlying()
                 && !client.player.isInWater()
@@ -200,11 +320,35 @@ public class ElytraHelper extends Module {
                     ServerboundPlayerCommandPacket.Action.START_FALL_FLYING
             ));
         }
-        return true;
+    }
+
+    private int computeStageDelayTicks() {
+        if (!Boolean.TRUE.equals(randomization.getValue())) {
+            return 1;
+        }
+        int minT = Math.max(1, (int) Math.round(minRandomTicks.getValue()));
+        int maxT = Math.max(minT, (int) Math.round(maxRandomTicks.getValue()));
+        return minT == maxT ? minT : ThreadLocalRandom.current().nextInt(minT, maxT + 1);
+    }
+
+    private void selectHotbarSlotWithPacket(Minecraft client, int targetSlot) {
+        if (client == null || client.player == null || client.player.getInventory() == null) {
+            return;
+        }
+        if (targetSlot < 0 || targetSlot >= 9) {
+            return;
+        }
+        if (client.player.getInventory().getSelectedSlot() != targetSlot) {
+            client.player.getInventory().setSelectedSlot(targetSlot);
+            if (client.player.connection != null) {
+                client.player.connection.send(new ServerboundSetCarriedItemPacket(targetSlot));
+            }
+        }
     }
 
     private int findBestElytraSlot(Minecraft client) {
         int fallbackBroken = -1;
+        // Prefer hotbar (0..8) first for legit visible slot swap, then main inventory (9..35)
         for (int i = 0; i < 36; i++) {
             ItemStack stack = client.player.getInventory().getItem(i);
             if (!stack.isEmpty() && stack.is(Items.ELYTRA)) {
@@ -220,17 +364,26 @@ public class ElytraHelper extends Module {
     }
 
     private int findBestChestplateSlot(Minecraft client) {
-        int bestSlot = -1;
-        int bestTier = -1;
+        int bestHotbarSlot = -1;
+        int bestHotbarTier = -1;
+        int bestInvSlot = -1;
+        int bestInvTier = -1;
         for (int i = 0; i < 36; i++) {
             ItemStack stack = client.player.getInventory().getItem(i);
             int tier = getChestplateTier(stack);
-            if (tier > bestTier) {
-                bestTier = tier;
-                bestSlot = i;
+            if (tier > 0) {
+                if (i < 9) {
+                    if (tier > bestHotbarTier) {
+                        bestHotbarTier = tier;
+                        bestHotbarSlot = i;
+                    }
+                } else if (tier > bestInvTier) {
+                    bestInvTier = tier;
+                    bestInvSlot = i;
+                }
             }
         }
-        return bestSlot;
+        return bestHotbarSlot != -1 ? bestHotbarSlot : bestInvSlot;
     }
 
     private int getChestplateTier(ItemStack stack) {

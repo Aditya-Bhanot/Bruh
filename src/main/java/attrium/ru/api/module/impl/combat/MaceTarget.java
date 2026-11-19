@@ -409,10 +409,14 @@ public class MaceTarget extends Module {
 
             if (client.player.getInventory().getSelectedSlot() != armorHotbarSlot) {
                 client.player.getInventory().setSelectedSlot(armorHotbarSlot);
+                if (client.player.connection != null) {
+                    client.player.connection.send(new net.minecraft.network.protocol.game.ServerboundSetCarriedItemPacket(armorHotbarSlot));
+                }
             }
 
-            if (client.options != null) {
-                KeyMapping.click(client.options.keyUse.getDefaultKey());
+            if (client.gameMode != null) {
+                client.gameMode.useItem(client.player, InteractionHand.MAIN_HAND);
+                client.player.swing(InteractionHand.MAIN_HAND);
             }
 
             this.stageStartTick = clientTickCounter;

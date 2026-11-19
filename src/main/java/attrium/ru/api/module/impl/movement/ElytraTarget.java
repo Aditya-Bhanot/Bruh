@@ -814,7 +814,7 @@ public final class ElytraTarget extends Module {
                 || !MaceTarget.isEntityAllowedByAutoMaceTargets(mc, target)) {
             return false;
         }
-        if (getValidChestplateSlot() == -1 || !ActionManager.hasLineOfSight(mc, target)) {
+        if (!ActionManager.hasLineOfSight(mc, target)) {
             return false;
         }
 
@@ -825,9 +825,10 @@ public final class ElytraTarget extends Module {
         }
 
         Vec3 vel = mc.player.getDeltaMovement();
-        // 2. Strict Descent Check: Never unequip while ascending (vel.y >= -0.08D) from Wind Burst or Rocket climb,
-        //    even when the player is looking straight down at the target!
-        if (vel.y >= -0.08D) {
+        boolean fastRocketGlide = mc.player.isFallFlying() && vel.length() >= 0.60D && vel.y <= 0.35D;
+        // 2. Descent / Rocket-Mace Check: Never unequip while steeply climbing (vel.y > 0.35D),
+        //    but allow fast horizontal/shallow Rocket Mace glides into the enemy!
+        if (!fastRocketGlide && vel.y >= -0.08D) {
             return false;
         }
 
@@ -836,7 +837,8 @@ public final class ElytraTarget extends Module {
         double verticalAltitudeOverTarget = mc.player.getY() - target.getY();
         boolean hasSmashHeight = effectiveFall >= requiredMinDrop
                 || verticalAltitudeOverTarget >= requiredMinDrop
-                || (mc.player.isFallFlying() && vel.y < -0.22D);
+                || (mc.player.isFallFlying() && vel.y < -0.22D)
+                || fastRocketGlide;
         if (!hasSmashHeight) {
             return false;
         }

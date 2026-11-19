@@ -10,6 +10,16 @@ import net.minecraft.network.chat.Style;
 import net.minecraft.util.Mth;
 import net.minecraft.world.item.Items;
 import org.lwjgl.glfw.GLFW;
+import java.nio.file.Path;
+import java.nio.file.Files;
+import java.nio.charset.StandardCharsets;
+import org.lwjgl.glfw.GLFWMouseButtonCallback;
+import com.google.gson.JsonParser;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonArray;
+import com.google.gson.GsonBuilder;
+import com.google.gson.Gson;
 import org.lwjgl.glfw.GLFWCharCallback;
 import org.lwjgl.glfw.GLFWKeyCallback;
 import net.minecraft.client.gui.components.PlayerFaceRenderer;
@@ -165,6 +175,11 @@ public class GlassClickGuiScreen extends Screen {
     private static long hookedWindowHandle = 0L;
     private static GLFWKeyCallback prevKeyCallback = null;
     private static GLFWCharCallback prevCharCallback = null;
+    private GLFWMouseButtonCallback prevMouseButtonCallback;
+    private volatile boolean pendingLeftClickFromCallback = false;
+    private volatile boolean pendingRightClickFromCallback = false;
+    private static final Gson CONFIG_GSON = new GsonBuilder().setPrettyPrinting().create();
+    private static volatile boolean configLoadedOnce = false;
     private char lastKeyAppendedChar = 0;
     private long lastKeyAppendTimeNs = 0L;
 
@@ -1963,6 +1978,7 @@ public class GlassClickGuiScreen extends Screen {
         }
         setModuleBindKey(row.module, normalized);
         refreshModuleBindLabelIfNeeded(row, true);
+        saveConfigNow();
     }
 
     private static boolean isBindRelatedSetting(Setting<?> s, String sName) {
@@ -1987,33 +2003,42 @@ public class GlassClickGuiScreen extends Screen {
         if (ns == null) {
             return 0.1D;
         }
+        double range = Math.max(0.0001D, ns.getMax() - ns.getMin());
         try {
             for (Method m : NumberSetting.class.getDeclaredMethods()) {
                 String n = m.getName().toLowerCase(Locale.ROOT);
                 if (m.getParameterCount() == 0
                         && (m.getReturnType() == double.class || m.getReturnType() == float.class || Number.class.isAssignableFrom(m.getReturnType()))
-                        && !n.contains("min") && !n.contains("max") && !n.contains("val") && !n.contains("default")) {
+                        && (n.contains("step") || n.contains("inc"))) {
                     m.setAccessible(true);
                     Object v = m.invoke(ns);
-                    if (v instanceof Number num && num.doubleValue() > 0.0D) {
-                        return num.doubleValue();
+                    if (v instanceof Number num) {
+                        double d = num.doubleValue();
+                        if (d > 0.0D && d <= range) {
+                            return d;
+                        }
                     }
                 }
             }
             for (Field f : NumberSetting.class.getDeclaredFields()) {
                 String n = f.getName().toLowerCase(Locale.ROOT);
                 if ((f.getType() == double.class || f.getType() == float.class)
-                        && !n.contains("min") && !n.contains("max") && !n.contains("val") && !n.contains("default")) {
+                        && (n.contains("step") || n.contains("inc"))) {
                     f.setAccessible(true);
-                    double v = f.getDouble(ns);
-                    if (v > 0.0D) {
-                        return v;
+                    double d = f.getDouble(ns);
+                    if (d > 0.0D && d <= range) {
+                        return d;
                     }
                 }
             }
         } catch (Throwable ignored) {
         }
-        return 0.1D;
+        String nameLower = ns.getName() != null ? ns.getName().toLowerCase(Locale.ROOT) : "";
+        if (nameLower.contains("tick") || nameLower.contains("slot") || nameLower.contains("delay")
+                || nameLower.contains("count") || nameLower.contains("fov") || nameLower.contains("cps")) {
+            return 1.0D;
+        }
+        return range >= 50.0D ? 1.0D : 0.1D;
     }
 
     private static String[] extractMultiModeOptions(MultiModeSetting mms) {
@@ -2077,7 +2102,8 @@ public class GlassClickGuiScreen extends Screen {
             for (Method m : MultiModeSetting.class.getDeclaredMethods()) {
                 String n = m.getName().toLowerCase(Locale.ROOT);
                 if (m.getParameterCount() == 1 && m.getParameterTypes()[0] == String.class
-                        && (n.contains("toggle") || n.contains("select") || n.contains("click"))) {
+                        && !n.startsWith("is") && !n.startsWith("get") && !n.startsWith("has")
+                        && (n.contains("toggle") || n.contains("click"))) {
                     m.setAccessible(true);
                     m.invoke(mms, opt);
                     return;
@@ -2479,6 +2505,20 @@ public class GlassClickGuiScreen extends Screen {
                 prevCharCallback.invoke(window, codepoint);
             }
         });
+
+        prevMouseButtonCallback = GLFW.glfwSetMouseButtonCallback(windowHandle, (window, button, action, mods) -> {
+            Minecraft client = Minecraft.getInstance();
+            if (client != null && client.screen instanceof GlassClickGuiScreen gui && action == GLFW.GLFW_PRESS) {
+                if (button == GLFW.GLFW_MOUSE_BUTTON_LEFT) {
+                    gui.pendingLeftClickFromCallback = true;
+                } else if (button == GLFW.GLFW_MOUSE_BUTTON_RIGHT) {
+                    gui.pendingRightClickFromCallback = true;
+                }
+            }
+            if (prevMouseButtonCallback != null) {
+                prevMouseButtonCallback.invoke(window, button, action, mods);
+            }
+        });
     }
 
     private boolean handleGlfwKeyCallback(int key, int scancode, int action, int mods) {
@@ -2743,8 +2783,12 @@ public class GlassClickGuiScreen extends Screen {
 
         boolean leftDown = GLFW.glfwGetMouseButton(windowHandle, GLFW.GLFW_MOUSE_BUTTON_LEFT) == GLFW.GLFW_PRESS;
         boolean rightDown = GLFW.glfwGetMouseButton(windowHandle, GLFW.GLFW_MOUSE_BUTTON_RIGHT) == GLFW.GLFW_PRESS;
-        boolean leftClicked = leftDown && !wasLeftMouseDown;
-        boolean rightClicked = rightDown && !wasRightMouseDown;
+        boolean cbLeft = pendingLeftClickFromCallback;
+        boolean cbRight = pendingRightClickFromCallback;
+        pendingLeftClickFromCallback = false;
+        pendingRightClickFromCallback = false;
+        boolean leftClicked = (leftDown && !wasLeftMouseDown) || cbLeft;
+        boolean rightClicked = (rightDown && !wasRightMouseDown) || cbRight;
         wasLeftMouseDown = leftDown;
         wasRightMouseDown = rightDown;
 
@@ -2769,6 +2813,9 @@ public class GlassClickGuiScreen extends Screen {
                 return;
             }
         } else {
+            if (activeDraggingSliderEntry != null) {
+                saveConfigNow();
+            }
             activeDraggingSliderEntry = null;
             draggingScrollbar = false;
         }
@@ -2788,7 +2835,7 @@ public class GlassClickGuiScreen extends Screen {
                 }
             }
 
-            if (isHovered(mouseX, mouseY, searchBoxX, searchBoxY, searchBoxW, searchBoxH)) {
+            if (activeTopTabIndex == 0 && isHovered(mouseX, mouseY, searchBoxX, searchBoxY, searchBoxW, searchBoxH)) {
                 if (searchFocused || !searchQuery.isEmpty()) {
                     if (isHovered(mouseX, mouseY, searchClearBtnX, searchBtnY, 14, 14)) {
                         if (!searchQuery.isEmpty()) {
@@ -2817,7 +2864,7 @@ public class GlassClickGuiScreen extends Screen {
                 searchFocused = false;
             }
 
-            for (int i = 0; i < CATEGORY_PILLS.length; i++) {
+            if (activeTopTabIndex == 0) for (int i = 0; i < CATEGORY_PILLS.length; i++) {
                 int px = categoryPillX[i];
                 int pw = categoryPillW[i];
                 if (px + pw <= listRight && isHovered(mouseX, mouseY, px, searchBoxY, pw, searchBoxH)) {
@@ -2952,12 +2999,14 @@ public class GlassClickGuiScreen extends Screen {
 
                 if ((leftClicked || rightClicked) && isHovered(mouseX, mouseY, toggleX - 2, toggleY - 2, toggleW + 4, toggleH + 4)) {
                     row.module.toggle();
+                    saveConfigNow();
                     SoundUtil.playTogglePop(row.module.isEnabled());
                     return;
                 }
 
                 if (rightClicked) {
                     row.module.toggle();
+                    saveConfigNow();
                     SoundUtil.playTogglePop(row.module.isEnabled());
                     return;
                 }
@@ -2972,7 +3021,7 @@ public class GlassClickGuiScreen extends Screen {
                 }
             }
 
-            if (row.expanded && row.expandAnim > 0.5F
+            if (row.expanded
                     && isHovered(mouseX, mouseY, listLeft, rowTop + ROW_HEIGHT, rowWidth, row.cachedTotalHeight - ROW_HEIGHT)) {
                 int drawerX = listLeft + 4;
                 int drawerW = rowWidth - 8;
@@ -3157,4 +3206,174 @@ public class GlassClickGuiScreen extends Screen {
     private static boolean isHovered(int mouseX, int mouseY, int x, int y, int w, int h) {
         return mouseX >= x && mouseX <= (x + w) && mouseY >= y && mouseY <= (y + h);
     }
+
+    @Override
+    public void onClose() {
+        saveConfigNow();
+        super.onClose();
+    }
+
+    private static Path getConfigFilePath() {
+        Minecraft mc = Minecraft.getInstance();
+        Path base = (mc != null && mc.gameDirectory != null)
+                ? mc.gameDirectory.toPath()
+                : Path.of(".");
+        return base.resolve("attrium_config.json");
+    }
+
+    public void saveConfigNow() {
+        if (allModuleRows == null || allModuleRows.length == 0) {
+            return;
+        }
+        try {
+            JsonObject root = new JsonObject();
+            root.addProperty("friendBindKey", FriendManager.getFriendBindKey());
+            if (clientTabUiVolumeEntry != null && clientTabUiVolumeEntry.setting instanceof NumberSetting volNs) {
+                root.addProperty("uiVolume", volNs.getValue());
+            }
+
+            JsonObject modulesObj = new JsonObject();
+            for (CachedModuleRow row : allModuleRows) {
+                if (row == null || row.module == null || row.name == null) {
+                    continue;
+                }
+                JsonObject mObj = new JsonObject();
+                if (!isActionMacroRow(row)) {
+                    mObj.addProperty("enabled", row.module.isEnabled());
+                }
+                int bindKey = resolveEffectiveBindKey(row);
+                mObj.addProperty("key", bindKey);
+
+                JsonObject settingsObj = new JsonObject();
+                for (CachedSettingEntry se : row.settings) {
+                    if (se == null || se.setting == null || se.name == null) {
+                        continue;
+                    }
+                    if (se.type == 0 && se.setting instanceof BooleanSetting bs) {
+                        Object raw = ((Setting<?>) bs).getValue();
+                        boolean bVal = (raw instanceof Boolean b) ? b : (raw instanceof Number n && n.intValue() > 0);
+                        settingsObj.addProperty(se.name, bVal);
+                    } else if (se.type == 1 && se.setting instanceof NumberSetting ns) {
+                        settingsObj.addProperty(se.name, ns.getValue());
+                    } else if (se.type == 2 && se.setting instanceof ModeSetting ms) {
+                        if (ms.getValue() != null) {
+                            settingsObj.addProperty(se.name, ms.getValue());
+                        }
+                    } else if (se.type == 3 && se.setting instanceof MultiModeSetting mms) {
+                        JsonArray arr = new JsonArray();
+                        for (String opt : se.modeOptions) {
+                            if (mms.isSelected(opt)) {
+                                arr.add(opt);
+                            }
+                        }
+                        settingsObj.add(se.name, arr);
+                    }
+                }
+                mObj.add("settings", settingsObj);
+                modulesObj.add(row.name, mObj);
+            }
+            root.add("modules", modulesObj);
+
+            Path cfg = getConfigFilePath();
+            Files.writeString(cfg, CONFIG_GSON.toJson(root), StandardCharsets.UTF_8);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    public void loadConfigIfPresent() {
+        if (configLoadedOnce || allModuleRows == null || allModuleRows.length == 0) {
+            return;
+        }
+        configLoadedOnce = true;
+        try {
+            Path cfg = getConfigFilePath();
+            if (!Files.exists(cfg)) {
+                return;
+            }
+            String json = Files.readString(cfg, StandardCharsets.UTF_8);
+            JsonElement parsed = JsonParser.parseString(json);
+            if (!parsed.isJsonObject()) {
+                return;
+            }
+            JsonObject root = parsed.getAsJsonObject();
+            if (root.has("friendBindKey") && root.get("friendBindKey").isJsonPrimitive()) {
+                FriendManager.setFriendBindKey(root.get("friendBindKey").getAsInt());
+            }
+            if (root.has("uiVolume") && clientTabUiVolumeEntry != null && clientTabUiVolumeEntry.setting instanceof NumberSetting volNs) {
+                volNs.setValue(Mth.clamp(root.get("uiVolume").getAsDouble(), volNs.getMin(), volNs.getMax()));
+                updateCachedSliderStringIfNeeded(clientTabUiVolumeEntry);
+            }
+            if (!root.has("modules") || !root.get("modules").isJsonObject()) {
+                return;
+            }
+            JsonObject modulesObj = root.getAsJsonObject("modules");
+            for (CachedModuleRow row : allModuleRows) {
+                if (row == null || row.module == null || row.name == null || !modulesObj.has(row.name)) {
+                    continue;
+                }
+                JsonObject mObj = modulesObj.getAsJsonObject(row.name);
+                if (mObj.has("key") && mObj.get("key").isJsonPrimitive()) {
+                    int k = mObj.get("key").getAsInt();
+                    row.boundKey = (k == 0 || k == GLFW.GLFW_KEY_UNKNOWN) ? -1 : k;
+                    if (isActionMacroRow(row)) {
+                        if (isElytraHelperRow(row)) {
+                            invokeStaticMacroSetKey(row.module, row.boundKey);
+                        } else {
+                            LungeHelper.setMacroBoundKey(row.boundKey);
+                        }
+                    }
+                    setModuleBindKey(row.module, row.boundKey);
+                    refreshModuleBindLabelIfNeeded(row, true);
+                }
+                if (!isActionMacroRow(row) && mObj.has("enabled") && mObj.get("enabled").isJsonPrimitive()) {
+                    boolean wantEnabled = mObj.get("enabled").getAsBoolean();
+                    if (row.module.isEnabled() != wantEnabled) {
+                        row.module.toggle();
+                    }
+                }
+                if (mObj.has("settings") && mObj.get("settings").isJsonObject()) {
+                    JsonObject settingsObj = mObj.getAsJsonObject("settings");
+                    for (CachedSettingEntry se : row.settings) {
+                        if (se == null || se.setting == null || se.name == null || !settingsObj.has(se.name)) {
+                            continue;
+                        }
+                        JsonElement valEl = settingsObj.get(se.name);
+                        try {
+                            if (se.type == 0 && se.setting instanceof BooleanSetting bs && valEl.isJsonPrimitive()) {
+                                bs.setValue(valEl.getAsBoolean());
+                            } else if (se.type == 1 && se.setting instanceof NumberSetting ns && valEl.isJsonPrimitive()) {
+                                ns.setValue(Mth.clamp(valEl.getAsDouble(), ns.getMin(), ns.getMax()));
+                                updateCachedSliderStringIfNeeded(se);
+                            } else if (se.type == 2 && se.setting instanceof ModeSetting ms && valEl.isJsonPrimitive()) {
+                                String modeVal = valEl.getAsString();
+                                if (ms.getModes() != null && ms.getModes().contains(modeVal)) {
+                                    ms.setValue(modeVal);
+                                }
+                            } else if (se.type == 3 && se.setting instanceof MultiModeSetting mms && valEl.isJsonArray()) {
+                                java.util.Set<String> wanted = new java.util.HashSet<>();
+                                for (JsonElement e : valEl.getAsJsonArray()) {
+                                    if (e.isJsonPrimitive()) {
+                                        wanted.add(e.getAsString());
+                                    }
+                                }
+                                for (String opt : se.modeOptions) {
+                                    boolean cur = mms.isSelected(opt);
+                                    boolean should = wanted.contains(opt);
+                                    if (cur != should) {
+                                        toggleMultiModeOption(mms, opt);
+                                    }
+                                }
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                }
+            }
+            filterDirty = true;
+            layoutDirty = true;
+        loadConfigIfPresent();
+        } catch (Throwable ignored) {
+        }
+    }
+
 }

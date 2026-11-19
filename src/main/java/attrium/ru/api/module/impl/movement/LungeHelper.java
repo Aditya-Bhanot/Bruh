@@ -36,10 +36,13 @@ import java.util.concurrent.ThreadLocalRandom;
  *           and sends `ServerboundSetCarriedItemPacket(spearSlot)` (C09) FIRST.
  *        b) Dispatches `ServerboundPlayerActionPacket(Action.STAB, BlockPos.ZERO, Direction.DOWN)`
  *           + `player.swing(InteractionHand.MAIN_HAND)` + `player.resetAttackStrengthTicker()`.
- *   3. Tick 1-2 (Visible Legit Hold): Keeps the Spear visibly selected in client view for 2 ticks (~100ms)
- *      so the hotbar highlight and first-person Spear jab animation clearly appear on screen.
- *   4. Tick 2 (Clean Swap-Back): Visibly switches back to the return/cooldown slot so your fast
- *      carrier slot recharges the attack bar for the next ground or midair lunge.
+ *   3. Tick 1-2 (Visible Legit Hold): Keeps the Spear visibly selected in client view for 2 ticks (~100ms).
+ *   4. Swap-Back Rules:
+ *        - While holding the bind (especially during `Hold To Spam`), swaps back ONLY to the
+ *          `Cooldown Slot` (if set) or the slot held before pressing the bind — NEVER to
+ *          `SwapBack To Selected Slot` mid-spam.
+ *        - When the bind is released, cleanly switches to `SwapBack To Selected Slot` (if enabled)
+ *          or restores the originally held slot (if `Swap Back` is enabled).
  */
 public class LungeHelper extends Module {
     private static LungeHelper instance;
@@ -71,13 +74,13 @@ public class LungeHelper extends Module {
 
     private final BooleanSetting swapBackToSelectedSlot = register(new BooleanSetting(
             "SwapBack To Selected Slot",
-            "Override standard Swap Back and always return to a specific hotbar slot (1-9)",
+            "Switch to a defined hotbar slot (1-9) when you release the LungeHelper keybind",
             false
     ));
 
     private final ModeSetting slotSelector = register(new ModeSetting(
             "Slot",
-            "Target hotbar slot (1-9) when SwapBack To Selected Slot is enabled",
+            "Target hotbar slot (1-9) switched to upon releasing the keybind when SwapBack To Selected Slot is enabled",
             "1",
             "1", "2", "3", "4", "5", "6", "7", "8", "9"
     ));
@@ -108,7 +111,7 @@ public class LungeHelper extends Module {
 
     private final ModeSetting cooldownSlotSelector = register(new ModeSetting(
             "Cooldown Slot",
-            "Fast-recharge hotbar slot (1-9) to hold between lunges (e.g. empty hand or food)",
+            "Fast-recharge hotbar slot (1-9) to hold between lunges while holding the bind (e.g. empty hand or food)",
             "None",
             "None", "1", "2", "3", "4", "5", "6", "7", "8", "9"
     ));
@@ -131,8 +134,11 @@ public class LungeHelper extends Module {
     private static boolean moduleKeyReflectionInit = false;
 
     private LungePhase phase = LungePhase.IDLE;
-    private int pendingReturnSlot = -1;
+    private int initialHeldSlot = -1;
+    private int activeSpearSlot = -1;
     private int visibleHoldTicks = 0;
+    private boolean lungeFiredDuringCurrentHold = false;
+    private boolean pendingReleaseSwap = false;
 
     private boolean pendingSingleLunge = false;
     private int pendingWaitTicks = 0;
@@ -213,8 +219,11 @@ public class LungeHelper extends Module {
 
     private void resetState() {
         this.phase = LungePhase.IDLE;
-        this.pendingReturnSlot = -1;
+        this.initialHeldSlot = -1;
+        this.activeSpearSlot = -1;
         this.visibleHoldTicks = 0;
+        this.lungeFiredDuringCurrentHold = false;
+        this.pendingReleaseSwap = false;
         this.pendingSingleLunge = false;
         this.pendingWaitTicks = 0;
         this.wasBindPressedLastTick = false;
@@ -259,8 +268,8 @@ public class LungeHelper extends Module {
             callbackPressLatched = false;
             wasBindPressedLastTick = false;
             pendingSingleLunge = false;
-            if (phase == LungePhase.HOLD_VISIBLE_SPEAR_BEFORE_SWAP_BACK) {
-                completeVisibleSwapBack(client);
+            if (phase == LungePhase.HOLD_VISIBLE_SPEAR_BEFORE_SWAP_BACK || lungeFiredDuringCurrentHold) {
+                executeFinalReleaseSwap(client);
             }
             return;
         }
@@ -270,24 +279,46 @@ public class LungeHelper extends Module {
 
         boolean keyDown = isLungeKeybindDown(client);
         boolean risingEdge = (keyDown && !wasBindPressedLastTick) || callbackTap;
+        boolean fallingEdge = !keyDown && wasBindPressedLastTick;
         wasBindPressedLastTick = keyDown;
 
         if (risingEdge) {
+            if (this.initialHeldSlot < 0 || this.initialHeldSlot > 8) {
+                this.initialHeldSlot = client.player.getInventory().getSelectedSlot();
+            }
             this.singleLungeFiredThisHold = false;
+            this.lungeFiredDuringCurrentHold = false;
+            this.pendingReleaseSwap = false;
             this.pendingSingleLunge = true;
             this.pendingWaitTicks = 0;
         }
 
-        if (!keyDown) {
+        if (fallingEdge) {
             this.singleLungeFiredThisHold = false;
+            if (this.lungeFiredDuringCurrentHold || this.phase == LungePhase.HOLD_VISIBLE_SPEAR_BEFORE_SWAP_BACK) {
+                this.pendingReleaseSwap = true;
+            }
         }
 
         // Stage 2: Keep Spear visibly selected in client view for 2 ticks (~100ms), then swap back cleanly
         if (phase == LungePhase.HOLD_VISIBLE_SPEAR_BEFORE_SWAP_BACK) {
             visibleHoldTicks++;
             if (visibleHoldTicks >= VISIBLE_SPEAR_HOLD_TICKS) {
-                completeVisibleSwapBack(client);
+                if (!keyDown || pendingReleaseSwap) {
+                    // Keybind was released -> switch to SwapBack To Selected Slot (if ON) or original slot
+                    executeFinalReleaseSwap(client);
+                } else {
+                    // Keybind is STILL held (e.g. Hold To Spam) -> NEVER switch to SwapBack To Selected Slot!
+                    // Switch only to Cooldown Slot (if set) or original fast carrier slot to recharge.
+                    executeMidHoldSwapBack(client);
+                }
             }
+            return;
+        }
+
+        // If user just released the keybind while IDLE after spamming/lunging, now switch to Selected Slot!
+        if (!keyDown && pendingReleaseSwap && !pendingSingleLunge) {
+            executeFinalReleaseSwap(client);
             return;
         }
 
@@ -302,6 +333,9 @@ public class LungeHelper extends Module {
             pendingWaitTicks++;
             if (pendingWaitTicks > MAX_PENDING_WAIT_TICKS) {
                 pendingSingleLunge = false;
+                if (!keyDown && pendingReleaseSwap) {
+                    executeFinalReleaseSwap(client);
+                }
                 return;
             }
         }
@@ -339,22 +373,24 @@ public class LungeHelper extends Module {
 
         pendingSingleLunge = false;
         singleLungeFiredThisHold = true;
+        lungeFiredDuringCurrentHold = true;
+        if (!keyDown) {
+            pendingReleaseSwap = true;
+        }
         int extraTicks = Boolean.TRUE.equals(randomization.getValue()) ? computeRandomizedDelayTicks() : 0;
         nextAllowedLungeTick = clientTickCounter + VISIBLE_SPEAR_HOLD_TICKS + extraTicks;
     }
 
-    /**
-     * Legit-looking Spear Lunge Swap (works on ground AND in midair):
-     * Visibly selects the Spear slot on the client hotbar, sends C09 -> Action.STAB -> Swing,
-     * and holds the Spear visibly for 2 ticks before swapping back to the carrier/return slot.
-     */
     private void executeLegitVisibleSpearLunge(Minecraft client, int spearSlot) {
         if (client == null || client.player == null || client.player.connection == null) {
             return;
         }
 
         int currentSlot = client.player.getInventory().getSelectedSlot();
-        int returnSlot = resolveReturnSlot(currentSlot, spearSlot);
+        if (initialHeldSlot < 0 || initialHeldSlot > 8) {
+            initialHeldSlot = currentSlot;
+        }
+        activeSpearSlot = spearSlot;
 
         // 1. Visibly switch to Spear slot & send C09 FIRST
         if (currentSlot != spearSlot) {
@@ -371,38 +407,49 @@ public class LungeHelper extends Module {
         client.player.resetAttackStrengthTicker();
 
         // 3. Keep Spear visibly held for 2 ticks before swapping back so client view looks legit
-        if (returnSlot >= 0 && returnSlot < 9 && returnSlot != spearSlot) {
-            this.pendingReturnSlot = returnSlot;
-            this.visibleHoldTicks = 0;
-            this.phase = LungePhase.HOLD_VISIBLE_SPEAR_BEFORE_SWAP_BACK;
-        } else {
-            this.pendingReturnSlot = -1;
-            this.visibleHoldTicks = 0;
-            this.phase = LungePhase.IDLE;
-        }
+        this.visibleHoldTicks = 0;
+        this.phase = LungePhase.HOLD_VISIBLE_SPEAR_BEFORE_SWAP_BACK;
     }
 
-    private void completeVisibleSwapBack(Minecraft client) {
-        if (pendingReturnSlot >= 0 && pendingReturnSlot < 9) {
-            selectHotbarSlotWithPacket(client, pendingReturnSlot);
+    /**
+     * Called between lunges while the keybind is STILL held (Hold To Spam).
+     * Never switches to `SwapBack To Selected Slot`; only switches to `Cooldown Slot`
+     * (if set) or `initialHeldSlot` (if `Swap Back` is enabled) so the fast slot recharges.
+     */
+    private void executeMidHoldSwapBack(Minecraft client) {
+        int cooldownSlot = getSelectedCooldownSlotIndex();
+        if (cooldownSlot >= 0 && cooldownSlot < 9) {
+            selectHotbarSlotWithPacket(client, cooldownSlot);
+        } else if (Boolean.TRUE.equals(swapBack.getValue())
+                && initialHeldSlot >= 0 && initialHeldSlot < 9
+                && initialHeldSlot != activeSpearSlot) {
+            selectHotbarSlotWithPacket(client, initialHeldSlot);
         }
-        pendingReturnSlot = -1;
         visibleHoldTicks = 0;
         phase = LungePhase.IDLE;
     }
 
-    private int resolveReturnSlot(int previousHeldSlot, int spearSlot) {
+    /**
+     * Called ONLY when the user releases the keybind (or after a single tap finishes).
+     * Switches to `SwapBack To Selected Slot` if enabled, otherwise restores `initialHeldSlot`.
+     */
+    private void executeFinalReleaseSwap(Minecraft client) {
         if (Boolean.TRUE.equals(swapBackToSelectedSlot.getValue())) {
-            return getSelectedReturnSlotIndex();
+            int targetSlot = getSelectedReturnSlotIndex();
+            if (targetSlot >= 0 && targetSlot < 9) {
+                selectHotbarSlotWithPacket(client, targetSlot);
+            }
+        } else if (Boolean.TRUE.equals(swapBack.getValue())
+                && initialHeldSlot >= 0 && initialHeldSlot < 9) {
+            selectHotbarSlotWithPacket(client, initialHeldSlot);
         }
-        int cooldownSlot = getSelectedCooldownSlotIndex();
-        if (cooldownSlot >= 0 && cooldownSlot < 9) {
-            return cooldownSlot;
-        }
-        if (Boolean.TRUE.equals(swapBack.getValue()) && previousHeldSlot >= 0 && previousHeldSlot < 9) {
-            return previousHeldSlot;
-        }
-        return spearSlot;
+
+        phase = LungePhase.IDLE;
+        visibleHoldTicks = 0;
+        initialHeldSlot = -1;
+        activeSpearSlot = -1;
+        lungeFiredDuringCurrentHold = false;
+        pendingReleaseSwap = false;
     }
 
     private void selectHotbarSlotWithPacket(Minecraft client, int targetSlot) {
