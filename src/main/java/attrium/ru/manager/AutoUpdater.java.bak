@@ -11,6 +11,7 @@ import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.Minecraft;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -26,18 +27,14 @@ import java.util.zip.ZipFile;
 
 /**
  * Asynchronous GitHub Releases Auto-Updater for Attrium (Fabric 1.21.11 / FoldCraftLauncher-safe).
- *
- * - Queries https://api.github.com/repos/Aditya-Bhanot/Bruh/releases/latest asynchronously.
- * - Tracks rolling latest release asset.id and asset.updated_at in .minecraft/attrium/updater.json.
- * - Downloads to .minecraft/attrium/update/update.jar.tmp, validates ZIP integrity + file size,
- *   and swaps over the active mod JAR inside a single JVM shutdown hook to avoid ZipException crashes.
  */
 public final class AutoUpdater {
 
     private static final String MOD_ID = "attrium";
     private static final String RELEASES_LATEST_URL = "https://api.github.com/repos/Aditya-Bhanot/Bruh/releases/latest";
     private static final String USER_AGENT = "Attrium-Client-Updater";
-    private static final Duration TIMEOUT = Duration.ofSeconds(10);
+    private static final Duration API_TIMEOUT = Duration.ofSeconds(15);
+    private static final Duration DOWNLOAD_TIMEOUT = Duration.ofSeconds(120);
 
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final AtomicBoolean CHECK_IN_PROGRESS = new AtomicBoolean(false);
@@ -63,18 +60,12 @@ public final class AutoUpdater {
         return updateReady ? 0xFF00E5FF : 0xFFB8C0D0;
     }
 
-    /**
-     * Call once during Engine.onInitializeClient(). Runs fully asynchronously.
-     */
     public static void initOnStartup() {
         activeModJarPath = resolveActiveModJar();
         registerShutdownHookOnce();
         checkForUpdatesAsync(false);
     }
 
-    /**
-     * ClickGUI Client tab pill button handler.
-     */
     public static void onUpdateButtonClicked() {
         if (updateReady) {
             Minecraft mc = Minecraft.getInstance();
@@ -86,9 +77,6 @@ public final class AutoUpdater {
         checkForUpdatesAsync(true);
     }
 
-    /**
-     * Runs an async GitHub release check and background download if a newer rolling asset exists.
-     */
     public static void checkForUpdatesAsync(boolean manual) {
         if (!CHECK_IN_PROGRESS.compareAndSet(false, true)) {
             return;
@@ -102,9 +90,9 @@ public final class AutoUpdater {
         CompletableFuture.runAsync(() -> {
             try {
                 runUpdateCheck(manual);
-            } catch (Throwable ignored) {
+            } catch (Throwable t) {
                 if (!updateReady) {
-                    statusText = "Check Failed";
+                    statusText = "DL Error";
                 }
             } finally {
                 CHECK_IN_PROGRESS.set(false);
@@ -114,13 +102,14 @@ public final class AutoUpdater {
 
     private static void runUpdateCheck(boolean manual) throws IOException, InterruptedException {
         HttpClient client = HttpClient.newBuilder()
-                .connectTimeout(TIMEOUT)
-                .followRedirects(HttpClient.Redirect.NORMAL)
+                .version(HttpClient.Version.HTTP_1_1)
+                .connectTimeout(API_TIMEOUT)
+                .followRedirects(HttpClient.Redirect.ALWAYS)
                 .build();
 
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(RELEASES_LATEST_URL))
-                .timeout(TIMEOUT)
+                .timeout(API_TIMEOUT)
                 .header("Accept", "application/vnd.github+json")
                 .header("User-Agent", USER_AGENT)
                 .GET()
@@ -128,7 +117,7 @@ public final class AutoUpdater {
 
         HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
         if (response.statusCode() < 200 || response.statusCode() >= 300) {
-            statusText = "Check Failed";
+            statusText = "API " + response.statusCode();
             return;
         }
 
@@ -149,17 +138,16 @@ public final class AutoUpdater {
 
         long remoteId = jarAsset.has("id") ? jarAsset.get("id").getAsLong() : -1L;
         String remoteUpdatedAt = jarAsset.has("updated_at") ? jarAsset.get("updated_at").getAsString() : "";
-        long expectedSize = jarAsset.has("size") ? jarAsset.get("size").getAsLong() : -1L;
         String downloadUrl = jarAsset.has("browser_download_url") ? jarAsset.get("browser_download_url").getAsString() : "";
         if (remoteId <= 0L || downloadUrl.isEmpty()) {
             statusText = "Up to date";
             return;
         }
 
-        Path attriumDir = getAttriumDir();
-        Path stateFile = attriumDir.resolve("updater.json");
+        Path stateDir = getStateDir();
+        Path stateFile = stateDir.resolve("updater.json");
 
-        // First-run initialization: record current release without unnecessarily re-downloading
+        // First-run initialization: record current release without re-downloading
         if (!Files.exists(stateFile)) {
             saveLocalState(stateFile, remoteId, remoteUpdatedAt);
             statusText = "Up to date";
@@ -182,32 +170,37 @@ public final class AutoUpdater {
             return;
         }
 
-        // Download new JAR to staging file
+        // Stream download to staging file (HTTP/1.1 + InputStream avoids Android FUSE & HTTP/2 issues)
         statusText = "Downloading...";
-        Path updateDir = attriumDir.resolve("update");
+        Path updateDir = stateDir.resolve("update");
         Files.createDirectories(updateDir);
         Path tmpFile = updateDir.resolve("update.jar.tmp");
         Files.deleteIfExists(tmpFile);
 
         HttpRequest dlRequest = HttpRequest.newBuilder()
                 .uri(URI.create(downloadUrl))
-                .timeout(Duration.ofSeconds(60))
+                .timeout(DOWNLOAD_TIMEOUT)
+                .header("Accept", "application/octet-stream")
                 .header("User-Agent", USER_AGENT)
                 .GET()
                 .build();
 
-        HttpResponse<Path> dlResponse = client.send(dlRequest, HttpResponse.BodyHandlers.ofFile(tmpFile));
-        if (dlResponse.statusCode() < 200 || dlResponse.statusCode() >= 300 || !Files.exists(tmpFile)) {
-            Files.deleteIfExists(tmpFile);
-            statusText = "Check Failed";
+        HttpResponse<InputStream> dlResponse = client.send(dlRequest, HttpResponse.BodyHandlers.ofInputStream());
+        if (dlResponse.statusCode() < 200 || dlResponse.statusCode() >= 300) {
+            try (InputStream ignored = dlResponse.body()) {
+            }
+            statusText = "HTTP " + dlResponse.statusCode();
             return;
         }
 
-        // Verify expected size and valid ZIP/JAR structure before marking ready
-        long actualSize = Files.size(tmpFile);
-        if ((expectedSize > 0L && actualSize != expectedSize) || !isValidZipArchive(tmpFile)) {
+        try (InputStream in = dlResponse.body()) {
+            Files.copy(in, tmpFile, StandardCopyOption.REPLACE_EXISTING);
+        }
+
+        // Verify valid non-empty Fabric mod JAR
+        if (!Files.exists(tmpFile) || Files.size(tmpFile) < 10_000L || !isValidFabricJar(tmpFile)) {
             Files.deleteIfExists(tmpFile);
-            statusText = "Check Failed";
+            statusText = "Bad JAR";
             return;
         }
 
@@ -232,9 +225,9 @@ public final class AutoUpdater {
         return null;
     }
 
-    private static boolean isValidZipArchive(Path file) {
+    private static boolean isValidFabricJar(Path file) {
         try (ZipFile zip = new ZipFile(file.toFile())) {
-            return zip.size() > 0;
+            return zip.size() > 0 && zip.getEntry("fabric.mod.json") != null;
         } catch (IOException e) {
             return false;
         }
@@ -254,8 +247,8 @@ public final class AutoUpdater {
         return null;
     }
 
-    private static Path getAttriumDir() {
-        return FabricLoader.getInstance().getGameDir().resolve("attrium");
+    private static Path getStateDir() {
+        return FabricLoader.getInstance().getConfigDir().resolve("attrium_updater");
     }
 
     private static void registerShutdownHookOnce() {
@@ -268,7 +261,7 @@ public final class AutoUpdater {
             }
             Path tmp = stagedTmpPath != null
                     ? stagedTmpPath
-                    : getAttriumDir().resolve("update").resolve("update.jar.tmp");
+                    : getStateDir().resolve("update").resolve("update.jar.tmp");
             Path targetJar = activeModJarPath != null ? activeModJarPath : resolveActiveModJar();
             if (tmp == null || targetJar == null || !Files.isRegularFile(tmp) || !Files.isRegularFile(targetJar)) {
                 return;
@@ -276,7 +269,6 @@ public final class AutoUpdater {
             try {
                 Files.move(tmp, targetJar, StandardCopyOption.REPLACE_EXISTING);
             } catch (IOException moveErr) {
-                // Fallback for Android/FUSE cross-mount moves
                 try {
                     Files.copy(tmp, targetJar, StandardCopyOption.REPLACE_EXISTING);
                     Files.deleteIfExists(tmp);
