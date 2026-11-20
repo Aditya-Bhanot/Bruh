@@ -1,7 +1,5 @@
 package attrium.ru.screens;
 
-
-import attrium.ru.manager.AutoUpdater;
 import com.mojang.blaze3d.platform.InputConstants;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.KeyMapping;
@@ -64,11 +62,6 @@ import java.util.Locale;
  * Type-Safe Keybinds, World-Join Null Guards, and Tactile UI Volume Mixer.
  */
 public class GlassClickGuiScreen extends Screen {
-    private float updCheckHoverAnim = 0.0F;
-    private float updRestartHoverAnim = 0.0F;
-    private float updChangelogRevealAnim = 0.0F;
-    private float updPulsePhase = 0.0F;
-
     private static GlassClickGuiScreen instance;
 
     // =========================================================================
@@ -377,6 +370,15 @@ public class GlassClickGuiScreen extends Screen {
     private long lastScrollActivityMs = 0L;
     private Component emptySearchComponent = null;
     private float clientTabOpenTime = 0.0F;
+    private float hudTabOpenTime = 0.0F;
+    private int hudResetBtnX, hudResetBtnY, hudResetBtnW, hudResetBtnH;
+    private Component hudHeaderTitleComp = null;
+    private Component hudEditLayoutComp = null;
+    private Component hudResetAllComp = null;
+    private Component hudMovePillComp = null;
+    private int hudCachedActiveCount = -1;
+    private int hudCachedTotalCount = -1;
+    private Component hudCountPillComp = null;
     private int lastObservedTopTab = -1;
     private final float[] swatchRingAnim = new float[]{1.0F, 0.0F, 0.0F, 0.0F};
     private float bgDimToggleAnim = 1.0F;
@@ -922,7 +924,11 @@ public class GlassClickGuiScreen extends Screen {
         ensureModuleCacheReady();
         int clickGuiKey = ClientThemeManager.getClickGuiKey();
         if (clickGuiKey > 0 && clickGuiKey != GLFW.GLFW_KEY_UNKNOWN && key == clickGuiKey) {
-            mc.execute(() -> openClickGuiFromBind(mc));
+            if (mc.isSameThread()) {
+                openClickGuiFromBind(mc);
+            } else {
+                mc.execute(() -> openClickGuiFromBind(mc));
+            }
             return true;
         }
         long nowMs = System.currentTimeMillis();
@@ -1292,10 +1298,14 @@ public class GlassClickGuiScreen extends Screen {
             lastObservedTopTab = activeTopTabIndex;
             if (activeTopTabIndex == 4) {
                 clientTabOpenTime = 0.0F;
+            } else if (activeTopTabIndex == 2) {
+                hudTabOpenTime = 0.0F;
             }
         }
         if (activeTopTabIndex == 4) {
             clientTabOpenTime = Math.min(2.0F, clientTabOpenTime + dtSeconds);
+        } else if (activeTopTabIndex == 2) {
+            hudTabOpenTime = Math.min(2.0F, hudTabOpenTime + dtSeconds);
         }
 
         processDirtyCachesIfNeeded();
@@ -4555,46 +4565,95 @@ public class GlassClickGuiScreen extends Screen {
     }
 
     // =========================================================================
-    // Dedicated ClickGUI HUD Tab (activeTopTabIndex == 2) — Dynamic HudModule Sync
+    // Dedicated ClickGUI HUD Tab (activeTopTabIndex == 2) — Polished Glass Cards
     // =========================================================================
+    private void ensureHudTabComponents() {
+        if (hudHeaderTitleComp != null) return;
+        hudHeaderTitleComp = Component.literal("HUD Widgets").withStyle(HudManager.getBoldStyle());
+        hudEditLayoutComp = Component.literal("Edit Layout").withStyle(HudManager.getBoldStyle());
+        hudResetAllComp = Component.literal("Reset").withStyle(nunitoRegularStyle);
+        hudMovePillComp = Component.literal("Move").withStyle(nunitoRegularStyle);
+    }
+
+    private float computeHudCardProgress(int index) {
+        float t = Mth.clamp((hudTabOpenTime - index * 0.032F) / 0.20F, 0.0F, 1.0F);
+        float inv = 1.0F - t;
+        return 1.0F - inv * inv * inv; // easeOutCubic
+    }
+
     private void enqueueHudTopBar(int mouseX, int mouseY) {
+        ensureHudTabComponents();
+        int accent = ClientThemeManager.getAccentArgb();
         int barY = searchBoxY;
         int barH = searchBoxH;
-        Component headerComp = Component.literal("HUD Modules  •  Two-Way Synced")
-                .withStyle(nunitoRegularStyle.withBold(true));
-        enqueueComponentText(headerComp, listLeft + 4, barY + 6, COLOR_TEXT_BRIGHT_WHITE);
 
-        hudEditLayoutBtnW = 86;
+        int activeCount = 0;
+        int totalCount = 0;
+        if (allModuleRows != null) {
+            for (CachedModuleRow row : allModuleRows) {
+                if (row != null && row.module instanceof HudModule) {
+                    totalCount++;
+                    if (row.module.isEnabled()) activeCount++;
+                }
+            }
+        }
+        if (activeCount != hudCachedActiveCount || totalCount != hudCachedTotalCount || hudCountPillComp == null) {
+            hudCachedActiveCount = activeCount;
+            hudCachedTotalCount = totalCount;
+            hudCountPillComp = Component.literal(activeCount + " / " + totalCount + " Active").withStyle(nunitoRegularStyle);
+        }
+
+        enqueueComponentText(hudHeaderTitleComp, listLeft + 4, barY + 6, COLOR_TEXT_BRIGHT_WHITE);
+        int titleW = this.font.width(hudHeaderTitleComp);
+        int pillW = this.font.width(hudCountPillComp) + 12;
+        int pillX = listLeft + 4 + titleW + 8;
+        drawRoundedRect(pillX, barY + 3, pillW, barH - 6, 6, ClientThemeManager.getAccentWithAlpha(0.18F));
+        enqueueComponentText(hudCountPillComp, pillX + 6, barY + 6, accent);
+
+        // Right-aligned "Edit Layout" (accent) + "Reset" (glass) pills
+        hudEditLayoutBtnW = 82;
         hudEditLayoutBtnH = barH;
         hudEditLayoutBtnX = listRight - hudEditLayoutBtnW;
         hudEditLayoutBtnY = barY;
 
-        boolean hovered = isHovered(mouseX, mouseY, hudEditLayoutBtnX, hudEditLayoutBtnY, hudEditLayoutBtnW, hudEditLayoutBtnH);
-        drawRoundedRect(hudEditLayoutBtnX, hudEditLayoutBtnY, hudEditLayoutBtnW, hudEditLayoutBtnH,
-                CATEGORY_PILL_RADIUS, hovered ? 0xFF38BDF8 : 0xFF00E5FF);
+        hudResetBtnW = 48;
+        hudResetBtnH = barH;
+        hudResetBtnX = hudEditLayoutBtnX - hudResetBtnW - 6;
+        hudResetBtnY = barY;
 
-        Component btnLabel = Component.literal("Edit Layout").withStyle(nunitoRegularStyle.withBold(true));
-        int lw = this.font.width(btnLabel);
-        enqueueComponentText(btnLabel, hudEditLayoutBtnX + (hudEditLayoutBtnW - lw) / 2,
+        boolean hoverReset = isHovered(mouseX, mouseY, hudResetBtnX, hudResetBtnY, hudResetBtnW, hudResetBtnH);
+        drawRoundedRect(hudResetBtnX, hudResetBtnY, hudResetBtnW, hudResetBtnH, 7,
+                hoverReset ? 0x36FFFFFF : 0x1EFFFFFF);
+        int rw = this.font.width(hudResetAllComp);
+        enqueueComponentText(hudResetAllComp, hudResetBtnX + (hudResetBtnW - rw) / 2,
+                hudResetBtnY + 6, hoverReset ? COLOR_TEXT_BRIGHT_WHITE : 0xFFD1D5DB);
+
+        boolean hoverEdit = isHovered(mouseX, mouseY, hudEditLayoutBtnX, hudEditLayoutBtnY, hudEditLayoutBtnW, hudEditLayoutBtnH);
+        int editBg = hoverEdit ? lerpColor(accent, 0xFFFFFFFF, 0.16F) : accent;
+        drawRoundedRect(hudEditLayoutBtnX, hudEditLayoutBtnY, hudEditLayoutBtnW, hudEditLayoutBtnH, 7, editBg);
+        int lw = this.font.width(hudEditLayoutComp);
+        enqueueComponentText(hudEditLayoutComp, hudEditLayoutBtnX + (hudEditLayoutBtnW - lw) / 2,
                 hudEditLayoutBtnY + 6, 0xFF0B0D10);
     }
 
     private void renderHudTabPanel(GuiGraphics guiGraphics, float dt, int mouseX, int mouseY) {
+        ensureHudTabComponents();
+        int accent = ClientThemeManager.getAccentArgb();
         int cardGap = 8;
-        int headerH = ROW_HEIGHT;
+        int headerH = ROW_HEIGHT + 2;
         boolean mouseInsideViewport = isHovered(mouseX, mouseY, listLeft, listTop, listRight - listLeft, listHeight);
 
         float totalH = 6.0F;
         for (CachedModuleRow row : allModuleRows) {
             if (row == null || !(row.module instanceof HudModule)) continue;
-            row.toggleAnim = AnimationUtil.lerp(row.toggleAnim, row.module.isEnabled() ? 1.0F : 0.0F, 14.0F, dt);
-            row.expandAnim = AnimationUtil.lerp(row.expandAnim, row.expanded ? 1.0F : 0.0F, 12.0F, dt);
+            row.toggleAnim = AnimationUtil.lerp(row.toggleAnim, row.module.isEnabled() ? 1.0F : 0.0F, 15.0F, dt);
+            row.expandAnim = AnimationUtil.lerp(row.expandAnim, row.expanded ? 1.0F : 0.0F, 13.0F, dt);
             int visibleSettings = 0;
             for (CachedSettingEntry se : row.settings) {
                 if (se != null && se.visible) visibleSettings++;
             }
             row.cachedVisibleSettingCount = visibleSettings;
-            int drawerTargetH = visibleSettings > 0 ? (visibleSettings * SETTING_ROW_HEIGHT + 12) : 0;
+            int drawerTargetH = visibleSettings > 0 ? (visibleSettings * SETTING_ROW_HEIGHT + 14) : 0;
             int curDrawerH = Math.round(drawerTargetH * row.expandAnim);
             row.cachedTotalHeight = headerH + curDrawerH;
             totalH += row.cachedTotalHeight + cardGap;
@@ -4602,70 +4661,99 @@ public class GlassClickGuiScreen extends Screen {
 
         hudMaxScrollOffset = Math.max(0.0F, totalH - listHeight + 8.0F);
         hudTargetScrollOffset = Mth.clamp(hudTargetScrollOffset, 0.0F, hudMaxScrollOffset);
-        hudScrollOffset = Mth.clamp(hudScrollOffset, 0.0F, hudMaxScrollOffset);
+        hudScrollOffset = AnimationUtil.lerp(hudScrollOffset, hudTargetScrollOffset, 16.0F, dt);
 
         int cursorY = listTop + 4 - Math.round(hudScrollOffset);
+        int cardIdx = 0;
         for (CachedModuleRow row : allModuleRows) {
             if (row == null || !(row.module instanceof HudModule hudMod)) continue;
             int cardH = row.cachedTotalHeight;
+            float prog = computeHudCardProgress(cardIdx++);
+            int drawY = cursorY + Math.round(10.0F * (1.0F - prog));
 
-            if (cursorY + cardH >= listTop - 10 && cursorY <= listBottom + 10) {
-                // Dark glassmorphic card (10px radius, 0xCC111318, zero 1px harsh borders)
-                drawRoundedRect(listLeft, cursorY, rowWidth, cardH, 10, 0xCC111318);
+            if (drawY + cardH >= listTop - 12 && drawY <= listBottom + 12 && prog > 0.04F) {
+                boolean hoveredCard = mouseInsideViewport && isHovered(mouseX, mouseY, listLeft, drawY, rowWidth, headerH);
+                row.hoverAnim = AnimationUtil.lerp(row.hoverAnim, hoveredCard ? 1.0F : 0.0F, 14.0F, dt);
 
-                // Left Icon Badge
-                int iconSize = 26;
-                int iconX = listLeft + 10;
-                int iconY = cursorY + (headerH - iconSize) / 2;
-                int iconBg = hudMod.isEnabled() ? 0x3300E5FF : 0x26FFFFFF;
-                drawRoundedRect(iconX, iconY, iconSize, iconSize, 7, iconBg);
-                Component iconComp = Component.literal(hudMod.getIconGlyph()).withStyle(nunitoRegularStyle.withBold(true));
+                // Smooth hover-elevated glass card (11px radius, live panel opacity)
+                int baseCardCol = lerpColor(0xB813161F, 0xD81B202E, row.hoverAnim);
+                int cardCol = multiplyAlpha(baseCardCol, prog);
+                HudManager.drawRoundedRect(guiGraphics, listLeft, drawY, rowWidth, cardH, 11, cardCol);
+
+                // Subtle left 3px animated active indicator pill
+                if (row.toggleAnim > 0.03F) {
+                    int pillH = Math.max(8, Math.round((headerH - 16) * row.toggleAnim));
+                    int pillY = drawY + (headerH - pillH) / 2;
+                    HudManager.drawRoundedRect(guiGraphics, listLeft + 2, pillY, 3, pillH, 1,
+                            multiplyAlpha(accent, row.toggleAnim * prog));
+                }
+
+                // Soft 28x28 rounded icon badge with animated accent blend
+                int iconSize = 28;
+                int iconX = listLeft + 11;
+                int iconY = drawY + (headerH - iconSize) / 2;
+                int iconBg = lerpColor(0x1EFFFFFF, ClientThemeManager.getAccentWithAlpha(0.22F), row.toggleAnim);
+                HudManager.drawRoundedRect(guiGraphics, iconX, iconY, iconSize, iconSize, 8, multiplyAlpha(iconBg, prog));
+                Component iconComp = Component.literal(hudMod.getIconGlyph()).withStyle(HudManager.getBoldStyle());
                 int icW = this.font.width(iconComp);
-                enqueueComponentText(iconComp, iconX + (iconSize - icW) / 2, iconY + 9,
-                        hudMod.isEnabled() ? 0xFF00E5FF : 0xFF9CA3AF);
+                int iconFg = multiplyAlpha(lerpColor(0xFF94A3B8, accent, row.toggleAnim), prog);
+                if ((iconFg >>> 24) > 8) {
+                    guiGraphics.drawString(this.font, iconComp, iconX + (iconSize - icW) / 2, iconY + 10, iconFg, false);
+                }
 
-                // Title & Description (Nunito)
+                // Title & Description (crisp white when ON, muted slate when OFF)
                 int textX = iconX + iconSize + 10;
-                enqueueComponentText(row.nunitoTitle, textX, cursorY + 9, COLOR_TEXT_BRIGHT_WHITE);
-                enqueueComponentText(row.nunitoRegularDesc, textX, cursorY + 24, COLOR_TEXT_DIMMED_GRAY);
+                int titleCol = multiplyAlpha(lerpColor(0xFFCBD5E1, 0xFFFFFFFF, row.toggleAnim), prog);
+                int descCol = multiplyAlpha(0xFF8B93A6, prog);
+                if ((titleCol >>> 24) > 8) {
+                    guiGraphics.drawString(this.font, row.nunitoTitle, textX, drawY + 10, titleCol, false);
+                    guiGraphics.drawString(this.font, row.nunitoRegularDesc, textX, drawY + 24, descCol, false);
+                }
 
-                // Right-side iOS Pill Toggle (synced with Module#isEnabled)
-                int toggleW = 30;
-                int toggleH = 16;
+                // Right-side Elastic iOS Pill Toggle (stretches mid-slide, live accent)
+                int toggleW = 28;
+                int toggleH = 15;
                 int toggleX = listLeft + rowWidth - 12 - toggleW;
-                int toggleY = cursorY + (headerH - toggleH) / 2;
-                enqueueIosPillToggleSwitch(toggleX, toggleY, toggleW, toggleH, row.toggleAnim);
+                int toggleY = drawY + (headerH - toggleH) / 2;
+                drawElasticPillImmediate(guiGraphics, toggleX, toggleY, toggleW, toggleH, row.toggleAnim, prog);
 
                 // Expand Chevron
-                int chevX = toggleX - 16;
-                int chevY = cursorY + (headerH - 8) / 2;
-                enqueueComponentText(
-                        row.expanded ? chevronExpandedComponent : chevronCollapsedComponent,
-                        chevX, chevY, COLOR_TEXT_DIMMED_GRAY
-                );
+                int chevX = toggleX - 15;
+                int chevY = drawY + (headerH - 8) / 2;
+                int chevCol = multiplyAlpha(row.expanded ? accent : 0xFF8B93A6, prog);
+                if ((chevCol >>> 24) > 8) {
+                    guiGraphics.drawString(this.font,
+                            row.expanded ? chevronExpandedComponent : chevronCollapsedComponent,
+                            chevX, chevY, chevCol, false);
+                }
 
-                // "Edit Pos" Pill Button
-                int editW = 54;
+                // Sleek "Move" Pill Button
+                int editW = 44;
                 int editH = 18;
                 int editX = chevX - editW - 8;
-                int editY = cursorY + (headerH - editH) / 2;
+                int editY = drawY + (headerH - editH) / 2;
                 boolean hoverEdit = mouseInsideViewport && isHovered(mouseX, mouseY, editX, editY, editW, editH);
-                drawRoundedRect(editX, editY, editW, editH, 6, hoverEdit ? 0x4400E5FF : 0x26FFFFFF);
-                Component editComp = Component.literal("Edit Pos").withStyle(nunitoRegularStyle);
-                int ew = this.font.width(editComp);
-                enqueueComponentText(editComp, editX + (editW - ew) / 2, editY + 5,
-                        hoverEdit ? 0xFF00E5FF : 0xFFE5E7EB);
+                int editPillBg = hoverEdit ? ClientThemeManager.getAccentWithAlpha(0.28F * prog) : multiplyAlpha(0x1CFFFFFF, prog);
+                HudManager.drawRoundedRect(guiGraphics, editX, editY, editW, editH, 6, editPillBg);
+                int ew = this.font.width(hudMovePillComp);
+                int editFg = multiplyAlpha(hoverEdit ? accent : 0xFFD1D5DB, prog);
+                if ((editFg >>> 24) > 8) {
+                    guiGraphics.drawString(this.font, hudMovePillComp, editX + (editW - ew) / 2, editY + 5, editFg, false);
+                }
 
-                // Inline ClickGUI Settings Drawer (reuses ModeSetting, NumberSetting, BooleanSetting components!)
+                // Smoothly expanded inline settings drawer with subtle top divider
                 if (row.expandAnim > 0.05F && row.cachedVisibleSettingCount > 0) {
-                    enqueueModuleSettingsDrawer(row, listLeft + 4, cursorY + headerH, rowWidth - 8,
+                    guiGraphics.fill(listLeft + 12, drawY + headerH, listLeft + rowWidth - 12, drawY + headerH + 1,
+                            multiplyAlpha(0x1CFFFFFF, row.expandAnim * prog));
+                    resetBatchQueues();
+                    enqueueModuleSettingsDrawer(row, listLeft + 6, drawY + headerH + 2, rowWidth - 12,
                             mouseX, mouseY, mouseInsideViewport);
+                    flushBatchedRenderPasses(guiGraphics);
                 }
             }
 
             cursorY += cardH + cardGap;
         }
-        flushBatchedRenderPasses(guiGraphics);
     }
 
     private void handleHudTabClick(int mouseX, int mouseY, boolean leftClicked, boolean rightClicked) {
@@ -4676,12 +4764,18 @@ public class GlassClickGuiScreen extends Screen {
             SoundUtil.playClick();
             return;
         }
+        if (leftClicked && isHovered(mouseX, mouseY, hudResetBtnX, hudResetBtnY, hudResetBtnW, hudResetBtnH)) {
+            ClientThemeManager.resetLayout();
+            saveConfigNow();
+            SoundUtil.playTogglePop(true);
+            return;
+        }
         if (!isHovered(mouseX, mouseY, listLeft, listTop, listRight - listLeft, listHeight)) {
             return;
         }
 
         int cardGap = 8;
-        int headerH = ROW_HEIGHT;
+        int headerH = ROW_HEIGHT + 2;
         int cursorY = listTop + 4 - Math.round(hudScrollOffset);
 
         for (CachedModuleRow row : allModuleRows) {
@@ -4689,18 +4783,18 @@ public class GlassClickGuiScreen extends Screen {
             int cardH = row.cachedTotalHeight;
 
             if (isHovered(mouseX, mouseY, listLeft, cursorY, rowWidth, cardH)) {
-                int toggleW = 30;
-                int toggleH = 16;
+                int toggleW = 28;
+                int toggleH = 15;
                 int toggleX = listLeft + rowWidth - 12 - toggleW;
                 int toggleY = cursorY + (headerH - toggleH) / 2;
 
-                int chevX = toggleX - 16;
-                int editW = 54;
+                int chevX = toggleX - 15;
+                int editW = 44;
                 int editH = 18;
                 int editX = chevX - editW - 8;
                 int editY = cursorY + (headerH - editH) / 2;
 
-                // iOS Pill Toggle or Right-Click Header -> mutates exact same Module#toggle()
+                // Elastic Pill Toggle or Right-Click Header -> mutates exact same Module#toggle()
                 if (isHovered(mouseX, mouseY, toggleX - 4, toggleY - 4, toggleW + 8, toggleH + 8)
                         || (rightClicked && isHovered(mouseX, mouseY, listLeft, cursorY, rowWidth, headerH))) {
                     row.module.toggle();
@@ -4709,7 +4803,7 @@ public class GlassClickGuiScreen extends Screen {
                     return;
                 }
 
-                // "Edit Pos" Pill -> enters Layout Editor focused on this HudModule
+                // "Move" Pill -> enters Layout Editor focused on this HudModule
                 if (leftClicked && isHovered(mouseX, mouseY, editX, editY, editW, editH)) {
                     if (!hudMod.isEnabled()) {
                         hudMod.setEnabled(true);
@@ -4880,60 +4974,6 @@ public class GlassClickGuiScreen extends Screen {
             if ((whiteCol >>> 24) > 8) {
                 guiGraphics.drawString(this.font, bentoResetLayoutComp, resetX + (resetW - rw) / 2, btnY + 9, multiplyAlpha(accent, p0), false);
             }
-
-            // === ATTRIUM_UPDATER_RENDER_START ===
-            float updStep = Math.min(1.0F, Math.max(0.05F, dt * 14.0F));
-            updPulsePhase += dt * 3.8F;
-            boolean updReady = AutoUpdater.updateReady;
-            String updStatus = AutoUpdater.getStatusText();
-            String checkText = AutoUpdater.isChecking() ? updStatus : "Updates";
-            Component checkComp = Component.literal(checkText).withStyle(nunitoRegularStyle);
-            int checkW = Math.max(66, this.font.width(checkComp) + 14);
-            int checkX = folderX - checkW - 8;
-            boolean hoverCheck = isHovered(mouseX, mouseY, checkX, btnY, checkW, btnH);
-            updCheckHoverAnim = Mth.lerp(updStep, updCheckHoverAnim, hoverCheck ? 1.0F : 0.0F);
-            int checkBg = multiplyAlpha(lerpColor(0x24FFFFFF, 0x4800E5FF, updCheckHoverAnim), p0);
-            int checkFg = multiplyAlpha(lerpColor(0xFFFFFFFF, 0xFF00E5FF, updCheckHoverAnim * 0.85F), p0);
-            HudManager.drawRoundedRect(guiGraphics, checkX, btnY, checkW, btnH, 8, checkBg);
-            int cw = this.font.width(checkComp);
-            if ((whiteCol >>> 24) > 8) {
-                guiGraphics.drawString(this.font, checkComp, checkX + (checkW - cw) / 2, btnY + 9, checkFg, false);
-            }
-            updChangelogRevealAnim = Mth.lerp(updStep, updChangelogRevealAnim, updReady ? 1.0F : 0.0F);
-            if (updReady) {
-                Component restartComp = Component.literal("Restart").withStyle(nunitoRegularStyle);
-                int restartW = Math.max(62, this.font.width(restartComp) + 14);
-                int restartX = checkX - restartW - 8;
-                boolean hoverRestart = isHovered(mouseX, mouseY, restartX, btnY, restartW, btnH);
-                updRestartHoverAnim = Mth.lerp(updStep, updRestartHoverAnim, hoverRestart ? 1.0F : 0.0F);
-                float pulse = 0.5F + 0.5F * (float) Math.sin(updPulsePhase);
-                int baseGlow = lerpColor(0x3400E5FF, 0x6200E5FF, Math.max(pulse * 0.65F, updRestartHoverAnim));
-                HudManager.drawRoundedRect(guiGraphics, restartX, btnY, restartW, btnH, 8, multiplyAlpha(baseGlow, p0));
-                int rsw = this.font.width(restartComp);
-                if ((whiteCol >>> 24) > 8) {
-                    guiGraphics.drawString(this.font, restartComp, restartX + (restartW - rsw) / 2, btnY + 9, multiplyAlpha(0xFF00E5FF, p0), false);
-                }
-            }
-            if (updChangelogRevealAnim > 0.04F) {
-                java.util.List<String> changes = AutoUpdater.getChangelogLines();
-                int lineCount = Math.min(3, changes.size());
-                int cardH = 22 + lineCount * 11;
-                int cardW = Math.min(fullW, 300);
-                int cardX = leftCardX + fullW - cardW;
-                int cardY = y0 + bannerH + 6 - Math.round(6.0F * (1.0F - updChangelogRevealAnim));
-                float ca = p0 * updChangelogRevealAnim;
-                HudManager.drawRoundedRect(guiGraphics, cardX, cardY, cardW, cardH, 10, multiplyAlpha(0xEC10141F, ca));
-                Component hdr = Component.literal("What's New in v" + AutoUpdater.getLatestVersion()).withStyle(nunitoRegularStyle);
-                if (((int) (255 * ca)) > 10) {
-                    guiGraphics.drawString(this.font, hdr, cardX + 10, cardY + 6, multiplyAlpha(0xFF00E5FF, ca), false);
-                    for (int ci = 0; ci < lineCount; ci++) {
-                        Component lineComp = Component.literal("• " + changes.get(ci)).withStyle(nunitoRegularStyle);
-                        guiGraphics.drawString(this.font, lineComp, cardX + 10, cardY + 19 + ci * 11, multiplyAlpha(0xFFE5E7EB, ca), false);
-                    }
-                }
-            }
-            // === ATTRIUM_UPDATER_RENDER_END ===
-
         }
 
         // ---------------------------------------------------------------------
@@ -5150,27 +5190,6 @@ public class GlassClickGuiScreen extends Screen {
             SoundUtil.playTogglePop(true);
             return;
         }
-
-        // === ATTRIUM_UPDATER_CLICK_START ===
-        String checkTextClick = AutoUpdater.isChecking() ? AutoUpdater.getStatusText() : "Updates";
-        int checkW = Math.max(66, this.font.width(Component.literal(checkTextClick).withStyle(nunitoRegularStyle)) + 14);
-        int checkX = folderX - checkW - 8;
-        if (isHovered(mouseX, mouseY, checkX, btnY, checkW, btnH)) {
-            AutoUpdater.checkForUpdatesAsync(true);
-            SoundUtil.playClick();
-            return;
-        }
-        if (AutoUpdater.updateReady) {
-            int restartW = Math.max(62, this.font.width(Component.literal("Restart").withStyle(nunitoRegularStyle)) + 14);
-            int restartX = checkX - restartW - 8;
-            if (isHovered(mouseX, mouseY, restartX, btnY, restartW, btnH)) {
-                SoundUtil.playClick();
-                AutoUpdater.restartToApply();
-                return;
-            }
-        }
-        // === ATTRIUM_UPDATER_CLICK_END ===
-
 
         // Bottom-Left Card (Appearance)
         int lcx = leftCardX + pad;

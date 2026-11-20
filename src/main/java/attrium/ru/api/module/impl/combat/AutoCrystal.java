@@ -12,18 +12,20 @@ import attrium.ru.api.settings.impl.MultiModeSetting;
 import attrium.ru.api.settings.impl.NumberSetting;
 import attrium.ru.manager.FriendManager;
 import attrium.ru.manager.RotationManager;
+import attrium.ru.mixin.accessor.CarriedItemSyncInvoker;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.network.protocol.Packet;
 import net.minecraft.network.protocol.game.ServerboundInteractPacket;
-import net.minecraft.network.protocol.game.ServerboundSetCarriedItemPacket;
 import net.minecraft.util.Mth;
 import net.minecraft.world.Difficulty;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
+import net.minecraft.world.effect.MobEffectInstance;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.ExperienceOrb;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Mob;
@@ -45,18 +47,17 @@ import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
- * Reliable, Grim-safe AutoCrystal for Attrium (Minecraft 1.21.11 Official Mojang Mappings).
- *
- * - Normal mode: Activates when enemy feet are >= Min Target Y-Delta above player feet
- *   (default 0.85 blocks so 1-block ledges and jump/knockback peaks trigger reliably).
- * - Hit Crystal mode: Dual melee-hit detection (ServerboundInteractPacket + 6-tick swing-window
- *   hurtTime fallback) for instant crystal combos after melee hits.
- * - Deferred next-tick hotbar restore prevents Grim BadPackets from cancelling placements.
+ * Audited & Fixed AutoCrystal for Attrium (Minecraft 1.21.11 Official Mojang Mappings).
  */
 public class AutoCrystal extends Module {
+
+    private static final EquipmentSlot[] ARMOR_SLOTS = new EquipmentSlot[]{
+            EquipmentSlot.HEAD, EquipmentSlot.CHEST, EquipmentSlot.LEGS, EquipmentSlot.FEET
+    };
 
     private static AutoCrystal instance;
 
@@ -128,7 +129,7 @@ public class AutoCrystal extends Module {
     ));
     private final BooleanSetting ignoreBots = register(new BooleanSetting(
             "Ignore Bots",
-            "Skip players flagged by AntiBot (turn off if server players are ignored)",
+            "Skip players flagged by AntiBot (keep off if server players are ignored)",
             false
     ));
     private final BooleanSetting crystalOptimizer = register(new BooleanSetting(
@@ -343,7 +344,6 @@ public class AutoCrystal extends Module {
             return;
         }
 
-        // Handle deferred next-tick hotbar restore so Grim never sees same-tick place + swap-back
         if (pendingSlotRestore) {
             pendingSlotRestore = false;
             if (Boolean.TRUE.equals(swapBackToWeapon.getValue())) {
@@ -351,7 +351,6 @@ public class AutoCrystal extends Module {
             }
         }
 
-        // Target Resolution
         if (isHitCrystalEnabled()) {
             detectRecentMeleeHitFallback(client, tick);
 
@@ -388,7 +387,11 @@ public class AutoCrystal extends Module {
             return;
         }
 
-        if (!isTargetElevatedAbovePlayer(client, currentTarget)) {
+        // Enforce elevation gate (Hit Crystal uses 0.25-block knockback floor; Normal uses Min Target Y-Delta)
+        double requiredYDelta = isHitCrystalEnabled()
+                ? Math.min(0.25D, Math.max(0.0D, minTargetYDelta.getValue()))
+                : Math.max(0.0D, minTargetYDelta.getValue());
+        if (!isTargetElevatedBy(client, currentTarget, requiredYDelta)) {
             lockedBasePos = null;
             if (Boolean.TRUE.equals(swapBackToWeapon.getValue())) {
                 restoreHotbarSlotIfNeeded(client);
@@ -492,8 +495,10 @@ public class AutoCrystal extends Module {
         return Mth.clamp(crystalRange.getValue(), 2.0D, 4.5D);
     }
 
-    private boolean isTargetElevatedAbovePlayer(Minecraft client, LivingEntity target) {
-        double requiredDelta = Math.max(0.0D, minTargetYDelta.getValue());
+    private boolean isTargetElevatedBy(Minecraft client, LivingEntity target, double requiredDelta) {
+        if (requiredDelta <= 0.01D) {
+            return true;
+        }
         double targetMinY = target.getBoundingBox().minY;
         double playerMinY = client.player.getBoundingBox().minY;
         return (targetMinY - playerMinY) >= (requiredDelta - 0.05D);
@@ -515,6 +520,7 @@ public class AutoCrystal extends Module {
     private LivingEntity findOptimalTarget(Minecraft client) {
         double maxSearchDist = getClampedRange() + 4.5D;
         double maxSearchDistSq = maxSearchDist * maxSearchDist;
+        double requiredDelta = Math.max(0.0D, minTargetYDelta.getValue());
 
         LivingEntity best = null;
         double bestDistSq = maxSearchDistSq;
@@ -526,7 +532,7 @@ public class AutoCrystal extends Module {
             if (!isValidTarget(client, living)) {
                 continue;
             }
-            if (!isTargetElevatedAbovePlayer(client, living)) {
+            if (!isTargetElevatedBy(client, living, requiredDelta)) {
                 continue;
             }
             double dSq = client.player.distanceToSqr(living);
@@ -582,17 +588,18 @@ public class AutoCrystal extends Module {
             if (eyePos.distanceToSqr(crystal.getBoundingBox().getCenter()) > rangeSq) {
                 continue;
             }
-            if (!canSafelyDetonate(client, crystal)) {
+            BlockPos baseUnder = BlockPos.containing(crystal.getX(), crystal.getY() - 0.5D, crystal.getZ());
+            if (!canSafelyDetonate(client, crystal, baseUnder)) {
                 continue;
             }
             float targetDmg = calculateCrystalExplosionDamage(
-                    client, crystal.getX(), crystal.getY(), crystal.getZ(), target, null
+                    client, crystal.getX(), crystal.getY(), crystal.getZ(), target, baseUnder
             );
             if (targetDmg < minDmg) {
                 continue;
             }
             float selfDmg = calculateCrystalExplosionDamage(
-                    client, crystal.getX(), crystal.getY(), crystal.getZ(), client.player, null
+                    client, crystal.getX(), crystal.getY(), crystal.getZ(), client.player, baseUnder
             );
             float score = targetDmg - selfDmg * 0.55F;
             if (score > bestScore) {
@@ -678,11 +685,11 @@ public class AutoCrystal extends Module {
         double hitY = basePos.getY() + 1.0D;
         double hitZ = basePos.getZ() + 0.5D;
 
-
-        // Never place a crystal above the enemy's feet (obsidian blocks feet blast -> 0 dmg)
+        // Reject bases where the crystal sits more than 0.45 blocks above enemy feet (wasted 0-dmg crystal)
         if (hitY > target.getBoundingBox().minY + 0.45D) {
             return -Float.MAX_VALUE;
         }
+
         if (eyePos.distanceToSqr(hitX, hitY, hitZ) > rangeSq) {
             return -Float.MAX_VALUE;
         }
@@ -842,7 +849,7 @@ public class AutoCrystal extends Module {
             if (Boolean.TRUE.equals(autoSwitchCrystal.getValue())
                     || isJuggling
                     || client.player.getInventory().getSelectedSlot() == crystalSlot) {
-                selectHotbarSlotDirect(client, crystalSlot);
+                selectHotbarSlotSynced(client, crystalSlot);
             } else {
                 return false;
             }
@@ -871,7 +878,7 @@ public class AutoCrystal extends Module {
             return false;
         }
 
-        selectHotbarSlotDirect(client, obsidianSlot);
+        selectHotbarSlotSynced(client, obsidianSlot);
 
         Vec3 hitVec = new Vec3(
                 supportPos.getX() + 0.5D + supportFace.getStepX() * 0.5D,
@@ -901,8 +908,8 @@ public class AutoCrystal extends Module {
         return -1;
     }
 
-    private void selectHotbarSlotDirect(Minecraft client, int targetSlot) {
-        if (client == null || client.player == null || targetSlot < 0 || targetSlot >= 9) {
+    private void selectHotbarSlotSynced(Minecraft client, int targetSlot) {
+        if (client == null || client.player == null || client.gameMode == null || targetSlot < 0 || targetSlot >= 9) {
             return;
         }
         int current = client.player.getInventory().getSelectedSlot();
@@ -910,31 +917,28 @@ public class AutoCrystal extends Module {
             if (savedHotbarSlot == -1) {
                 savedHotbarSlot = current;
             }
-            if (client.player.connection != null) {
-                client.player.connection.send(new ServerboundSetCarriedItemPacket(targetSlot));
-            }
             client.player.getInventory().setSelectedSlot(targetSlot);
+            ((CarriedItemSyncInvoker) client.gameMode).attrium$ensureHasSentCarriedItem();
         }
     }
 
     private void restoreHotbarSlotIfNeeded(Minecraft client) {
-        if (client != null && client.player != null && savedHotbarSlot >= 0 && savedHotbarSlot < 9) {
+        if (client != null && client.player != null && client.gameMode != null
+                && savedHotbarSlot >= 0 && savedHotbarSlot < 9) {
             if (client.player.getInventory().getSelectedSlot() != savedHotbarSlot) {
-                if (client.player.connection != null) {
-                    client.player.connection.send(new ServerboundSetCarriedItemPacket(savedHotbarSlot));
-                }
                 client.player.getInventory().setSelectedSlot(savedHotbarSlot);
+                ((CarriedItemSyncInvoker) client.gameMode).attrium$ensureHasSentCarriedItem();
             }
         }
         savedHotbarSlot = -1;
     }
 
-    private boolean canSafelyDetonate(Minecraft client, EndCrystal crystal) {
+    private boolean canSafelyDetonate(Minecraft client, EndCrystal crystal, BlockPos baseUnder) {
         if (!Boolean.TRUE.equals(antiSuicide.getValue())) {
             return true;
         }
         float selfDmg = calculateCrystalExplosionDamage(
-                client, crystal.getX(), crystal.getY(), crystal.getZ(), client.player, null
+                client, crystal.getX(), crystal.getY(), crystal.getZ(), client.player, baseUnder
         );
         float myHp = client.player.getHealth() + client.player.getAbsorptionAmount();
         return selfDmg < (myHp - 0.5F);
@@ -1053,13 +1057,17 @@ public class AutoCrystal extends Module {
         return (float) (sens * sens * sens * 1.2D);
     }
 
+    /**
+     * Realistic Vanilla 1.21.11 Crystal Explosion Damage Calculation:
+     * Includes feet-obsidian shielding, armor/toughness, Protection/Blast Protection EPF, and Resistance.
+     */
     public float calculateCrystalExplosionDamage(
             Minecraft client,
             double expX,
             double expY,
             double expZ,
             LivingEntity entity,
-            BlockPos ignoredSimulatedBase
+            BlockPos simulatedBase
     ) {
         if (client == null || client.level == null || entity == null) {
             return 0.0F;
@@ -1089,7 +1097,12 @@ public class AutoCrystal extends Module {
                 chestPoint, raisedExplosionPos, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, entity
         )).getType() != HitResult.Type.MISS;
 
-        double exposure = blocked ? 0.45D : 0.85D;
+        double exposure = blocked ? 0.40D : 0.85D;
+        // Classic Crystal PvP feet-obsidian shielding: an obsidian base at or above entity feet shields lower hitbox
+        if (simulatedBase != null && simulatedBase.getY() >= Mth.floor(box.minY)) {
+            exposure *= 0.42D;
+        }
+
         double impact = (1.0D - normalizedDist) * exposure;
         if (impact <= 0.0D) {
             return 0.0F;
@@ -1106,11 +1119,56 @@ public class AutoCrystal extends Module {
             };
         }
 
+        // Armor + Toughness reduction
         float armor = (float) entity.getArmorValue();
         float toughness = (float) entity.getAttributeValue(Attributes.ARMOR_TOUGHNESS);
         float f = 2.0F + toughness / 4.0F;
         float g = Mth.clamp(armor - rawDamage / f, armor * 0.2F, 20.0F);
-        return Math.max(0.0F, rawDamage * (1.0F - g / 25.0F));
+        float damage = Math.max(0.0F, rawDamage * (1.0F - g / 25.0F));
+
+        // Protection (+1 EPF/lvl) & Blast Protection (+2 EPF/lvl) reduction (capped at 20 EPF = 80% max)
+        int epf = computeExplosionEpf(entity);
+        if (epf > 0) {
+            damage *= (1.0F - Math.min(20, epf) / 25.0F);
+        }
+
+        // Resistance effect reduction (20% per level)
+        int resAmp = getResistanceAmplifier(entity);
+        if (resAmp >= 0) {
+            int mult = Math.max(0, 25 - (resAmp + 1) * 5);
+            damage = damage * (mult / 25.0F);
+        }
+
+        return Math.max(0.0F, damage);
+    }
+
+    private int computeExplosionEpf(LivingEntity entity) {
+        int epf = 0;
+        for (EquipmentSlot slot : ARMOR_SLOTS) {
+            ItemStack stack = entity.getItemBySlot(slot);
+            if (stack == null || stack.isEmpty()) {
+                continue;
+            }
+            for (var entry : stack.getEnchantments().entrySet()) {
+                String id = entry.getKey().toString().toLowerCase(Locale.ROOT);
+                int lvl = entry.getIntValue();
+                if (id.contains("blast_protection")) {
+                    epf += lvl * 2;
+                } else if (id.contains("protection") && !id.contains("fire") && !id.contains("projectile")) {
+                    epf += lvl;
+                }
+            }
+        }
+        return Math.min(20, epf);
+    }
+
+    private int getResistanceAmplifier(LivingEntity entity) {
+        for (MobEffectInstance inst : entity.getActiveEffects()) {
+            if (inst != null && inst.getDescriptionId().toLowerCase(Locale.ROOT).contains("resistance")) {
+                return inst.getAmplifier();
+            }
+        }
+        return -1;
     }
 
     private record SupportFace(BlockPos pos, Direction face) {}

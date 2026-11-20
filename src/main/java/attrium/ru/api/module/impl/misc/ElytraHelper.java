@@ -335,7 +335,7 @@ public class ElytraHelper extends Module {
     }
 
     private void finishMacroCooldown() {
-        int jitter = Boolean.TRUE.equals(randomization.getValue()) ? ThreadLocalRandom.current().nextInt(2) : 0;
+        int jitter = Boolean.TRUE.equals(randomization.getValue()) ? computeReturnDelayTicks() : 0;
         nextAllowedSwapTick = clientTickCounter + BASE_SWAP_COOLDOWN_TICKS + jitter;
         resetState();
     }
