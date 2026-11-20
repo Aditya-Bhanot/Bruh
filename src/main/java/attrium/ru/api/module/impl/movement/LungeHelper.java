@@ -88,13 +88,13 @@ public class LungeHelper extends Module {
     private final BooleanSetting randomization = register(new BooleanSetting(
             "Randomization",
             "Enable tick-synced randomized delay (e.g. 2 to 5 ticks) between repeated lunges",
-            false
+            true
     ));
 
     private final NumberSetting minRandomTicks = register(new NumberSetting(
             "Min Random (Ticks)",
             "Minimum extra client ticks (0 - 10) to wait between repeated lunges",
-            2.0D,
+            1.0D,
             0.0D,
             10.0D,
             1.0D
@@ -103,7 +103,7 @@ public class LungeHelper extends Module {
     private final NumberSetting maxRandomTicks = register(new NumberSetting(
             "Max Random (Ticks)",
             "Maximum extra client ticks (0 - 10) to wait between repeated lunges",
-            5.0D,
+            2.0D,
             0.0D,
             10.0D,
             1.0D
@@ -360,7 +360,7 @@ public class LungeHelper extends Module {
         }
 
         // Vanilla 1.21.11 requires a 100% charged attack bar for Spear STAB / Lunge (works on ground and in air)
-        if (client.player.getAttackStrengthScale(0.5F) < 0.85F) {
+        if (client.player.getAttackStrengthScale(0.5F) < 0.70F) {
             int cooldownSlot = getSelectedCooldownSlotIndex();
             if (cooldownSlot >= 0 && cooldownSlot < 9) {
                 selectHotbarSlotWithPacket(client, cooldownSlot);
@@ -378,7 +378,7 @@ public class LungeHelper extends Module {
             pendingReleaseSwap = true;
         }
         int extraTicks = Boolean.TRUE.equals(randomization.getValue()) ? computeRandomizedDelayTicks() : 0;
-        nextAllowedLungeTick = clientTickCounter + VISIBLE_SPEAR_HOLD_TICKS + extraTicks;
+        nextAllowedLungeTick = clientTickCounter + Math.max(1, extraTicks);
     }
 
     private void executeLegitVisibleSpearLunge(Minecraft client, int spearSlot) {

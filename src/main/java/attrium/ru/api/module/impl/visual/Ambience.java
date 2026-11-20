@@ -73,36 +73,36 @@ public class Ambience extends Module {
     }
 
     private static final AtmospherePreset PRESET_GOLDEN_HOUR = new AtmospherePreset(
-            0xFF8C52, 0xFFB87A, 0xFF6B35, 0xFFE3C2, 0xFFD9B3, 0x3D8A99,
-            12480L, 0.35F, 0xD8, 48.0F, 260.0F
+            0xE88B5A, 0xF5B98A, 0xFF7B47, 0xFFE6CC, 0xFFE8D1, 0x357A8C,
+            12450L, 0.30F, 0xB8, 96.0F, 340.0F
     );
     private static final AtmospherePreset PRESET_SAKURA = new AtmospherePreset(
-            0xF2A6CA, 0xFFD4E8, 0xFF8EC2, 0xFFF0F7, 0xFFE3F0, 0x7AB8D9,
-            12200L, 0.48F, 0xC8, 56.0F, 280.0F
+            0xD996C0, 0xF0C7E1, 0xF29BC7, 0xFFF2FA, 0xFFF0F7, 0x6AA8CC,
+            12150L, 0.40F, 0xA4, 104.0F, 360.0F
     );
     private static final AtmospherePreset PRESET_CYBERPUNK = new AtmospherePreset(
-            0x140A2E, 0x26124D, 0xD92BFF, 0x6F38C5, 0xC8B8FF, 0x164E63,
-            18000L, 0.92F, 0xB8, 40.0F, 220.0F
+            0x140E2E, 0x24194A, 0x9B4DFF, 0x5B3A9E, 0xD8CCFF, 0x164E63,
+            18000L, 0.90F, 0x90, 88.0F, 320.0F
     );
     private static final AtmospherePreset PRESET_AURORA = new AtmospherePreset(
-            0x081C2E, 0x0F3344, 0x2BF2B8, 0x5EEAD4, 0xBDF5EB, 0x0E5269,
-            17600L, 1.00F, 0xB4, 52.0F, 260.0F
+            0x0B1E30, 0x133245, 0x36D9B4, 0x62D9C7, 0xCCF5EE, 0x104E63,
+            17600L, 0.95F, 0x8C, 96.0F, 340.0F
     );
     private static final AtmospherePreset PRESET_BLOOD_MOON = new AtmospherePreset(
-            0x24060D, 0x4A0C18, 0xE62238, 0x7A1C2A, 0xFFC2C7, 0x4A121C,
-            18000L, 0.88F, 0xD0, 32.0F, 200.0F
+            0x1E080E, 0x38111B, 0xB82538, 0x5E1F2B, 0xFFD4D8, 0x3D121C,
+            18000L, 0.85F, 0xA0, 84.0F, 300.0F
     );
     private static final AtmospherePreset PRESET_PASTEL_DREAM = new AtmospherePreset(
-            0x9CCBFF, 0xD8C4FF, 0xFFB8DE, 0xFFFFFF, 0xF5F0FF, 0x6EC6E8,
-            4500L, 0.25F, 0x90, 72.0F, 340.0F
+            0x8FC0F5, 0xC9D4FA, 0xF0B8DC, 0xFFFFFF, 0xF7F5FF, 0x66BBE0,
+            4500L, 0.15F, 0x78, 112.0F, 380.0F
     );
     private static final AtmospherePreset PRESET_MIDNIGHT = new AtmospherePreset(
-            0x070C1F, 0x0F1938, 0x2A3F7A, 0x253566, 0xBDD0FF, 0x0E2A4D,
-            18000L, 1.00F, 0x80, 64.0F, 320.0F
+            0x080F24, 0x111E3D, 0x2A437A, 0x243661, 0xC7D9FF, 0x0E2A4D,
+            18000L, 1.00F, 0x70, 104.0F, 360.0F
     );
     private static final AtmospherePreset PRESET_ARCTIC = new AtmospherePreset(
-            0xB3E5FC, 0xE1F5FE, 0x90CAF9, 0xF5FBFF, 0xE8F7FF, 0x4DD0E1,
-            5500L, 0.20F, 0x70, 60.0F, 300.0F
+            0x9ED8F7, 0xD4EEFC, 0x8CC5F2, 0xF5FBFF, 0xEDF8FF, 0x48C0D6,
+            5500L, 0.15F, 0x68, 108.0F, 360.0F
     );
 
     // =========================================================================
@@ -119,7 +119,7 @@ public class Ambience extends Module {
     private final NumberSetting tintStrength = register(new NumberSetting(
             "Tint Strength",
             "Blend intensity between vanilla biome colors and the Ambience theme (0.1 - 1.0).",
-            0.80D, 0.10D, 1.00D, 0.05D
+            0.75D, 0.10D, 1.00D, 0.05D
     ));
 
     private final BooleanSetting worldTint = register(new BooleanSetting(
@@ -131,13 +131,13 @@ public class Ambience extends Module {
     private final NumberSetting saturation = register(new NumberSetting(
             "Saturation",
             "Color vibrancy multiplier for the world (0.5 - 1.8).",
-            1.15D, 0.50D, 1.80D, 0.05D
+            1.00D, 0.50D, 1.50D, 0.05D
     ));
 
     private final NumberSetting brightnessBoost = register(new NumberSetting(
             "Brightness Boost",
             "Lifts ambient sky light floor so dark/night themes stay crisp and easy to see.",
-            0.35D, 0.00D, 1.00D, 0.05D
+            0.00D, 0.00D, 1.00D, 0.05D
     ));
 
     private final ModeSetting timeMode = register(new ModeSetting(
@@ -447,43 +447,55 @@ public class Ambience extends Module {
         if (!vanilla && original instanceof Integer origInt) {
             if (attribute == EnvironmentAttributes.SKY_COLOR) {
                 int target = packRgb(mod.curSkyR, mod.curSkyG, mod.curSkyB);
-                return (Value) Integer.valueOf(blendPreserveAlpha(origInt, target, strength, true));
+                return (Value) Integer.valueOf(blendPreserveAlpha(origInt, target, strength, false));
             }
             if (attribute == EnvironmentAttributes.FOG_COLOR) {
-                int target = packRgb(mod.curFogR, mod.curFogG, mod.curFogB);
-                return (Value) Integer.valueOf(blendPreserveAlpha(origInt, target, strength, true));
+                // Gently harmonize fog toward sky so horizon has zero harsh seam under Sodium
+                int rawFog = packRgb(mod.curFogR, mod.curFogG, mod.curFogB);
+                int rawSky = packRgb(mod.curSkyR, mod.curSkyG, mod.curSkyB);
+                int target = lerpRgb(rawFog, rawSky, 0.20F);
+                return (Value) Integer.valueOf(blendPreserveAlpha(origInt, target, strength, false));
             }
             if (attribute == EnvironmentAttributes.SUNRISE_SUNSET_COLOR) {
                 int origA = (origInt >>> 24) & 0xFF;
-                int targetA = Mth.clamp(Math.round(mod.curHorA * strength), 0, 255);
-                int outA = Math.max(origA, targetA);
+                // Only tint sunset/sunrise glow when vanilla actually has twilight glow (eliminates ugly neon horizon stripe!)
+                if (origA <= 2) {
+                    return original;
+                }
+                float glowScale = Mth.clamp(origA / 255.0F, 0.0F, 1.0F);
+                int outA = Mth.clamp(Math.round(Math.max(origA, mod.curHorA * glowScale) * (0.75F + 0.25F * strength)), 0, 220);
                 int target = packRgb(mod.curHorR, mod.curHorG, mod.curHorB);
-                int blendedRgb = lerpRgb(origInt & 0xFFFFFF, target, strength);
+                int blendedRgb = lerpRgb(origInt & 0xFFFFFF, target, strength * 0.85F);
                 return (Value) Integer.valueOf((outA << 24) | blendedRgb);
             }
             if (attribute == EnvironmentAttributes.CLOUD_COLOR) {
                 int origA = (origInt >>> 24) & 0xFF;
                 int outA = origA > 0 ? origA : 0xCC;
                 int target = packRgb(mod.curCloudR, mod.curCloudG, mod.curCloudB);
-                int blendedRgb = lerpRgb(origInt & 0xFFFFFF, target, strength * 0.90F);
+                int blendedRgb = lerpRgb(origInt & 0xFFFFFF, target, strength * 0.80F);
                 return (Value) Integer.valueOf((outA << 24) | blendedRgb);
             }
             if (attribute == EnvironmentAttributes.SKY_LIGHT_COLOR && Boolean.TRUE.equals(mod.worldTint.getValue())) {
                 int target = packRgb(mod.curLightR, mod.curLightG, mod.curLightB);
-                // Keep world lighting tasteful and readable (max 55% tint weight)
-                return (Value) Integer.valueOf(blendPreserveAlpha(origInt, target, strength * 0.55F, true));
+                // Keep terrain lightmap crisp & natural (max 18% subtle tint so blocks never look muddy)
+                return (Value) Integer.valueOf(blendPreserveAlpha(origInt, target, strength * 0.18F, false));
             }
             if (attribute == EnvironmentAttributes.WATER_FOG_COLOR && Boolean.TRUE.equals(mod.clearWater.getValue())) {
                 int target = packRgb(mod.curWaterR, mod.curWaterG, mod.curWaterB);
-                return (Value) Integer.valueOf(blendPreserveAlpha(origInt, target, strength * 0.75F, true));
+                return (Value) Integer.valueOf(blendPreserveAlpha(origInt, target, strength * 0.65F, false));
             }
         }
 
         // --- Float Attributes (Fog Distances, Stars, Cloud Height, Ambient Light Floor) ---
         if (original instanceof Float origFloat) {
             if (attribute == EnvironmentAttributes.STAR_BRIGHTNESS) {
+                // Only boost stars during dusk/night (origFloat > 0.02) so bright daytime skies stay clean
+                if (origFloat <= 0.02F) {
+                    return original;
+                }
                 float userStars = Mth.clamp(mod.starBrightness.getValue().floatValue(), 0.0F, 1.0F);
-                return (Value) Float.valueOf(Math.max(origFloat, userStars));
+                float nightFactor = Mth.clamp(origFloat * 2.5F, 0.0F, 1.0F);
+                return (Value) Float.valueOf(Math.max(origFloat, userStars * nightFactor));
             }
             if (attribute == EnvironmentAttributes.STAR_ANGLE && Boolean.TRUE.equals(mod.spinStars.getValue())) {
                 float spun = (origFloat + mod.animSeconds * 0.08F) % (float) (Math.PI * 2.0D);
@@ -494,13 +506,13 @@ public class Ambience extends Module {
             }
             if (attribute == EnvironmentAttributes.SKY_LIGHT_FACTOR) {
                 float boost = Mth.clamp(mod.brightnessBoost.getValue().floatValue(), 0.0F, 1.0F);
-                if (boost > 0.001F) {
-                    float floor = 0.20F + boost * 0.80F;
+                if (boost > 0.01F) {
+                    float floor = 0.15F + boost * 0.75F;
                     return (Value) Float.valueOf(Math.max(origFloat, floor));
                 }
             }
 
-            // Fog Distance Styling
+            // Fog Distance Styling (respects player render distance so chunks never turn into close-up soup)
             if (attribute == EnvironmentAttributes.FOG_START_DISTANCE
                     || attribute == EnvironmentAttributes.FOG_END_DISTANCE
                     || attribute == EnvironmentAttributes.SKY_FOG_END_DISTANCE
@@ -510,25 +522,25 @@ public class Ambience extends Module {
                     return (Value) Float.valueOf(Math.max(origFloat, 2048.0F));
                 }
                 if ("Clear".equalsIgnoreCase(style)) {
-                    float mult = (attribute == EnvironmentAttributes.FOG_START_DISTANCE) ? 1.8F : 2.2F;
+                    float mult = (attribute == EnvironmentAttributes.FOG_START_DISTANCE) ? 1.6F : 2.0F;
                     return (Value) Float.valueOf(Math.max(origFloat * mult, 320.0F));
                 }
                 if ("Cozy Mist".equalsIgnoreCase(style)) {
                     if (attribute == EnvironmentAttributes.FOG_START_DISTANCE) {
-                        return (Value) Float.valueOf(24.0F);
+                        return (Value) Float.valueOf(Math.max(48.0F, origFloat * 0.65F));
                     }
-                    return (Value) Float.valueOf(140.0F);
+                    return (Value) Float.valueOf(Math.max(160.0F, origFloat * 0.85F));
                 }
                 if ("Dense".equalsIgnoreCase(style)) {
                     if (attribute == EnvironmentAttributes.FOG_START_DISTANCE) {
-                        return (Value) Float.valueOf(8.0F);
+                        return (Value) Float.valueOf(18.0F);
                     }
-                    return (Value) Float.valueOf(72.0F);
+                    return (Value) Float.valueOf(96.0F);
                 }
-                // "Preset" mode: apply preset's balanced atmospheric distance unless Vanilla theme
+                // "Preset" mode: push fog gently outward for crisp visibility, never pulling closer than vanilla
                 if (!vanilla) {
                     if (attribute == EnvironmentAttributes.FOG_START_DISTANCE) {
-                        return (Value) Float.valueOf(mod.curFogStart);
+                        return (Value) Float.valueOf(Math.max(origFloat, mod.curFogStart));
                     }
                     return (Value) Float.valueOf(Math.max(origFloat, mod.curFogEnd));
                 }

@@ -55,7 +55,7 @@ public class ElytraHelper extends Module {
     private final BooleanSetting randomization = register(new BooleanSetting(
             "Randomization",
             "Randomize tick delays between hotbar switch, equip, and slot restore",
-            false
+            true
     ));
     private final NumberSetting minRandomTicks = register(new NumberSetting(
             "Min Random (Ticks)",
@@ -65,7 +65,7 @@ public class ElytraHelper extends Module {
     private final NumberSetting maxRandomTicks = register(new NumberSetting(
             "Max Random (Ticks)",
             "Maximum tick delay per swap stage when Randomization is enabled",
-            3.0D, 1.0D, 10.0D, 1.0D
+            2.0D, 1.0D, 10.0D, 1.0D
     ));
     private final NumberSetting savedElytraKeyCode = register(new NumberSetting(
             "_elytraHelperKeyCode",
@@ -256,7 +256,7 @@ public class ElytraHelper extends Module {
         } else {
             InteractionResult res = client.gameMode.useItem(client.player, InteractionHand.MAIN_HAND);
             boolean chestMatchesGoal = client.player.getItemBySlot(EquipmentSlot.CHEST).is(Items.ELYTRA) == equippingElytra;
-            if (res.consumesAction() || chestMatchesGoal) {
+            if (res != InteractionResult.FAIL) {
                 this.requiredPhaseTicks = 1;
                 this.phase = SwapPhase.WAIT_BEFORE_RETURN_SLOT;
             } else {
@@ -310,7 +310,7 @@ public class ElytraHelper extends Module {
                     phaseTicksElapsed = 0;
                     phase = SwapPhase.WAIT_BEFORE_GLIDE;
                 } else {
-                    nextAllowedSwapTick = clientTickCounter + BASE_SWAP_COOLDOWN_TICKS;
+                    nextAllowedSwapTick = clientTickCounter + BASE_SWAP_COOLDOWN_TICKS + (Boolean.TRUE.equals(randomization.getValue()) ? ThreadLocalRandom.current().nextInt(2) : 0);
                     resetState();
                 }
             }
@@ -319,7 +319,7 @@ public class ElytraHelper extends Module {
                     return;
                 }
                 tryStartAirGlide(client);
-                nextAllowedSwapTick = clientTickCounter + BASE_SWAP_COOLDOWN_TICKS;
+                nextAllowedSwapTick = clientTickCounter + BASE_SWAP_COOLDOWN_TICKS + (Boolean.TRUE.equals(randomization.getValue()) ? ThreadLocalRandom.current().nextInt(2) : 0);
                 resetState();
             }
             default -> resetState();
@@ -339,7 +339,7 @@ public class ElytraHelper extends Module {
         if (client.player.onGround()
                 || client.player.isFallFlying()
                 || client.player.isInWater()
-                || client.player.getDeltaMovement().y >= -0.02D) {
+                || client.player.getDeltaMovement().y >= -0.04D) {
             return;
         }
         client.getConnection().send(new ServerboundPlayerCommandPacket(

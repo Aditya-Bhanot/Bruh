@@ -5,6 +5,7 @@ import attrium.ru.api.events.impl.DrawEvent;
 import attrium.ru.api.events.impl.TickEvent;
 import attrium.ru.api.module.Module;
 import attrium.ru.api.module.ModuleCategory;
+import attrium.ru.api.module.impl.combat.MaceTarget;
 import attrium.ru.api.settings.impl.BooleanSetting;
 import attrium.ru.api.settings.impl.NumberSetting;
 import com.mojang.blaze3d.platform.InputConstants;
@@ -12,6 +13,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.network.protocol.game.ServerboundPlayerCommandPacket;
 import net.minecraft.network.protocol.game.ServerboundSetCarriedItemPacket;
 import net.minecraft.world.InteractionHand;
+import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
@@ -24,12 +26,14 @@ import java.util.concurrent.ThreadLocalRandom;
 
 public class ElytraHelper extends Module {
 
-    private static final int BASE_SWAP_COOLDOWN_TICKS = 2;
-    private static final int POST_RETURN_GLIDE_DELAY_TICKS = 1;
+    private static final int BASE_SWAP_COOLDOWN_TICKS = 1;
+    private static final int POST_RETURN_GLIDE_DELAY_TICKS = 0;
+    private static final long MANUAL_OVERRIDE_LOCK_MS = 1200L;
 
     private enum SwapPhase {
         IDLE,
         WAIT_BEFORE_EQUIP,
+        RETRY_EQUIP_IF_NEEDED,
         WAIT_BEFORE_RETURN_SLOT,
         WAIT_BEFORE_GLIDE
     }
@@ -37,6 +41,7 @@ public class ElytraHelper extends Module {
     private static ElytraHelper instance;
     private static int syncedGuiBoundKey = -1;
     private static boolean callbackPressLatched = false;
+    private static volatile long manualSwapLockUntilMs = 0L;
 
     private static boolean reflectionInitialized = false;
     private static Method moduleKeyGetterMethod = null;
@@ -72,6 +77,7 @@ public class ElytraHelper extends Module {
     private int targetArmorSlot = -1;
     private int previousHotbarSlot = -1;
     private boolean equippingElytra = false;
+    private boolean queuedSwapPending = false;
     private int phaseTicksElapsed = 0;
     private int requiredPhaseTicks = 1;
     private long lastProcessedGameTime = Long.MIN_VALUE;
@@ -80,7 +86,7 @@ public class ElytraHelper extends Module {
     private boolean wasBindPressedLastTick = false;
 
     public ElytraHelper() {
-        super("ElytraHelper", "Fast Grim-safe hotbar Chestplate <-> Elytra swap macro", ModuleCategory.MISC);
+        super("ElytraHelper", "Conflict-free fast hotbar Chestplate <-> Elytra swap macro", ModuleCategory.MISC);
         instance = this;
         int saved = savedElytraKeyCode.getValue().intValue();
         if (saved != -1 && saved != 0) {
@@ -93,6 +99,21 @@ public class ElytraHelper extends Module {
             instance = new ElytraHelper();
         }
         return instance;
+    }
+
+    /**
+     * Returns true while ElytraHelper is actively executing a swap or within 1.2s of a manual swap,
+     * so AutoElytra and AutoMace do not immediately undo the user's manual Chestplate/Elytra choice.
+     */
+    public static boolean isManualSwapLockActive() {
+        if (instance != null && instance.phase != SwapPhase.IDLE) {
+            return true;
+        }
+        return System.currentTimeMillis() < manualSwapLockUntilMs;
+    }
+
+    public static boolean isSwapBusy() {
+        return instance != null && (instance.phase != SwapPhase.IDLE || instance.queuedSwapPending);
     }
 
     public static void setMacroBoundKey(int key) {
@@ -146,6 +167,7 @@ public class ElytraHelper extends Module {
         this.targetArmorSlot = -1;
         this.previousHotbarSlot = -1;
         this.equippingElytra = false;
+        this.queuedSwapPending = false;
         this.phaseTicksElapsed = 0;
         this.requiredPhaseTicks = 1;
         callbackPressLatched = false;
@@ -178,7 +200,8 @@ public class ElytraHelper extends Module {
         clientTickCounter++;
 
         if (client.screen != null) {
-            if (phase == SwapPhase.WAIT_BEFORE_RETURN_SLOT && previousHotbarSlot >= 0 && previousHotbarSlot < 9) {
+            if ((phase == SwapPhase.WAIT_BEFORE_RETURN_SLOT || phase == SwapPhase.RETRY_EQUIP_IF_NEEDED)
+                    && previousHotbarSlot >= 0 && previousHotbarSlot < 9) {
                 selectHotbarSlotSafe(client, previousHotbarSlot);
             }
             resetState();
@@ -192,12 +215,22 @@ public class ElytraHelper extends Module {
         boolean risingEdge = callbackTap || (keyDown && !wasBindPressedLastTick);
         wasBindPressedLastTick = keyDown;
 
+        if (risingEdge) {
+            queuedSwapPending = true;
+            manualSwapLockUntilMs = System.currentTimeMillis() + MANUAL_OVERRIDE_LOCK_MS;
+        }
+
         if (phase != SwapPhase.IDLE) {
             advanceSwapSequence(client);
             return;
         }
 
-        if (risingEdge && clientTickCounter >= nextAllowedSwapTick && !client.player.isUsingItem()) {
+        if (queuedSwapPending && clientTickCounter >= nextAllowedSwapTick && !client.player.isUsingItem()) {
+            // Wait 1 tick if AutoMace/AutoElytra is mid-swap instead of dropping the key press
+            if (MaceTarget.ActionManager.getInstance().isSwapInProgress()) {
+                return;
+            }
+            queuedSwapPending = false;
             beginFastChestplateElytraSwap(client);
         }
     }
@@ -213,18 +246,23 @@ public class ElytraHelper extends Module {
         this.targetArmorSlot = slot;
         this.previousHotbarSlot = client.player.getInventory().getSelectedSlot();
         this.phaseTicksElapsed = 0;
+        manualSwapLockUntilMs = System.currentTimeMillis() + MANUAL_OVERRIDE_LOCK_MS;
 
-        // Tick 0: switch to armor slot cleanly (never sends duplicate packet)
         selectHotbarSlotSafe(client, slot);
 
         if (Boolean.TRUE.equals(randomization.getValue())) {
             this.requiredPhaseTicks = computeStageDelayTicks();
             this.phase = SwapPhase.WAIT_BEFORE_EQUIP;
         } else {
-            // Instant equip on Tick 0 -> next-tick slot restore (50ms swap, zero duplicate slot packets)
-            client.gameMode.useItem(client.player, InteractionHand.MAIN_HAND);
-            this.requiredPhaseTicks = 1;
-            this.phase = SwapPhase.WAIT_BEFORE_RETURN_SLOT;
+            InteractionResult res = client.gameMode.useItem(client.player, InteractionHand.MAIN_HAND);
+            boolean chestMatchesGoal = client.player.getItemBySlot(EquipmentSlot.CHEST).is(Items.ELYTRA) == equippingElytra;
+            if (res != InteractionResult.FAIL) {
+                this.requiredPhaseTicks = 1;
+                this.phase = SwapPhase.WAIT_BEFORE_RETURN_SLOT;
+            } else {
+                // Retry once on the next tick so swaps never silently fail
+                this.phase = SwapPhase.RETRY_EQUIP_IF_NEEDED;
+            }
         }
     }
 
@@ -248,6 +286,18 @@ public class ElytraHelper extends Module {
                 requiredPhaseTicks = computeStageDelayTicks();
                 phase = SwapPhase.WAIT_BEFORE_RETURN_SLOT;
             }
+            case RETRY_EQUIP_IF_NEEDED -> {
+                if (targetArmorSlot >= 0 && targetArmorSlot < 9) {
+                    boolean chestMatchesGoal = client.player.getItemBySlot(EquipmentSlot.CHEST).is(Items.ELYTRA) == equippingElytra;
+                    if (!chestMatchesGoal) {
+                        selectHotbarSlotSafe(client, targetArmorSlot);
+                        client.gameMode.useItem(client.player, InteractionHand.MAIN_HAND);
+                    }
+                }
+                phaseTicksElapsed = 0;
+                requiredPhaseTicks = 1;
+                phase = SwapPhase.WAIT_BEFORE_RETURN_SLOT;
+            }
             case WAIT_BEFORE_RETURN_SLOT -> {
                 if (phaseTicksElapsed < requiredPhaseTicks) {
                     return;
@@ -255,6 +305,7 @@ public class ElytraHelper extends Module {
                 if (previousHotbarSlot >= 0 && previousHotbarSlot < 9) {
                     selectHotbarSlotSafe(client, previousHotbarSlot);
                 }
+                manualSwapLockUntilMs = System.currentTimeMillis() + MANUAL_OVERRIDE_LOCK_MS;
                 if (equippingElytra && Boolean.TRUE.equals(autoStartGlide.getValue()) && !client.player.onGround()) {
                     phaseTicksElapsed = 0;
                     phase = SwapPhase.WAIT_BEFORE_GLIDE;
