@@ -1,5 +1,7 @@
 package attrium.ru.api.module.impl.movement;
 
+
+import attrium.ru.api.module.impl.misc.ElytraHelper;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.minecraft.client.Minecraft;
 import net.minecraft.tags.ItemTags;
@@ -52,6 +54,7 @@ import java.util.concurrent.ThreadLocalRandom;
  *   3. Reequip Delay (200ms default): Re-equips the Elytra dynamically after Reequip Delay (ms).
  */
 public final class ElytraTarget extends Module {
+    private static volatile long lastAutoArmorSwapMs = 0L;
     private static ElytraTarget instance;
     public static boolean shouldElytraTarget;
 
@@ -314,6 +317,9 @@ public final class ElytraTarget extends Module {
     }
 
     private void runAutoElytraCycle() {
+        if (ElytraHelper.isManualSwapLockActive() || (System.currentTimeMillis() - lastAutoArmorSwapMs) < 350L) {
+            return;
+        }
         if (mc.player == null || mc.level == null) {
             ActionManager.getInstance().releaseLock(ActionPriority.AUTO_ELYTRA_UNEQUIP, "AutoElytra_UNEQUIP");
             ActionManager.getInstance().releaseLock(ActionPriority.AUTO_ELYTRA_EQUIP, "AutoElytra_EQUIP");
@@ -583,6 +589,10 @@ public final class ElytraTarget extends Module {
     }
 
     private boolean requestPriority3ElytraEquip() {
+        if (ElytraHelper.isManualSwapLockActive() || (System.currentTimeMillis() - lastAutoArmorSwapMs) < 350L) {
+            return false;
+        }
+        lastAutoArmorSwapMs = System.currentTimeMillis();
         if (mc.player == null || mc.screen != null || mc.player.isUsingItem()) {
             return false;
         }

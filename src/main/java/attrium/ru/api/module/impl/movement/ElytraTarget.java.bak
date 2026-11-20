@@ -188,7 +188,7 @@ public final class ElytraTarget extends Module {
             macePreHitRange.setValue(2.7D);
         }
         if (Math.abs(minDropDist.getValue() - 1.6D) < 0.01D) {
-            minDropDist.setValue(1.5D);
+            minDropDist.setValue(2.0D);
         }
     }
 
@@ -767,7 +767,9 @@ public final class ElytraTarget extends Module {
         }
 
         // Respects Min Drop Dist (1.5m default) directly: never triggers on a 1.252m normal jump!
-        return velY < MAX_LEGAL_GLIDE_VELOCITY_Y && effectiveFall >= minDropDist.getValue();
+        Minecraft _mc = Minecraft.getInstance();
+        boolean clearTwoBlockRadius = hasNoBlocksUnderFeetInRadius(_mc, getSyncedMinDropDist(), 2.0D);
+        return clearTwoBlockRadius || (velY < MAX_LEGAL_GLIDE_VELOCITY_Y && effectiveFall >= getSyncedMinDropDist());
     }
 
     private boolean shouldEquipElytraInRecovery() {
@@ -1095,4 +1097,36 @@ public final class ElytraTarget extends Module {
     public float getForward() {
         return macePreHitRange.getFloat();
     }
+
+    public double getSyncedMinDropDist() {
+        return Math.max(1.5D, minDropDist.getValue());
+    }
+
+    public boolean isAutomaceSyncEnabled() {
+        return Boolean.TRUE.equals(automaceSync.getValue());
+    }
+
+    /**
+     * Returns true when there are NO solid/collidable blocks underneath the player's feet
+     * within the specified horizontal radius (2.0 blocks) and vertical depth.
+     */
+    private boolean hasNoBlocksUnderFeetInRadius(Minecraft mc, double depthBlocks, double horizRadius) {
+        if (mc == null || mc.player == null || mc.level == null) {
+            return false;
+        }
+        if (mc.player.onGround()) {
+            return false;
+        }
+        AABB box = mc.player.getBoundingBox();
+        AABB checkArea = new AABB(
+                box.minX - horizRadius,
+                box.minY - depthBlocks,
+                box.minZ - horizRadius,
+                box.maxX + horizRadius,
+                box.minY - 0.05D,
+                box.maxZ + horizRadius
+        );
+        return mc.level.noCollision(mc.player, checkArea);
+    }
+
 }

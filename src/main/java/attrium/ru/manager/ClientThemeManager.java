@@ -171,7 +171,8 @@ public final class ClientThemeManager {
     }
 
     public static void setClickGuiKey(int key) {
-        if (key < -1) {
+        // Allow keyboard keys or mouse buttons Middle..8 (<= -102); never allow LMB (-100) or RMB (-101)
+        if (key <= -102) {
             clickGuiKey = key;
         } else if (key >= GLFW.GLFW_KEY_SPACE && key <= GLFW.GLFW_KEY_LAST) {
             clickGuiKey = key;
@@ -233,14 +234,31 @@ public final class ClientThemeManager {
     }
 
     /**
-     * Opens the .minecraft/attrium config directory safely via Minecraft's native Util platform helper
-     * (reflection-safe across 1.21.x Mojang mappings).
+     * Returns the single unified Attrium config file path inside Fabric's default config folder:
+     * <gameDir>/config/acc.json
+     */
+    public static Path getUnifiedConfigPath() {
+        try {
+            Class<?> fl = Class.forName("net.fabricmc.loader.api.FabricLoader");
+            Object inst = fl.getMethod("getInstance").invoke(null);
+            Object cfgDir = fl.getMethod("getConfigDir").invoke(inst);
+            if (cfgDir instanceof Path p) {
+                return p.resolve("acc.json");
+            }
+        } catch (Throwable ignored) {
+        }
+        Minecraft mc = Minecraft.getInstance();
+        Path base = (mc != null && mc.gameDirectory != null) ? mc.gameDirectory.toPath() : Path.of(".");
+        return base.resolve("config").resolve("acc.json");
+    }
+
+    /**
+     * Opens Fabric's default config directory (where acc.json lives) safely via Minecraft's Util helper.
      */
     public static void openConfigFolder() {
         try {
-            Minecraft mc = Minecraft.getInstance();
-            File baseDir = (mc != null && mc.gameDirectory != null) ? mc.gameDirectory : new File(".");
-            File attriumDir = new File(baseDir, "attrium");
+            Path cfgDirPath = getUnifiedConfigPath().getParent();
+            File attriumDir = (cfgDirPath != null) ? cfgDirPath.toFile() : new File("config");
             if (!attriumDir.exists()) {
                 attriumDir.mkdirs();
             }

@@ -2,6 +2,8 @@ package attrium.ru.api.module.impl.combat;
 
 
 
+
+import attrium.ru.api.module.impl.misc.ElytraHelper;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.core.BlockPos;
 import it.unimi.dsi.fastutil.objects.Object2IntMap;
@@ -382,6 +384,9 @@ public class MaceTarget extends Module {
                 int restoreSlotAfterEquip,
                 boolean clickSim
         ) {
+            if (ElytraHelper.isSwapBusy()) {
+                return false;
+            }
             if (client == null || client.player == null || client.gameMode == null || client.screen != null) {
                 return false;
             }

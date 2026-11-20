@@ -1,7 +1,5 @@
 package attrium.ru.manager;
 
-
-import net.fabricmc.loader.api.FabricLoader;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
@@ -721,15 +719,49 @@ public final class FriendManager {
     }
 
     // =========================================================================
-    // 5. JSON Persistence (`friends.json` / `friends.json`)
+    // 5. Unified JSON Persistence (config/acc.json — no separate friends.json)
     // =========================================================================
 
     private static File resolveFriendsStorageFile() {
-        return FabricLoader.getInstance().getConfigDir().resolve("acf.json").toFile();
+        return ClientThemeManager.getUnifiedConfigPath().toFile();
+    }
+
+    public static synchronized JsonArray toFriendsJsonArray() {
+        JsonArray arr = new JsonArray();
+        for (FriendRecord rec : FRIEND_RECORDS.values()) {
+            if (rec == null || rec.uuid == null) {
+                continue;
+            }
+            JsonObject obj = new JsonObject();
+            obj.addProperty("uuid", rec.uuid.toString());
+            obj.addProperty("username", rec.username != null ? rec.username : "");
+            obj.addProperty("alias", rec.alias != null ? rec.alias : (rec.username != null ? rec.username : ""));
+            arr.add(obj);
+        }
+        return arr;
+    }
+
+    public static synchronized void applyFriendsFromJson(JsonArray arr, Integer bindKey) {
+        if (bindKey != null) {
+            friendBindKey = bindKey;
+        }
+        if (arr != null) {
+            FRIENDS.clear();
+            FRIEND_RECORDS.clear();
+            FRIENDS_BY_LOWER_NAME.clear();
+            loadFriendsArray(arr);
+        }
+        entriesDirty = true;
+        ALIASED_TEXT_CACHE.clear();
+        attrium.ru.api.module.impl.misc.NameProtectModule.invalidateCache();
     }
 
     public static synchronized void saveToFile() {
         try {
+            // Prefer saving the entire unified acc.json via GlassClickGuiScreen when modules are ready
+            if (attrium.ru.screens.GlassClickGuiScreen.getInstance().trySaveUnifiedConfigIfReady()) {
+                return;
+            }
             File file = resolveFriendsStorageFile();
             File parent = file.getParentFile();
             if (parent != null && !parent.exists()) {
@@ -737,20 +769,19 @@ public final class FriendManager {
             }
 
             JsonObject root = new JsonObject();
-            root.addProperty("friendBindKey", friendBindKey);
-
-            JsonArray arr = new JsonArray();
-            for (FriendRecord rec : FRIEND_RECORDS.values()) {
-                if (rec == null || rec.uuid == null) {
-                    continue;
+            if (file.exists() && file.length() > 0L) {
+                try {
+                    String existing = Files.readString(file.toPath(), StandardCharsets.UTF_8);
+                    JsonElement parsed = JsonParser.parseString(existing);
+                    if (parsed != null && parsed.isJsonObject()) {
+                        root = parsed.getAsJsonObject();
+                    }
+                } catch (Throwable ignored) {
                 }
-                JsonObject obj = new JsonObject();
-                obj.addProperty("uuid", rec.uuid.toString());
-                obj.addProperty("username", rec.username);
-                obj.addProperty("alias", rec.alias);
-                arr.add(obj);
             }
-            root.add("friends", arr);
+
+            root.addProperty("friendBindKey", friendBindKey);
+            root.add("friends", toFriendsJsonArray());
 
             Files.writeString(file.toPath(), GSON.toJson(root), StandardCharsets.UTF_8);
         } catch (Throwable ignored) {
@@ -771,18 +802,14 @@ public final class FriendManager {
             JsonElement parsed = JsonParser.parseString(raw);
             if (parsed.isJsonObject()) {
                 JsonObject root = parsed.getAsJsonObject();
-                if (root.has("friendBindKey")) {
-                    friendBindKey = root.get("friendBindKey").getAsInt();
-                }
-                if (root.has("friends") && root.get("friends").isJsonArray()) {
-                    loadFriendsArray(root.getAsJsonArray("friends"));
-                }
+                Integer bk = (root.has("friendBindKey") && root.get("friendBindKey").isJsonPrimitive())
+                        ? root.get("friendBindKey").getAsInt() : null;
+                JsonArray arr = (root.has("friends") && root.get("friends").isJsonArray())
+                        ? root.getAsJsonArray("friends") : null;
+                applyFriendsFromJson(arr, bk);
             } else if (parsed.isJsonArray()) {
-                loadFriendsArray(parsed.getAsJsonArray());
+                applyFriendsFromJson(parsed.getAsJsonArray(), null);
             }
-            entriesDirty = true;
-            ALIASED_TEXT_CACHE.clear();
-        attrium.ru.api.module.impl.misc.NameProtectModule.invalidateCache();
         } catch (Throwable ignored) {
         }
     }
@@ -797,9 +824,9 @@ public final class FriendManager {
                         FriendRecord rec = new FriendRecord(uuid, name, name);
                         FRIENDS.put(uuid, rec.alias);
                         FRIEND_RECORDS.put(uuid, rec);
-                            FRIENDS.put(computeOfflineUuid(rec.username), rec.alias);
-                            FRIENDS.put(computeLowercaseOfflineUuid(rec.username), rec.alias);
-                            FRIENDS_BY_LOWER_NAME.put(rec.username.toLowerCase(Locale.ROOT), rec);
+                        FRIENDS.put(computeOfflineUuid(rec.username), rec.alias);
+                        FRIENDS.put(computeLowercaseOfflineUuid(rec.username), rec.alias);
+                        FRIENDS_BY_LOWER_NAME.put(rec.username.toLowerCase(Locale.ROOT), rec);
                     }
                 } else if (el.isJsonObject()) {
                     JsonObject obj = el.getAsJsonObject();
@@ -811,6 +838,9 @@ public final class FriendManager {
                         FriendRecord rec = new FriendRecord(uuid, name, alias);
                         FRIENDS.put(uuid, rec.alias);
                         FRIEND_RECORDS.put(uuid, rec);
+                        FRIENDS.put(computeOfflineUuid(rec.username), rec.alias);
+                        FRIENDS.put(computeLowercaseOfflineUuid(rec.username), rec.alias);
+                        FRIENDS_BY_LOWER_NAME.put(rec.username.toLowerCase(Locale.ROOT), rec);
                     }
                 }
             } catch (Throwable ignored) {

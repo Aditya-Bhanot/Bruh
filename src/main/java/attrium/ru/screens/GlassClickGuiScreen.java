@@ -191,6 +191,7 @@ public class GlassClickGuiScreen extends Screen {
     private volatile boolean pendingRightClickFromCallback = false;
     private static final Gson CONFIG_GSON = new GsonBuilder().setPrettyPrinting().create();
     private static volatile boolean configLoadedOnce = false;
+    private static final java.util.Map<String, Integer> PERSISTENT_MODULE_BINDS = new java.util.concurrent.ConcurrentHashMap<>();
     private char lastKeyAppendedChar = 0;
     private long lastKeyAppendTimeNs = 0L;
 
@@ -515,10 +516,8 @@ public class GlassClickGuiScreen extends Screen {
                     if (kmName == null) continue;
                     String low = kmName.toLowerCase(Locale.ROOT);
                     if (low.contains("clickgui") || (low.contains("attrium") && low.contains("gui"))) {
-                        InputConstants.Key icKey = (normalized < -1)
-                                ? InputConstants.Type.MOUSE.getOrCreate(-100 - normalized)
-                                : InputConstants.Type.KEYSYM.getOrCreate(normalized);
-                        km.setKey(icKey);
+                        // Unbind legacy Fabric/vanilla KeyMapping so ONLY ClientThemeManager's unified bind opens ClickGUI
+                        km.setKey(InputConstants.UNKNOWN);
                         changed = true;
                     }
                 }
@@ -820,9 +819,9 @@ public class GlassClickGuiScreen extends Screen {
         // Poll ClickGUI keybind (supports keyboard keys & mouse buttons)
         int clickGuiKey = ClientThemeManager.getClickGuiKey();
         boolean guiKeyDown;
-        if (clickGuiKey < -1) {
+        if (clickGuiKey <= -102) {
             int btn = -100 - clickGuiKey;
-            guiKeyDown = btn >= 0 && btn <= GLFW.GLFW_MOUSE_BUTTON_LAST
+            guiKeyDown = btn >= GLFW.GLFW_MOUSE_BUTTON_MIDDLE && btn <= GLFW.GLFW_MOUSE_BUTTON_LAST
                     && GLFW.glfwGetMouseButton(windowHandle, btn) == GLFW.GLFW_PRESS;
         } else {
             guiKeyDown = clickGuiKey >= GLFW.GLFW_KEY_SPACE && clickGuiKey <= GLFW.GLFW_KEY_LAST
@@ -2279,6 +2278,13 @@ public class GlassClickGuiScreen extends Screen {
         if (row == null) {
             return -1;
         }
+        if (row.boundKey == -1 && row.name != null) {
+            Integer persisted = PERSISTENT_MODULE_BINDS.get(row.name.toLowerCase(Locale.ROOT));
+            if (persisted != null && persisted != -1 && persisted != 0 && persisted != GLFW.GLFW_KEY_UNKNOWN) {
+                row.boundKey = persisted;
+                return row.boundKey;
+            }
+        }
         int modKey = getModuleBindKey(row.module);
         if (modKey != -1 && modKey != 0 && modKey != GLFW.GLFW_KEY_UNKNOWN && row.boundKey == -1) {
             row.boundKey = modKey;
@@ -2292,6 +2298,9 @@ public class GlassClickGuiScreen extends Screen {
         }
         int normalized = (newKey == 0 || newKey == GLFW.GLFW_KEY_UNKNOWN) ? -1 : newKey;
         row.boundKey = normalized;
+        if (row.name != null) {
+            PERSISTENT_MODULE_BINDS.put(row.name.toLowerCase(Locale.ROOT), normalized);
+        }
         if (isActionMacroRow(row)) {
             if (isElytraHelperRow(row)) {
                 invokeStaticMacroSetKey(row.module, normalized);
@@ -2567,9 +2576,15 @@ public class GlassClickGuiScreen extends Screen {
             String safeDesc = extractModuleDescription(mod, safeName);
             int catIdx = (mod instanceof LungeHelper) ? 1 : mapCategoryToPillIndex(mod.getCategory());
             CachedSettingEntry[] settings = extractModuleSettings(mod, safeName);
-            int initialKey = getModuleBindKey(mod);
+            Integer persistedBind = PERSISTENT_MODULE_BINDS.get(safeName.toLowerCase(Locale.ROOT));
+            int initialKey = (persistedBind != null) ? persistedBind : getModuleBindKey(mod);
+            if (initialKey != -1 && initialKey != 0 && initialKey != GLFW.GLFW_KEY_UNKNOWN) {
+                PERSISTENT_MODULE_BINDS.put(safeName.toLowerCase(Locale.ROOT), initialKey);
+            }
             allModuleRows[i] = new CachedModuleRow(mod, safeName, safeDesc, catIdx, settings, initialKey);
         }
+        loadConfigIfPresent();
+        syncClickGuiKeyToBindings(ClientThemeManager.getClickGuiKey());
     }
 
     private List<Module> discoverClientModules() {
@@ -3825,19 +3840,33 @@ public class GlassClickGuiScreen extends Screen {
     }
 
     private static Path getConfigFilePath() {
-        Minecraft mc = Minecraft.getInstance();
-        Path base = (mc != null && mc.gameDirectory != null)
-                ? mc.gameDirectory.toPath()
-                : Path.of(".");
-        return base.resolve("attrium_config.json");
+        return ClientThemeManager.getUnifiedConfigPath();
     }
 
-    private static Path getConfigsDirectoryPath() {
-        Minecraft mc = Minecraft.getInstance();
-        Path base = (mc != null && mc.gameDirectory != null)
-                ? mc.gameDirectory.toPath()
-                : Path.of(".");
-        return base.resolve("attrium_configs");
+    private static JsonObject readUnifiedRootOrEmpty() {
+        try {
+            Path cfg = getConfigFilePath();
+            if (Files.exists(cfg)) {
+                String raw = Files.readString(cfg, StandardCharsets.UTF_8);
+                if (raw != null && !raw.isBlank()) {
+                    JsonElement el = JsonParser.parseString(raw);
+                    if (el != null && el.isJsonObject()) {
+                        return el.getAsJsonObject();
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return new JsonObject();
+    }
+
+    private static void writeUnifiedRoot(JsonObject root) throws java.io.IOException {
+        Path cfg = getConfigFilePath();
+        Path parent = cfg.getParent();
+        if (parent != null) {
+            Files.createDirectories(parent);
+        }
+        Files.writeString(cfg, CONFIG_GSON.toJson(root), StandardCharsets.UTF_8);
     }
 
     private static String sanitizeConfigName(String raw) {
@@ -3880,19 +3909,13 @@ public class GlassClickGuiScreen extends Screen {
         cachedConfigNames.clear();
         cachedConfigNames.add("default");
         try {
-            Path dir = getConfigsDirectoryPath();
-            if (Files.isDirectory(dir)) {
+            JsonObject root = readUnifiedRootOrEmpty();
+            if (root.has("profiles") && root.get("profiles").isJsonObject()) {
                 List<String> extras = new ArrayList<>();
-                try (Stream<Path> stream = Files.list(dir)) {
-                    stream.forEach(p -> {
-                        String fn = p.getFileName().toString();
-                        if (fn.endsWith(".json")) {
-                            String name = fn.substring(0, fn.length() - 5);
-                            if (!name.isEmpty() && !"default".equalsIgnoreCase(name)) {
-                                extras.add(name);
-                            }
-                        }
-                    });
+                for (String key : root.getAsJsonObject("profiles").keySet()) {
+                    if (key != null && !key.isEmpty() && !"default".equalsIgnoreCase(key)) {
+                        extras.add(key);
+                    }
                 }
                 extras.sort(String.CASE_INSENSITIVE_ORDER);
                 cachedConfigNames.addAll(extras);
@@ -4012,8 +4035,8 @@ public class GlassClickGuiScreen extends Screen {
             enqueueComponentText(nameComp, listLeft + 12, rowTop + 7, isActive ? COLOR_TEXT_BRIGHT_WHITE : 0xFFD6DCE8);
 
             String sub = "default".equalsIgnoreCase(cfgName)
-                    ? "Auto-saved client profile (attrium_config.json)"
-                    : "Saved profile (attrium_configs/" + cfgName + ".json)";
+                    ? "Unified client config (config/acc.json)"
+                    : "Embedded profile in config/acc.json (" + cfgName + ")";
             Component subComp = Component.literal(sub).withStyle(nunitoRegularStyle);
             enqueueComponentText(subComp, listLeft + 12, rowTop + 20, COLOR_TEXT_DIMMED_GRAY);
 
@@ -4140,23 +4163,8 @@ public class GlassClickGuiScreen extends Screen {
             root.addProperty("uiVolume", volNs.getValue());
         }
 
-        // Save FriendManager entries
-        JsonArray friendsArr = new JsonArray();
-        try {
-            List<FriendRecord> friends = FriendManager.getSortedFriends();
-            if (friends != null) {
-                for (FriendRecord rec : friends) {
-                    if (rec != null && rec.uuid != null) {
-                        JsonObject fObj = new JsonObject();
-                        fObj.addProperty("uuid", rec.uuid.toString());
-                        fObj.addProperty("name", rec.username != null ? rec.username : "");
-                        friendsArr.add(fObj);
-                    }
-                }
-            }
-        } catch (Throwable ignored) {
-        }
-        root.add("friends", friendsArr);
+        // Save FriendManager entries (uuid, username, alias)
+        root.add("friends", FriendManager.toFriendsJsonArray());
 
         // Save ALL modules (enabled state, keybinds, expanded state, and every setting)
         JsonObject modulesObj = new JsonObject();
@@ -4198,6 +4206,29 @@ public class GlassClickGuiScreen extends Screen {
                     settingsObj.addProperty(se.name, ss.getValue() != null ? ss.getValue() : "");
                 }
             }
+            // Fallback pass over module.getSettings() so hidden/position settings (e.g. HUD xRatio/yRatio) are also saved
+            try {
+                List<Setting<?>> rawAll = row.module.getSettings();
+                if (rawAll != null) {
+                    for (Setting<?> s : rawAll) {
+                        if (s == null || s.getName() == null || settingsObj.has(s.getName())) {
+                            continue;
+                        }
+                        if (s instanceof BooleanSetting bs) {
+                            Object raw = ((Setting<?>) bs).getValue();
+                            boolean bVal = (raw instanceof Boolean b) ? b : (raw instanceof Number n && n.intValue() > 0);
+                            settingsObj.addProperty(s.getName(), bVal);
+                        } else if (s instanceof NumberSetting ns) {
+                            settingsObj.addProperty(s.getName(), ns.getValue());
+                        } else if (s instanceof ModeSetting ms && ms.getValue() != null) {
+                            settingsObj.addProperty(s.getName(), ms.getValue());
+                        } else if (s instanceof StringSetting ss) {
+                            settingsObj.addProperty(s.getName(), ss.getValue() != null ? ss.getValue() : "");
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
             mObj.add("settings", settingsObj);
             modulesObj.add(row.name, mObj);
         }
@@ -4233,8 +4264,12 @@ public class GlassClickGuiScreen extends Screen {
                 activeCategoryIndex = idx;
             }
         }
-        if (root.has("friendBindKey") && root.get("friendBindKey").isJsonPrimitive()) {
-            FriendManager.setFriendBindKey(root.get("friendBindKey").getAsInt());
+        Integer loadedFriendBind = (root.has("friendBindKey") && root.get("friendBindKey").isJsonPrimitive())
+                ? root.get("friendBindKey").getAsInt() : null;
+        JsonArray loadedFriendsArr = (root.has("friends") && root.get("friends").isJsonArray())
+                ? root.getAsJsonArray("friends") : null;
+        if (loadedFriendBind != null || loadedFriendsArr != null) {
+            FriendManager.applyFriendsFromJson(loadedFriendsArr, loadedFriendBind);
         }
         if (root.has("uiVolume") && clientTabUiVolumeEntry != null && clientTabUiVolumeEntry.setting instanceof NumberSetting volNs) {
             volNs.setValue(Mth.clamp(root.get("uiVolume").getAsDouble(), volNs.getMin(), volNs.getMax()));
@@ -4285,6 +4320,7 @@ public class GlassClickGuiScreen extends Screen {
                 if (mObj.has("key") && mObj.get("key").isJsonPrimitive()) {
                     int k = mObj.get("key").getAsInt();
                     row.boundKey = (k == 0 || k == GLFW.GLFW_KEY_UNKNOWN) ? -1 : k;
+                    PERSISTENT_MODULE_BINDS.put(row.name.toLowerCase(Locale.ROOT), row.boundKey);
                     if (isActionMacroRow(row)) {
                         if (isElytraHelperRow(row)) {
                             invokeStaticMacroSetKey(row.module, row.boundKey);
@@ -4342,6 +4378,31 @@ public class GlassClickGuiScreen extends Screen {
                         } catch (Throwable ignored) {
                         }
                     }
+                    // Restore any extra/hidden settings from module.getSettings() (e.g., HUD xRatio/yRatio)
+                    try {
+                        List<Setting<?>> rawAll = row.module.getSettings();
+                        if (rawAll != null) {
+                            for (Setting<?> s : rawAll) {
+                                if (s == null || s.getName() == null || !settingsObj.has(s.getName())) {
+                                    continue;
+                                }
+                                JsonElement valEl = settingsObj.get(s.getName());
+                                if (s instanceof BooleanSetting bs && valEl.isJsonPrimitive()) {
+                                    bs.setValue(valEl.getAsBoolean());
+                                } else if (s instanceof NumberSetting ns && valEl.isJsonPrimitive()) {
+                                    ns.setValue(Mth.clamp(valEl.getAsDouble(), ns.getMin(), ns.getMax()));
+                                } else if (s instanceof ModeSetting ms && valEl.isJsonPrimitive()) {
+                                    String mv = valEl.getAsString();
+                                    if (ms.getModes() != null && ms.getModes().contains(mv)) {
+                                        ms.setValue(mv);
+                                    }
+                                } else if (s instanceof StringSetting ss && valEl.isJsonPrimitive()) {
+                                    ss.setValue(valEl.getAsString());
+                                }
+                            }
+                        }
+                    } catch (Throwable ignored) {
+                    }
                 }
             }
         }
@@ -4360,15 +4421,19 @@ public class GlassClickGuiScreen extends Screen {
         }
         try {
             activeConfigName = safe;
-            JsonObject root = serializeFullClientConfig();
-            String json = CONFIG_GSON.toJson(root);
-            // Always update default attrium_config.json so it persists on next launch
-            Files.writeString(getConfigFilePath(), json, StandardCharsets.UTF_8);
+            JsonObject existingRoot = readUnifiedRootOrEmpty();
+            JsonObject profilesObj = (existingRoot.has("profiles") && existingRoot.get("profiles").isJsonObject())
+                    ? existingRoot.getAsJsonObject("profiles")
+                    : new JsonObject();
+
+            JsonObject snapshot = serializeFullClientConfig();
             if (!"default".equalsIgnoreCase(safe)) {
-                Path dir = getConfigsDirectoryPath();
-                Files.createDirectories(dir);
-                Files.writeString(dir.resolve(safe + ".json"), json, StandardCharsets.UTF_8);
+                profilesObj.add(safe, snapshot.deepCopy());
             }
+            if (profilesObj.size() > 0) {
+                snapshot.add("profiles", profilesObj);
+            }
+            writeUnifiedRoot(snapshot);
             refreshSavedConfigList(true);
             return true;
         } catch (Throwable ignored) {
@@ -4382,22 +4447,32 @@ public class GlassClickGuiScreen extends Screen {
             safe = "default";
         }
         try {
-            Path target = "default".equalsIgnoreCase(safe)
-                    ? getConfigFilePath()
-                    : getConfigsDirectoryPath().resolve(safe + ".json");
-            if (!Files.exists(target)) {
+            JsonObject root = readUnifiedRootOrEmpty();
+            if (root.size() == 0) {
                 return false;
             }
-            String json = Files.readString(target, StandardCharsets.UTF_8);
-            JsonElement parsed = JsonParser.parseString(json);
-            if (!parsed.isJsonObject()) {
-                return false;
+            JsonObject targetObj;
+            if ("default".equalsIgnoreCase(safe)) {
+                targetObj = root;
+            } else {
+                if (!root.has("profiles") || !root.get("profiles").isJsonObject()) {
+                    return false;
+                }
+                JsonObject profilesObj = root.getAsJsonObject("profiles");
+                if (!profilesObj.has(safe) || !profilesObj.get(safe).isJsonObject()) {
+                    return false;
+                }
+                targetObj = profilesObj.getAsJsonObject(safe);
             }
             activeConfigName = safe;
-            boolean ok = applyConfigJsonObject(parsed.getAsJsonObject());
-            if (ok && !"default".equalsIgnoreCase(safe)) {
-                // Persist loaded profile as the active default for next game startup
-                Files.writeString(getConfigFilePath(), CONFIG_GSON.toJson(serializeFullClientConfig()), StandardCharsets.UTF_8);
+            boolean ok = applyConfigJsonObject(targetObj);
+            if (ok) {
+                // Persist active loaded state into the single config/acc.json while preserving profiles
+                JsonObject updated = serializeFullClientConfig();
+                if (root.has("profiles") && root.get("profiles").isJsonObject()) {
+                    updated.add("profiles", root.getAsJsonObject("profiles"));
+                }
+                writeUnifiedRoot(updated);
             }
             return ok;
         } catch (Throwable ignored) {
@@ -4411,14 +4486,24 @@ public class GlassClickGuiScreen extends Screen {
             return;
         }
         try {
-            Path target = getConfigsDirectoryPath().resolve(safe + ".json");
-            Files.deleteIfExists(target);
+            JsonObject root = readUnifiedRootOrEmpty();
+            if (root.has("profiles") && root.get("profiles").isJsonObject()) {
+                root.getAsJsonObject("profiles").remove(safe);
+                writeUnifiedRoot(root);
+            }
             if (safe.equalsIgnoreCase(activeConfigName)) {
                 activeConfigName = "default";
             }
             refreshSavedConfigList(true);
         } catch (Throwable ignored) {
         }
+    }
+
+    public boolean trySaveUnifiedConfigIfReady() {
+        if (allModuleRows == null || allModuleRows.length == 0) {
+            return false;
+        }
+        return saveNamedConfig(activeConfigName != null && !activeConfigName.isEmpty() ? activeConfigName : "default");
     }
 
     public void saveConfigNow() {
@@ -5035,19 +5120,10 @@ public class GlassClickGuiScreen extends Screen {
             return;
         }
         int kbY = bottomYBase + 76;
-        if (isHovered(mouseX, mouseY, rcx, kbY - 4, rInnerW, 22)) {
-            if (rightClicked) {
-                ClientThemeManager.setClickGuiKey(GLFW.GLFW_KEY_RIGHT_SHIFT);
-                syncClickGuiKeyToBindings(ClientThemeManager.getClickGuiKey());
-                listeningForGuiKeybind = false;
-                waitingForBindRelease = false;
-                saveConfigNow();
-                SoundUtil.playTogglePop(false);
-            } else {
-                listeningForGuiKeybind = true;
-                waitingForBindRelease = true;
-                SoundUtil.playClick();
-            }
+        if (leftClicked && isHovered(mouseX, mouseY, rcx, kbY - 4, rInnerW, 22)) {
+            listeningForGuiKeybind = true;
+            waitingForBindRelease = true;
+            SoundUtil.playClick();
             return;
         }
         if (!leftClicked) return;

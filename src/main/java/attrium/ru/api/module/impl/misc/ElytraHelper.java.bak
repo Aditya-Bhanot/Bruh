@@ -12,7 +12,6 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.network.protocol.game.ServerboundPlayerCommandPacket;
 import net.minecraft.network.protocol.game.ServerboundSetCarriedItemPacket;
 import net.minecraft.world.InteractionHand;
-import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
@@ -25,8 +24,8 @@ import java.util.concurrent.ThreadLocalRandom;
 
 public class ElytraHelper extends Module {
 
-    private static final int BASE_SWAP_COOLDOWN_TICKS = 4;
-    private static final int POST_EQUIP_GLIDE_DELAY_TICKS = 3;
+    private static final int BASE_SWAP_COOLDOWN_TICKS = 2;
+    private static final int POST_RETURN_GLIDE_DELAY_TICKS = 1;
 
     private enum SwapPhase {
         IDLE,
@@ -81,7 +80,7 @@ public class ElytraHelper extends Module {
     private boolean wasBindPressedLastTick = false;
 
     public ElytraHelper() {
-        super("ElytraHelper", "Grim-safe hotbar Chestplate <-> Elytra swap macro", ModuleCategory.MISC);
+        super("ElytraHelper", "Fast Grim-safe hotbar Chestplate <-> Elytra swap macro", ModuleCategory.MISC);
         instance = this;
         int saved = savedElytraKeyCode.getValue().intValue();
         if (saved != -1 && saved != 0) {
@@ -199,11 +198,11 @@ public class ElytraHelper extends Module {
         }
 
         if (risingEdge && clientTickCounter >= nextAllowedSwapTick && !client.player.isUsingItem()) {
-            beginLegitChestplateElytraSwap(client);
+            beginFastChestplateElytraSwap(client);
         }
     }
 
-    private void beginLegitChestplateElytraSwap(Minecraft client) {
+    private void beginFastChestplateElytraSwap(Minecraft client) {
         boolean wearingElytra = client.player.getItemBySlot(EquipmentSlot.CHEST).is(Items.ELYTRA);
         int slot = wearingElytra ? findBestChestplateSlot(client) : findBestElytraSlot(client);
         if (slot < 0 || slot >= 9) {
@@ -214,10 +213,19 @@ public class ElytraHelper extends Module {
         this.targetArmorSlot = slot;
         this.previousHotbarSlot = client.player.getInventory().getSelectedSlot();
         this.phaseTicksElapsed = 0;
-        this.requiredPhaseTicks = computeStageDelayTicks();
 
+        // Tick 0: switch to armor slot cleanly (never sends duplicate packet)
         selectHotbarSlotSafe(client, slot);
-        this.phase = SwapPhase.WAIT_BEFORE_EQUIP;
+
+        if (Boolean.TRUE.equals(randomization.getValue())) {
+            this.requiredPhaseTicks = computeStageDelayTicks();
+            this.phase = SwapPhase.WAIT_BEFORE_EQUIP;
+        } else {
+            // Instant equip on Tick 0 -> next-tick slot restore (50ms swap, zero duplicate slot packets)
+            client.gameMode.useItem(client.player, InteractionHand.MAIN_HAND);
+            this.requiredPhaseTicks = 1;
+            this.phase = SwapPhase.WAIT_BEFORE_RETURN_SLOT;
+        }
     }
 
     private void advanceSwapSequence(Minecraft client) {
@@ -235,14 +243,10 @@ public class ElytraHelper extends Module {
                 if (client.player.getInventory().getSelectedSlot() != targetArmorSlot) {
                     selectHotbarSlotSafe(client, targetArmorSlot);
                 }
-                InteractionResult result = client.gameMode.useItem(client.player, InteractionHand.MAIN_HAND);
+                client.gameMode.useItem(client.player, InteractionHand.MAIN_HAND);
                 phaseTicksElapsed = 0;
                 requiredPhaseTicks = computeStageDelayTicks();
-                if (result.consumesAction()) {
-                    phase = SwapPhase.WAIT_BEFORE_RETURN_SLOT;
-                } else {
-                    phase = SwapPhase.WAIT_BEFORE_RETURN_SLOT;
-                }
+                phase = SwapPhase.WAIT_BEFORE_RETURN_SLOT;
             }
             case WAIT_BEFORE_RETURN_SLOT -> {
                 if (phaseTicksElapsed < requiredPhaseTicks) {
@@ -251,7 +255,7 @@ public class ElytraHelper extends Module {
                 if (previousHotbarSlot >= 0 && previousHotbarSlot < 9) {
                     selectHotbarSlotSafe(client, previousHotbarSlot);
                 }
-                if (equippingElytra && Boolean.TRUE.equals(autoStartGlide.getValue())) {
+                if (equippingElytra && Boolean.TRUE.equals(autoStartGlide.getValue()) && !client.player.onGround()) {
                     phaseTicksElapsed = 0;
                     phase = SwapPhase.WAIT_BEFORE_GLIDE;
                 } else {
@@ -260,7 +264,7 @@ public class ElytraHelper extends Module {
                 }
             }
             case WAIT_BEFORE_GLIDE -> {
-                if (phaseTicksElapsed < POST_EQUIP_GLIDE_DELAY_TICKS) {
+                if (phaseTicksElapsed < POST_RETURN_GLIDE_DELAY_TICKS) {
                     return;
                 }
                 tryStartAirGlide(client);
@@ -284,7 +288,7 @@ public class ElytraHelper extends Module {
         if (client.player.onGround()
                 || client.player.isFallFlying()
                 || client.player.isInWater()
-                || client.player.getDeltaMovement().y >= -0.04D) {
+                || client.player.getDeltaMovement().y >= -0.02D) {
             return;
         }
         client.getConnection().send(new ServerboundPlayerCommandPacket(

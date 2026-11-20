@@ -1,5 +1,9 @@
 package attrium.ru.api.module.impl.combat;
 
+
+
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.core.BlockPos;
 import it.unimi.dsi.fastutil.objects.Object2IntMap;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.minecraft.client.KeyMapping;
@@ -1221,6 +1225,11 @@ public class MaceTarget extends Module {
                 : Mth.clamp((nowNs - lastSmoothFrameNs) / 50_000_000.0D, 0.05D, 1.00D);
         lastSmoothFrameNs = nowNs;
 
+        if (!canSafelyAimForMace(client)) {
+            suspendSilentRotation();
+            lastSmoothFrameNs = 0L;
+            return;
+        }
         if ("Strict".equalsIgnoreCase(aimMode.getValue())) {
             suspendSilentRotation();
             applyStrictCenterLock(client, target);
@@ -1308,7 +1317,7 @@ public class MaceTarget extends Module {
             return;
         }
 
-        if ("Silent".equalsIgnoreCase(aimMode.getValue()) && shouldAimAtTarget(client)) {
+        if ("Silent".equalsIgnoreCase(aimMode.getValue()) && shouldAimAtTarget(client) && canSafelyAimForMace(client)) {
             if (isRightClickUseOrSwapActive(client)) {
                 suspendSilentRotation();
             } else {
@@ -2801,4 +2810,69 @@ public class MaceTarget extends Module {
             );
         }
     }
+
+    /**
+     * Returns true if the player is currently in water, lava, or touching a cobweb.
+     */
+    private boolean isPlayerBlockedByLiquidOrCobweb(Minecraft client) {
+        if (client == null || client.player == null || client.level == null) {
+            return true;
+        }
+        if (client.player.isInWater() || client.player.isInLava() || client.player.isUnderWater()) {
+            return true;
+        }
+        AABB box = client.player.getBoundingBox().inflate(0.05D);
+        int minX = Mth.floor(box.minX);
+        int maxX = Mth.floor(box.maxX);
+        int minY = Mth.floor(box.minY);
+        int maxY = Mth.floor(box.maxY);
+        int minZ = Mth.floor(box.minZ);
+        int maxZ = Mth.floor(box.maxZ);
+        BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
+        for (int x = minX; x <= maxX; x++) {
+            for (int y = minY; y <= maxY; y++) {
+                for (int z = minZ; z <= maxZ; z++) {
+                    cursor.set(x, y, z);
+                    if (client.level.getBlockState(cursor).is(Blocks.COBWEB)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Returns true ONLY when the player is airborne and there are no solid blocks
+     * within minClearanceBlocks (1.5 blocks) underneath their feet.
+     */
+    private boolean hasNoBlocksUnderFeet(Minecraft client, double minClearanceBlocks) {
+        if (client == null || client.player == null || client.level == null) {
+            return false;
+        }
+        if (client.player.onGround()) {
+            return false;
+        }
+        AABB box = client.player.getBoundingBox();
+        AABB underBox = new AABB(
+                box.minX,
+                box.minY - minClearanceBlocks,
+                box.minZ,
+                box.maxX,
+                box.minY - 0.05D,
+                box.maxZ
+        );
+        return client.level.noCollision(client.player, underBox);
+    }
+
+    /**
+     * Master AutoMace aim guard: never aim in cobweb/water/lava or with blocks within 1.5m under feet.
+     */
+    private boolean canSafelyAimForMace(Minecraft client) {
+        if (isPlayerBlockedByLiquidOrCobweb(client)) {
+            return false;
+        }
+        return hasNoBlocksUnderFeet(client, 1.5D);
+    }
+
 }
