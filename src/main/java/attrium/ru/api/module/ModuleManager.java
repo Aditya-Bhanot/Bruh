@@ -7,6 +7,7 @@ package attrium.ru.api.module;
 
 
 import attrium.ru.api.module.impl.misc.NameProtectModule;
+import attrium.ru.api.module.impl.misc.ChatUtilsModule;
 import attrium.ru.api.module.impl.visual.ArrayListModule;
 import attrium.ru.api.module.impl.visual.NotificationsModule;
 import attrium.ru.api.module.impl.visual.TargetHUDModule;
@@ -201,6 +202,7 @@ public final class ModuleManager {
         register(new AutoTotem());
         register(new MaceTarget());
         register(new NameProtectModule());
+        register(new ChatUtilsModule());
         register(new KeybindsModule());
         register(new TargetHUDModule());
         register(new NotificationsModule());

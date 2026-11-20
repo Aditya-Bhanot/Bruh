@@ -75,7 +75,8 @@
     "NameProtectObjectiveMixin",
     "NameProtectScoreboardMixin",
     "NameProtectTabListMixin",
-    "TickPipelineMixin"
+    "TickPipelineMixin",
+    "ChatUtilsMixin"
   ],
   "injectors": {
     "defaultRequire": 1

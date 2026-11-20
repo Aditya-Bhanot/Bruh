@@ -1,5 +1,7 @@
 package attrium.ru.screens;
 
+
+import attrium.ru.manager.AutoUpdater;
 import com.mojang.blaze3d.platform.InputConstants;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.KeyMapping;
@@ -62,6 +64,8 @@ import java.util.Locale;
  * Type-Safe Keybinds, World-Join Null Guards, and Tactile UI Volume Mixer.
  */
 public class GlassClickGuiScreen extends Screen {
+    private float updChangelogRevealAnim = 0.0F;
+
     private static GlassClickGuiScreen instance;
 
     // =========================================================================
@@ -5145,6 +5149,30 @@ public class GlassClickGuiScreen extends Screen {
             }
             drawElasticPillImmediate(guiGraphics, cx + innerW - 26, sndY, 26, 14, uiSoundsToggleAnim, p2);
         }
+    
+        
+        // === ATTRIUM_UPDATER_OVERLAY_START ===
+        // Rendered LAST in renderClientBentoDashboard so it always floats ON TOP of Card 1 & Card 2
+        if (updChangelogRevealAnim > 0.04F) {
+            java.util.List<String> changes = AutoUpdater.getChangelogLines();
+            int lineCount = Math.min(3, changes.size());
+            int cardH = 24 + lineCount * 11;
+            int cardW = Math.min(fullW, 310);
+            int cardX = leftCardX + fullW - cardW;
+            int cardY = y0 + bannerH + 6 - Math.round(6.0F * (1.0F - updChangelogRevealAnim));
+            float ca = p0 * updChangelogRevealAnim;
+            HudManager.drawRoundedRect(guiGraphics, cardX - 1, cardY - 1, cardW + 2, cardH + 2, 11, multiplyAlpha(0x8800E5FF, ca));
+            HudManager.drawRoundedRect(guiGraphics, cardX, cardY, cardW, cardH, 10, multiplyAlpha(0xF510141F, ca));
+            Component hdr = Component.literal("What's New in v" + AutoUpdater.getLatestVersion()).withStyle(nunitoRegularStyle);
+            if (((int) (255 * ca)) > 10) {
+                guiGraphics.drawString(this.font, hdr, cardX + 10, cardY + 7, multiplyAlpha(0xFF00E5FF, ca), false);
+                for (int ci = 0; ci < lineCount; ci++) {
+                    Component lineComp = Component.literal("• " + changes.get(ci)).withStyle(nunitoRegularStyle);
+                    guiGraphics.drawString(this.font, lineComp, cardX + 10, cardY + 20 + ci * 11, multiplyAlpha(0xFFE5E7EB, ca), false);
+                }
+            }
+        }
+        // === ATTRIUM_UPDATER_OVERLAY_END ===
     }
 
     private void drawElasticPillImmediate(GuiGraphics guiGraphics, int x, int y, int w, int h, float anim, float alpha) {

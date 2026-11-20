@@ -119,6 +119,15 @@ public class NameProtectModule extends Module {
         return instance;
     }
 
+    public static String getActiveAlias() {
+        NameProtectModule mod = instance;
+        if (mod == null || mod.customAlias == null) {
+            return "";
+        }
+        String val = mod.customAlias.getValue();
+        return val != null ? val : "";
+    }
+
     public static boolean isActive() {
         NameProtectModule m = instance;
         return m != null && m.isEnabled();

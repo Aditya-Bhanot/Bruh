@@ -73,6 +73,11 @@ public final class TickPipelineManager {
         } catch (Throwable ignored) {
         }
 
+        try {
+            attrium.ru.api.module.impl.misc.ChatUtilsModule.onClientTick(mc);
+        } catch (Throwable ignored) {
+        }
+
         ActionManager.getInstance().onTick();
         TargetManager.updateOncePerTick(mc);
         EntityTargetScanner.ensureUpdated(mc, false);

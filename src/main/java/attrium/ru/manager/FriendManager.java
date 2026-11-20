@@ -577,11 +577,9 @@ public final class FriendManager {
         if (isFriend(uuid)) {
             removeFriend(uuid);
             SoundUtil.playTogglePop(false);
-            notifyClientChat(mc, "\u00A77[\u00A7bAttrium\u00A77] \u00A7cRemoved \u00A7f" + name + " \u00A7cfrom friends.");
         } else {
             addFriend(uuid, name, name);
             SoundUtil.playTogglePop(true);
-            notifyClientChat(mc, "\u00A77[\u00A7bAttrium\u00A77] \u00A7aAdded \u00A7b" + name + " \u00A7aas a friend.");
         }
     }
 
