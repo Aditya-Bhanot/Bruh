@@ -119,12 +119,17 @@ public class AutoCrystal extends Module {
     private final NumberSetting minTargetDamage = register(new NumberSetting(
             "Min Target Damage",
             "Minimum damage required to place or detonate a crystal near the target",
-            2.0D, 0.5D, 20.0D, 0.5D
+            1.0D, 0.0D, 20.0D, 0.5D
     ));
     private final BooleanSetting antiSuicide = register(new BooleanSetting(
             "Anti-Suicide",
             "Never place or detonate a crystal that would lethal-damage you",
             true
+    ));
+    private final BooleanSetting ignoreBots = register(new BooleanSetting(
+            "Ignore Bots",
+            "Skip players flagged by AntiBot (turn off if server players are ignored)",
+            false
     ));
     private final BooleanSetting crystalOptimizer = register(new BooleanSetting(
             "Crystal Optimizer",
@@ -383,7 +388,7 @@ public class AutoCrystal extends Module {
             return;
         }
 
-        if (!isHitCrystalEnabled() && !isTargetElevatedAbovePlayer(client, currentTarget)) {
+        if (!isTargetElevatedAbovePlayer(client, currentTarget)) {
             lockedBasePos = null;
             if (Boolean.TRUE.equals(swapBackToWeapon.getValue())) {
                 restoreHotbarSlotIfNeeded(client);
@@ -488,7 +493,7 @@ public class AutoCrystal extends Module {
     }
 
     private boolean isTargetElevatedAbovePlayer(Minecraft client, LivingEntity target) {
-        double requiredDelta = Math.max(0.0D, minTargetYDelta.getValue());
+        double requiredDelta = Math.max(0.50D, minTargetYDelta.getValue());
         double targetMinY = target.getBoundingBox().minY;
         double playerMinY = client.player.getBoundingBox().minY;
         return (targetMinY - playerMinY) >= (requiredDelta - 0.05D);
@@ -521,7 +526,7 @@ public class AutoCrystal extends Module {
             if (!isValidTarget(client, living)) {
                 continue;
             }
-            if (!isHitCrystalEnabled() && !isTargetElevatedAbovePlayer(client, living)) {
+            if (!isTargetElevatedAbovePlayer(client, living)) {
                 continue;
             }
             double dSq = client.player.distanceToSqr(living);
@@ -544,7 +549,7 @@ public class AutoCrystal extends Module {
             if (FriendManager.isFriend(player)) {
                 return false;
             }
-            if (AntiBot.shouldIgnore(player)) {
+            if (Boolean.TRUE.equals(ignoreBots.getValue()) && AntiBot.shouldIgnore(player)) {
                 return false;
             }
             return targets.isSelected("Players");
@@ -673,6 +678,11 @@ public class AutoCrystal extends Module {
         double hitY = basePos.getY() + 1.0D;
         double hitZ = basePos.getZ() + 0.5D;
 
+
+        // Never place a crystal above the enemy's feet (obsidian blocks feet blast -> 0 dmg)
+        if (hitY > target.getBoundingBox().minY + 0.15D) {
+            return -Float.MAX_VALUE;
+        }
         if (eyePos.distanceToSqr(hitX, hitY, hitZ) > rangeSq) {
             return -Float.MAX_VALUE;
         }
@@ -1089,7 +1099,7 @@ public class AutoCrystal extends Module {
         Difficulty difficulty = client.level.getDifficulty();
         if (entity instanceof Player) {
             rawDamage = switch (difficulty) {
-                case PEACEFUL -> 0.0F;
+                case PEACEFUL -> rawDamage;
                 case EASY -> Math.min(rawDamage / 2.0F + 1.0F, rawDamage);
                 case NORMAL -> rawDamage;
                 case HARD -> rawDamage * 1.5F;

@@ -500,8 +500,9 @@ public class GlassClickGuiScreen extends Screen {
             for (int i = 0; i < allModuleRows.length; i++) {
                 CachedModuleRow row = allModuleRows[i];
                 if (row != null && ("ClickGUI".equalsIgnoreCase(row.name) || "ClickGui".equalsIgnoreCase(row.name))) {
-                    row.boundKey = normalized;
-                    setModuleBindKey(row.module, normalized);
+                    // Keep legacy ClickGui module unbound so ONLY ClientThemeManager's bind opens ClickGUI
+                    row.boundKey = -1;
+                    setModuleBindKey(row.module, -1);
                     refreshModuleBindLabelIfNeeded(row, true);
                 }
             }
@@ -2916,6 +2917,7 @@ public class GlassClickGuiScreen extends Screen {
             } else {
                 return true;
             }
+            bentoCachedGuiKey = Integer.MIN_VALUE;
             syncClickGuiKeyToBindings(ClientThemeManager.getClickGuiKey());
             listeningForGuiKeybind = false;
             waitingForBindRelease = false;
@@ -2923,19 +2925,6 @@ public class GlassClickGuiScreen extends Screen {
             wasClickGuiKeyDownInGame = true;
             saveConfigNow();
             return true;
-        }
-
-        if (!isSearchBarFocused() && action == GLFW.GLFW_PRESS) {
-            int guiKey = ClientThemeManager.getClickGuiKey();
-            if (guiKey >= GLFW.GLFW_KEY_SPACE && guiKey <= GLFW.GLFW_KEY_LAST && key == guiKey) {
-                long now = System.currentTimeMillis();
-                if (now - lastClickGuiToggleMs > 180L) {
-                    lastClickGuiToggleMs = now;
-                    wasClickGuiKeyDownInGame = true;
-                    this.onClose();
-                    return true;
-                }
-            }
         }
 
         if (listeningForFriendBind) {
@@ -3288,9 +3277,30 @@ public class GlassClickGuiScreen extends Screen {
                 }
                 return;
             }
+            // Direct keyboard polling fallback (works even if GLFW key callback was overwritten)
+            for (int k = GLFW.GLFW_KEY_SPACE; k <= GLFW.GLFW_KEY_LAST; k++) {
+                if (GLFW.glfwGetKey(windowHandle, k) == GLFW.GLFW_PRESS) {
+                    if (k == GLFW.GLFW_KEY_ESCAPE || k == GLFW.GLFW_KEY_BACKSPACE || k == GLFW.GLFW_KEY_DELETE) {
+                        ClientThemeManager.setClickGuiKey(GLFW.GLFW_KEY_RIGHT_SHIFT);
+                        SoundUtil.playTogglePop(false);
+                    } else {
+                        ClientThemeManager.setClickGuiKey(k);
+                        SoundUtil.playTogglePop(true);
+                    }
+                    bentoCachedGuiKey = Integer.MIN_VALUE;
+                    syncClickGuiKeyToBindings(ClientThemeManager.getClickGuiKey());
+                    listeningForGuiKeybind = false;
+                    lastClickGuiToggleMs = System.currentTimeMillis();
+                    wasClickGuiKeyDownInGame = true;
+                    saveConfigNow();
+                    return;
+                }
+            }
+            // Mouse buttons Middle..8
             for (int btn = GLFW.GLFW_MOUSE_BUTTON_MIDDLE; btn <= GLFW.GLFW_MOUSE_BUTTON_8; btn++) {
                 if (GLFW.glfwGetMouseButton(windowHandle, btn) == GLFW.GLFW_PRESS) {
                     ClientThemeManager.setClickGuiKey(-100 - btn);
+                    bentoCachedGuiKey = Integer.MIN_VALUE;
                     syncClickGuiKeyToBindings(ClientThemeManager.getClickGuiKey());
                     listeningForGuiKeybind = false;
                     lastClickGuiToggleMs = System.currentTimeMillis();
@@ -5120,7 +5130,7 @@ public class GlassClickGuiScreen extends Screen {
             return;
         }
         int kbY = bottomYBase + 76;
-        if (leftClicked && isHovered(mouseX, mouseY, rcx, kbY - 4, rInnerW, 22)) {
+        if (leftClicked && isHovered(mouseX, mouseY, rcx - 4, kbY - 6, rInnerW + 8, 24)) {
             listeningForGuiKeybind = true;
             waitingForBindRelease = true;
             SoundUtil.playClick();
