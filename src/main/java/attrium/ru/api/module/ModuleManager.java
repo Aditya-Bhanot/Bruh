@@ -5,6 +5,8 @@ package attrium.ru.api.module;
 
 
 
+
+import attrium.ru.api.module.impl.misc.NameProtectModule;
 import attrium.ru.api.module.impl.visual.ArrayListModule;
 import attrium.ru.api.module.impl.visual.NotificationsModule;
 import attrium.ru.api.module.impl.visual.TargetHUDModule;
@@ -66,7 +68,6 @@ import attrium.ru.api.module.impl.visual.DashTrail;
 import attrium.ru.api.module.impl.visual.ESP;
 import attrium.ru.api.module.impl.visual.FogBlur;
 import attrium.ru.api.module.impl.visual.Hands;
-import attrium.ru.api.module.impl.visual.Hud;
 import attrium.ru.api.module.impl.visual.ItemPhysics;
 import attrium.ru.api.module.impl.visual.KillEffect;
 import attrium.ru.api.module.impl.visual.NoRender;
@@ -218,6 +219,7 @@ public final class ModuleManager {
         register(new Criticals());
         register(new HitBoxModule());
         register(new MaceTarget());
+        register(new NameProtectModule());
         register(new KeybindsModule());
         register(new TargetHUDModule());
         register(new NotificationsModule());
@@ -248,7 +250,6 @@ public final class ModuleManager {
         register(new ESP());
         register(new FogBlur());
         register(new Hands());
-        register(new Hud());
         register(new ItemPhysics());
         register(new KillEffect());
         register(new Particles());

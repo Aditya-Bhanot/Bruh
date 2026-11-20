@@ -204,7 +204,7 @@ public class ESP extends Module {
     private int lastObservedPlayerId = -1;
 
     public ESP() {
-        super("ESP", "Mobile-optimized 2D Screen-Space Box (with translucent fill) & native Shader Glow.", ModuleCategory.VISUAL);
+        super("ESP", "Highlights players and entities through walls", ModuleCategory.VISUAL);
         instance = this;
 
         // Conditional Slider Visibility: Completely hide Red, Green, and Blue unless "Custom" is selected

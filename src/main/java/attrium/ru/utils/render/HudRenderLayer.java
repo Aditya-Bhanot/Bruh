@@ -3,7 +3,6 @@ package attrium.ru.utils.render;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import attrium.ru.api.events.impl.DrawEvent;
-import attrium.ru.api.module.impl.visual.Hud;
 import attrium.ru.manager.Manager;
 import attrium.ru.utils.render.ui.Render2D;
 
@@ -57,19 +56,7 @@ public final class HudRenderLayer {
     }
 
     private static void renderHudOnly(Minecraft client, GuiGraphics graphics, float partialTick, DrawEvent.Layer layer) {
-        if (!shouldRender(client)) {
-            return;
-        }
-
-        Hud hud = Hud.getInstance();
-        if (hud == null || !hud.isEnabled()) {
-            return;
-        }
-
-        Render2D.beginFrame(graphics);
-        hud.renderHudLayer(new DrawEvent(graphics, partialTick, layer));
-        Render2D.flush();
-        graphics.nextStratum();
+        return;
     }
 
     private static void renderDrawEvent(GuiGraphics graphics, float partialTick, DrawEvent.Layer layer) {

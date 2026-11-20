@@ -41,6 +41,7 @@ import attrium.ru.api.settings.impl.BooleanSetting;
 import attrium.ru.api.settings.impl.ModeSetting;
 import attrium.ru.api.settings.impl.MultiModeSetting;
 import attrium.ru.api.settings.impl.NumberSetting;
+import attrium.ru.api.settings.impl.StringSetting;
 import attrium.ru.utils.sound.SoundUtil;
 
 import java.lang.reflect.Constructor;
@@ -64,7 +65,7 @@ public class GlassClickGuiScreen extends Screen {
     // =========================================================================
     // Premium Outline-Free Glassmorphism Palette
     // =========================================================================
-    public static final int COLOR_WINDOW_BG = 0xE0101218;           // Main 16px rounded window background
+    public static final int COLOR_WINDOW_BG = 0xD9101218;           // Main 16px rounded window background
     private static final int COLOR_SCREEN_BACKDROP = 0x6007080C;
     private static final int COLOR_TOP_NAV_BG = 0xD0171A24;
     private static final int COLOR_TOP_NAV_ACTIVE_PILL = 0xFF282C3C;
@@ -81,7 +82,11 @@ public class GlassClickGuiScreen extends Screen {
     // Module Rows: Transparent unless hovered; subtle dark 6px rounded rect on hover
     private static final int COLOR_ROW_EVEN_BG = 0x00151720;
     private static final int COLOR_ROW_ODD_BG = 0x00181B26;
-    private static final int COLOR_ROW_HOVER_BG = 0xD81C202E;
+    private static final int COLOR_ROW_IDLE_BG = 0x99161922;
+    private static final int COLOR_ROW_HOVER_BG = 0xCC1E2330;
+    private static final int COLOR_ACCENT_CYAN = 0xFF00E5FF;
+    private static final int COLOR_TEXT_OFF_SLATE = 0xFF9CA3AF;
+    private static final int COLOR_TEXT_DESC_PREMIUM = 0xFF8B94A5;
     private static final int COLOR_ICON_BOX_BG = 0xE0181B26;
     private static final int COLOR_ICON_BOX_HOVER_BG = 0xEE232738;
     private static final int COLOR_DRAWER_BG = 0xC8131620;
@@ -94,7 +99,7 @@ public class GlassClickGuiScreen extends Screen {
     private static final int COLOR_BIND_LISTENING = 0xFF4E4C78;
 
     // iOS Pill Toggle (24x12, Radius 6): Gray to Accent/White track with solid white circle knob
-    private static final int COLOR_TOGGLE_ON_BG = 0xFF6E75A8;
+    private static final int COLOR_TOGGLE_ON_BG = 0xFF00E5FF;
     private static final int COLOR_TOGGLE_OFF_BG = 0xFF2A2D3C;
     private static final int COLOR_TOGGLE_KNOB_ON = 0xFFFFFFFF;
     private static final int COLOR_TOGGLE_KNOB_OFF = 0xFFFFFFFF;
@@ -102,11 +107,11 @@ public class GlassClickGuiScreen extends Screen {
     // =========================================================================
     // Layout & Radius Constants
     // =========================================================================
-    private static final int WINDOW_CORNER_RADIUS = 16;             // 16px Main Container Radius
+    private static final int WINDOW_CORNER_RADIUS = 14;             // 16px Main Container Radius
     private static final int SEARCH_BAR_RADIUS = 10;                // 10px Search Bar Radius
     private static final int CATEGORY_PILL_RADIUS = 10;             // Full Pill Radius for Categories
     private static final int ICON_BOX_RADIUS = 8;                   // 8px Module Icon Square Radius
-    private static final int ROW_AND_SEARCH_RADIUS = 6;             // 6px Hovered Row Radius
+    private static final int ROW_AND_SEARCH_RADIUS = 8;             // 6px Hovered Row Radius
     private static final int TOGGLE_PILL_WIDTH = 24;                // 24px iOS Pill Switch Width
     private static final int TOGGLE_PILL_HEIGHT = 12;               // 12px iOS Pill Switch Height
     private static final int TOGGLE_PILL_RADIUS = 6;                // 6px iOS Pill Switch Radius
@@ -116,7 +121,7 @@ public class GlassClickGuiScreen extends Screen {
     private static final int BASE_WINDOW_HEIGHT = 390;
     private static final int HEADER_HEIGHT = 76;
     private static final int ROW_HEIGHT = 44;
-    private static final int ROW_GAP = 0;                           // Flush module rows (0px gap)
+    private static final int ROW_GAP = 4;                           // Flush module rows (0px gap)
     private static final int SETTING_ROW_HEIGHT = 26;
     private static final int LIST_SIDE_PADDING = 18;
 
@@ -279,9 +284,7 @@ public class GlassClickGuiScreen extends Screen {
             this.module = module;
             this.name = (name != null && !name.isEmpty()) ? name : "Module";
             this.nameLower = this.name.toLowerCase(Locale.ROOT);
-            this.description = (description != null && !description.isEmpty())
-                    ? description
-                    : "Configure " + this.name + " parameters";
+            this.description = resolvePremiumDescription(this.name, description);
             this.descriptionLower = this.description.toLowerCase(Locale.ROOT);
             this.nunitoTitle = Component.literal(this.name).withStyle(nunitoRegularStyle);
             this.nunitoRegularDesc = Component.literal(this.description).withStyle(nunitoRegularStyle);
@@ -355,6 +358,14 @@ public class GlassClickGuiScreen extends Screen {
     private int activeSliderTrackW = 1;
 
     private boolean wasLeftMouseDown = false;
+    private long lastClickTime = 0L;
+    private float topTabIndicatorX = -1.0F;
+    private float topTabIndicatorW = 0.0F;
+    private float catPillIndicatorX = -1.0F;
+    private float catPillIndicatorW = 0.0F;
+    private float scrollbarFadeAnim = 0.0F;
+    private long lastScrollActivityMs = 0L;
+    private Component emptySearchComponent = null;
     private boolean wasRightMouseDown = false;
     private long lastFrameTimeNs = 0L;
 
@@ -365,6 +376,7 @@ public class GlassClickGuiScreen extends Screen {
 
     // Friends Tab State (Index 3 — Replaced "Theme" Tab)
     private boolean friendInputFocused = false;
+    private CachedSettingEntry activeStringSettingEntry = null;
     private String friendInputText = "";
 
 
@@ -425,7 +437,7 @@ public class GlassClickGuiScreen extends Screen {
     }
 
     public boolean isSearchBarFocused() {
-        return searchFocused || friendInputFocused || bindingRow != null || listeningForFriendBind;
+        return searchFocused || friendInputFocused || activeStringSettingEntry != null || bindingRow != null || listeningForFriendBind;
     }
 
     public static Style getNunitoBoldStyle() {
@@ -677,6 +689,7 @@ public class GlassClickGuiScreen extends Screen {
 
     @Override
     public boolean mouseScrolled(double mouseX, double mouseY, double scrollX, double scrollY) {
+        lastScrollActivityMs = System.currentTimeMillis();
         onMouseScroll(scrollY);
         return true;
     }
@@ -1202,6 +1215,34 @@ public class GlassClickGuiScreen extends Screen {
 
     private void stepAnimationsAndScroll(float dt) {
         float scrollLerp = Mth.clamp(dt * 15.0F, 0.08F, 1.0F);
+        float pillSlideLerp = 1.0F - (float) Math.exp(-16.0F * dt);
+        if (activeTopTabIndex >= 0 && activeTopTabIndex < TOP_TABS.length && topTabW[activeTopTabIndex] > 0) {
+            float targetTX = topTabX[activeTopTabIndex];
+            float targetTW = topTabW[activeTopTabIndex];
+            if (topTabIndicatorX < 0.0F) {
+                topTabIndicatorX = targetTX;
+                topTabIndicatorW = targetTW;
+            } else {
+                topTabIndicatorX += (targetTX - topTabIndicatorX) * pillSlideLerp;
+                topTabIndicatorW += (targetTW - topTabIndicatorW) * pillSlideLerp;
+            }
+        }
+        if (activeCategoryIndex >= 0 && activeCategoryIndex < CATEGORY_PILLS.length && categoryPillW[activeCategoryIndex] > 0) {
+            float targetCX = categoryPillX[activeCategoryIndex];
+            float targetCW = categoryPillW[activeCategoryIndex];
+            if (catPillIndicatorX < 0.0F) {
+                catPillIndicatorX = targetCX;
+                catPillIndicatorW = targetCW;
+            } else {
+                catPillIndicatorX += (targetCX - catPillIndicatorX) * pillSlideLerp;
+                catPillIndicatorW += (targetCW - catPillIndicatorW) * pillSlideLerp;
+            }
+        }
+        boolean scrollActive = draggingScrollbar
+                || Math.abs(targetScrollOffset - scrollOffset) > 0.35F
+                || (System.currentTimeMillis() - lastScrollActivityMs) < 900L;
+        float targetSbAlpha = (maxScrollOffset > 1.0F && scrollActive) ? 1.0F : 0.0F;
+        scrollbarFadeAnim += (targetSbAlpha - scrollbarFadeAnim) * Mth.clamp(dt * 10.0F, 0.05F, 1.0F);
         if (Math.abs(targetScrollOffset - scrollOffset) > 0.1F) {
             scrollOffset += (targetScrollOffset - scrollOffset) * scrollLerp;
         } else {
@@ -1275,6 +1316,12 @@ public class GlassClickGuiScreen extends Screen {
 
     private void enqueueTopNavigationBar(float dt, int mouseX, int mouseY) {
         drawRoundedRect(navContainerX, navContainerY, navContainerW, navContainerH, 6, COLOR_TOP_NAV_BG);
+        if (topTabIndicatorW > 2.0F) {
+            int ix = Math.round(topTabIndicatorX);
+            int iw = Math.round(topTabIndicatorW);
+            drawRoundedRect(ix, navContainerY + 2, iw, navContainerH - 4, 5, COLOR_TOP_NAV_ACTIVE_PILL);
+            drawRoundedRect(ix + 6, navContainerY + navContainerH - 4, Math.max(4, iw - 12), 2, 1, COLOR_ACCENT_CYAN);
+        }
 
         float hoverStep = Mth.clamp(dt / 0.15F, 0.05F, 1.0F);
         int textY = navContainerY + (navContainerH - 8) / 2;
@@ -1286,9 +1333,7 @@ public class GlassClickGuiScreen extends Screen {
 
             topTabHoverAnim[i] = Mth.clamp(topTabHoverAnim[i] + (isHovered ? hoverStep : -hoverStep), 0.0F, 1.0F);
 
-            if (isActive) {
-                drawRoundedRect(tx, navContainerY + 2, tw, navContainerH - 4, 5, COLOR_TOP_NAV_ACTIVE_PILL);
-            } else if (topTabHoverAnim[i] > 0.01F) {
+            if (!isActive && topTabHoverAnim[i] > 0.01F) {
                 int lerpedHoverBg = lerpColor(0x00222530, 0x88262A38, topTabHoverAnim[i]);
                 drawRoundedRect(tx, navContainerY + 2, tw, navContainerH - 4, 5, lerpedHoverBg);
             }
@@ -1335,6 +1380,9 @@ public class GlassClickGuiScreen extends Screen {
 
         float hoverStep = Mth.clamp(dt / 0.15F, 0.05F, 1.0F);
         int pillTextY = searchBoxY + (searchBoxH - 8) / 2;
+        if (catPillIndicatorW > 2.0F) {
+            drawRoundedRect(Math.round(catPillIndicatorX), searchBoxY + 1, Math.round(catPillIndicatorW), searchBoxH - 2, CATEGORY_PILL_RADIUS, COLOR_ACCENT_CYAN);
+        }
         for (int i = 0; i < CATEGORY_PILLS.length; i++) {
             int px = categoryPillX[i];
             int pw = categoryPillW[i];
@@ -1345,11 +1393,7 @@ public class GlassClickGuiScreen extends Screen {
             boolean isHovered = isHovered(mouseX, mouseY, px, searchBoxY + 1, pw, searchBoxH - 2);
             categoryPillHoverAnim[i] = Mth.clamp(categoryPillHoverAnim[i] + (isHovered ? hoverStep : -hoverStep), 0.0F, 1.0F);
 
-            // Active category: Solid White background with Dark text.
-            // Inactive category: Transparent background (subtle alpha on hover) with White text.
-            if (isActive) {
-                drawRoundedRect(px, searchBoxY + 1, pw, searchBoxH - 2, CATEGORY_PILL_RADIUS, COLOR_PILL_ACTIVE_BG);
-            } else if (categoryPillHoverAnim[i] > 0.01F) {
+            if (!isActive && categoryPillHoverAnim[i] > 0.01F) {
                 int hoverPillBg = lerpColor(COLOR_PILL_INACTIVE_BG, COLOR_PILL_INACTIVE_HOVER, categoryPillHoverAnim[i]);
                 drawRoundedRect(px, searchBoxY + 1, pw, searchBoxH - 2, CATEGORY_PILL_RADIUS, hoverPillBg);
             }
@@ -1392,23 +1436,31 @@ public class GlassClickGuiScreen extends Screen {
 
             row.hoverAnim = Mth.clamp(row.hoverAnim + (rowHeaderHovered ? hoverStep : -hoverStep), 0.0F, 1.0F);
 
-            // Module Rows sit flush against each other with transparent backgrounds unless hovered:
-            // Draw a subtle dark rounded rectangle (6px radius) behind the row ONLY when hovered.
-            if (row.hoverAnim > 0.01F) {
-                int hoverBg = lerpColor(0x001C202E, COLOR_ROW_HOVER_BG, row.hoverAnim);
-                drawRoundedRect(listLeft, rowTop, rowWidth, row.cachedTotalHeight, ROW_AND_SEARCH_RADIUS, hoverBg);
+            boolean isEnabled = row.module.isEnabled();
+            // Dark glassmorphic card surface smoothly lerping from 0x99161922 (idle) to 0xCC1E2330 (hovered)
+            int cardBg = lerpColor(COLOR_ROW_IDLE_BG, COLOR_ROW_HOVER_BG, row.hoverAnim);
+            drawRoundedRect(listLeft, rowTop, rowWidth, row.cachedTotalHeight, ROW_AND_SEARCH_RADIUS, cardBg);
+
+            // Illuminated 3px rounded Aqua-Cyan (#00E5FF) indicator pill on left edge when enabled
+            if (row.toggleAnim > 0.02F && !isActionMacroRow(row)) {
+                int pillA = Mth.clamp(Math.round(row.toggleAnim * 255.0F), 0, 255);
+                int indicatorCol = (pillA << 24) | 0x00E5FF;
+                int indH = Math.max(8, Math.round((ROW_HEIGHT - 16) * row.toggleAnim));
+                int indY = rowTop + (ROW_HEIGHT - indH) / 2;
+                drawRoundedRect(listLeft + 2, indY, 3, indH, 1, indicatorCol);
             }
 
             // Far-Left Module Icon Badge: subtle dark rounded square (8px radius) + category icon
             int iconBoxY = rowTop + (ROW_HEIGHT - iconBoxSize) / 2;
             int iconBoxBg = lerpColor(COLOR_ICON_BOX_BG, COLOR_ICON_BOX_HOVER_BG, row.hoverAnim);
             drawRoundedRect(iconBoxX, iconBoxY, iconBoxSize, iconBoxSize, ICON_BOX_RADIUS, iconBoxBg);
-            int iconFg = row.module.isEnabled() ? COLOR_TEXT_BRIGHT_WHITE : COLOR_TEXT_DIMMED_GRAY;
+            int iconFg = isEnabled ? COLOR_ACCENT_CYAN : COLOR_TEXT_OFF_SLATE;
             enqueueCategoryIcon(row.categoryPillIndex, iconBoxX + 7, iconBoxY + 7, iconFg);
 
-            // Typography: Module Name (0xFFFFFF) & Module Description (0xAAAAAA) in Nunito
-            enqueueComponentText(row.nunitoTitle, textStartX, rowTop + 9, COLOR_TEXT_BRIGHT_WHITE);
-            enqueueComponentText(row.nunitoRegularDesc, textStartX, rowTop + 24, COLOR_TEXT_DIMMED_GRAY);
+            // Typography: Pure White when ON, Muted Slate (0xFF9CA3AF) when OFF; Description in 0xFF8B94A5
+            int titleColor = lerpColor(COLOR_TEXT_OFF_SLATE, COLOR_TEXT_BRIGHT_WHITE, isActionMacroRow(row) ? 1.0F : row.toggleAnim);
+            enqueueComponentText(row.nunitoTitle, textStartX, rowTop + 9, titleColor);
+            enqueueComponentText(row.nunitoRegularDesc, textStartX, rowTop + 24, COLOR_TEXT_DESC_PREMIUM);
 
             // Action Macro Check (AutoLunge): Hide the ON/OFF toggle pill and show only the Keybind pill + chevron
             boolean isActionMacro = isActionMacroRow(row);
@@ -1449,6 +1501,24 @@ public class GlassClickGuiScreen extends Screen {
             if (row.expandAnim > 0.02F && row.cachedVisibleSettingCount > 0) {
                 enqueueModuleSettingsDrawer(row, listLeft + 4, rowTop + ROW_HEIGHT, rowWidth - 8, mouseX, mouseY, mouseInsideViewport);
             }
+        }
+
+        if (filteredRowCount == 0) {
+            if (emptySearchComponent == null) {
+                emptySearchComponent = Component.literal("No modules match your search").withStyle(nunitoRegularStyle);
+            }
+            int msgW = this.font != null ? this.font.width(emptySearchComponent) : 140;
+            enqueueComponentText(emptySearchComponent, listLeft + (rowWidth - msgW) / 2, listTop + Math.max(24, listHeight / 3), 0xFF6B7280);
+        }
+
+        // Slim 3px rounded scrollbar thumb on right edge fading in while scrolling
+        if (maxScrollOffset > 1.0F && scrollbarFadeAnim > 0.02F) {
+            float visibleRatio = Mth.clamp((float) listHeight / (float) Math.max(1, totalContentHeight), 0.12F, 1.0F);
+            int thumbH = Math.max(22, Math.round(listHeight * visibleRatio));
+            int travel = Math.max(1, listHeight - thumbH);
+            int thumbY = listTop + Math.round((scrollOffset / maxScrollOffset) * travel);
+            int sbAlpha = Mth.clamp(Math.round(scrollbarFadeAnim * 200.0F), 0, 200);
+            drawRoundedRect(listRight - 4, thumbY, 3, thumbH, 1, (sbAlpha << 24) | 0x00E5FF);
         }
     }
 
@@ -1938,7 +2008,8 @@ public class GlassClickGuiScreen extends Screen {
                 || s instanceof BooleanSetting
                 || s instanceof NumberSetting
                 || s instanceof ModeSetting
-                || s instanceof MultiModeSetting) {
+                || s instanceof MultiModeSetting
+                || s instanceof StringSetting) {
             return false;
         }
         String clsName = s.getClass().getSimpleName().toLowerCase(Locale.ROOT);
@@ -2515,6 +2586,8 @@ public class GlassClickGuiScreen extends Screen {
                     } else if (s instanceof MultiModeSetting mms) {
                         type = 3;
                         opts = extractMultiModeOptions(mms);
+                    } else if (s instanceof StringSetting) {
+                        type = 4;
                     }
                     if (type != -1) {
                         list.add(new CachedSettingEntry(s, sName, type, step, opts));
@@ -2524,6 +2597,39 @@ public class GlassClickGuiScreen extends Screen {
         } catch (Throwable ignored) {
         }
         return list.toArray(new CachedSettingEntry[0]);
+    }
+
+    private static String resolvePremiumDescription(String moduleName, String fallback) {
+        if (moduleName != null) {
+            String key = moduleName.trim().toLowerCase(Locale.ROOT).replace(" ", "");
+            switch (key) {
+                case "silentaura", "killaura" -> { return "Automatically attacks nearby targets with silent rotations"; }
+                case "autocrystal" -> { return "Places and detonates End Crystals with damage prediction"; }
+                case "autototem" -> { return "Automatically equips Totems of Undying to your offhand"; }
+                case "lungehelper", "autolunge" -> { return "Executes timed weapon swaps for instant lunge momentum"; }
+                case "automace", "macetarget" -> { return "Switches to Mace mid-fall for high-damage smash hits"; }
+                case "autoelytra", "elytratarget" -> { return "Deploys and manages Elytra flight automatically in midair"; }
+                case "elytrahelper" -> { return "Swaps between Chestplate and Elytra on keybind"; }
+                case "aimassist" -> { return "Smoothly guides crosshair toward targets using legit curves"; }
+                case "esp" -> { return "Highlights players and entities through walls"; }
+                case "nametags" -> { return "Renders clear health, armor, and distance tags above players"; }
+                case "nohurtcam" -> { return "Removes camera shake when taking damage"; }
+                case "nameprotect" -> { return "Masks your username and friends across chat and HUD"; }
+                case "arraylist" -> { return "Displays active modules in an animated screen-edge list"; }
+                case "notifications" -> { return "Shows sleek toast alerts for toggles and combat events"; }
+                case "targethud" -> { return "Displays target health, armor durability, and totem pops"; }
+                case "keybinds" -> { return "Lists bound modules and their live toggle states"; }
+                case "ambience" -> { return "Customizes sky, fog, time, and weather atmosphere"; }
+            }
+        }
+        if (fallback != null && !fallback.trim().isEmpty()) {
+            String clean = fallback.trim();
+            if (clean.endsWith(".")) {
+                clean = clean.substring(0, clean.length() - 1);
+            }
+            return clean.length() > 64 ? clean.substring(0, 61) + "..." : clean;
+        }
+        return "Configure " + (moduleName != null ? moduleName : "module") + " settings";
     }
 
     private int mapCategoryToPillIndex(ModuleCategory cat) {
@@ -2672,6 +2778,62 @@ public class GlassClickGuiScreen extends Screen {
             return true;
         }
 
+        if (activeStringSettingEntry != null && activeStringSettingEntry.setting instanceof StringSetting activeSs) {
+            String curVal = activeSs.getValue() != null ? activeSs.getValue() : "";
+            if (key == GLFW.GLFW_KEY_BACKSPACE) {
+                if (!curVal.isEmpty()) {
+                    activeSs.setValue(curVal.substring(0, curVal.length() - 1));
+                }
+                return true;
+            }
+            if (key == GLFW.GLFW_KEY_DELETE) {
+                activeSs.setValue("");
+                return true;
+            }
+            if (key == GLFW.GLFW_KEY_ENTER || key == GLFW.GLFW_KEY_KP_ENTER || key == GLFW.GLFW_KEY_ESCAPE) {
+                activeStringSettingEntry = null;
+                return true;
+            }
+            if (key == GLFW.GLFW_KEY_SPACE) {
+                if (curVal.length() < activeSs.getMaxLength()) {
+                    lastKeyAppendedChar = ' ';
+                    lastKeyAppendTimeNs = System.nanoTime();
+                    activeSs.setValue(curVal + ' ');
+                }
+                return true;
+            }
+            if (key >= GLFW.GLFW_KEY_A && key <= GLFW.GLFW_KEY_Z && (mods & (GLFW.GLFW_MOD_CONTROL | GLFW.GLFW_MOD_ALT)) == 0) {
+                boolean shift = (mods & GLFW.GLFW_MOD_SHIFT) != 0;
+                char ch = (char) ((shift ? 'A' : 'a') + (key - GLFW.GLFW_KEY_A));
+                if (curVal.length() < activeSs.getMaxLength()) {
+                    lastKeyAppendedChar = ch;
+                    lastKeyAppendTimeNs = System.nanoTime();
+                    activeSs.setValue(curVal + ch);
+                }
+                return true;
+            }
+            if (key >= GLFW.GLFW_KEY_0 && key <= GLFW.GLFW_KEY_9 && (mods & (GLFW.GLFW_MOD_CONTROL | GLFW.GLFW_MOD_ALT)) == 0) {
+                char ch = (char) ('0' + (key - GLFW.GLFW_KEY_0));
+                if (curVal.length() < activeSs.getMaxLength()) {
+                    lastKeyAppendedChar = ch;
+                    lastKeyAppendTimeNs = System.nanoTime();
+                    activeSs.setValue(curVal + ch);
+                }
+                return true;
+            }
+            if (key == GLFW.GLFW_KEY_MINUS) {
+                boolean shift = (mods & GLFW.GLFW_MOD_SHIFT) != 0;
+                char ch = shift ? '_' : '-';
+                if (curVal.length() < activeSs.getMaxLength()) {
+                    lastKeyAppendedChar = ch;
+                    lastKeyAppendTimeNs = System.nanoTime();
+                    activeSs.setValue(curVal + ch);
+                }
+                return true;
+            }
+            return true;
+        }
+
         if (friendInputFocused && activeTopTabIndex == 3) {
             if (key == GLFW.GLFW_KEY_BACKSPACE) {
                 if (!friendInputText.isEmpty()) {
@@ -2799,6 +2961,23 @@ public class GlassClickGuiScreen extends Screen {
             appendConfigInputCharRaw(ch);
             return true;
         }
+        if (activeStringSettingEntry != null && activeStringSettingEntry.setting instanceof StringSetting charSs) {
+            if (codepoint < 32 || codepoint == 127) {
+                return true;
+            }
+            char ch = (char) codepoint;
+            long nowNs = System.nanoTime();
+            if (Character.toLowerCase(ch) == Character.toLowerCase(lastKeyAppendedChar)
+                    && (nowNs - lastKeyAppendTimeNs) < 25_000_000L) {
+                lastKeyAppendedChar = 0;
+                return true;
+            }
+            String curVal = charSs.getValue() != null ? charSs.getValue() : "";
+            if (curVal.length() < charSs.getMaxLength()) {
+                charSs.setValue(curVal + ch);
+            }
+            return true;
+        }
         if (friendInputFocused && activeTopTabIndex == 3) {
             if (codepoint < 32 || codepoint == 127) {
                 return true;
@@ -2923,8 +3102,19 @@ public class GlassClickGuiScreen extends Screen {
         pendingRightClickFromCallback = false;
         boolean leftClicked = (leftDown && !wasLeftMouseDown) || cbLeft;
         boolean rightClicked = (rightDown && !wasRightMouseDown) || cbRight;
-        wasLeftMouseDown = leftDown;
-        wasRightMouseDown = rightDown;
+        // Synchronize pressed state immediately when callback fired so next polled frame never double-triggers
+        wasLeftMouseDown = leftDown || cbLeft;
+        wasRightMouseDown = rightDown || cbRight;
+
+        if (leftClicked || rightClicked) {
+            long nowClickMs = System.currentTimeMillis();
+            if (nowClickMs - lastClickTime < 50L) {
+                leftClicked = false;
+                rightClicked = false;
+            } else {
+                lastClickTime = nowClickMs;
+            }
+        }
 
         if (HudManager.isLayoutEditorActive()) {
             if (leftClicked) {
@@ -3157,7 +3347,16 @@ public class GlassClickGuiScreen extends Screen {
                     return;
                 }
 
-                if ((leftClicked || rightClicked) && isHovered(mouseX, mouseY, toggleX - 2, toggleY - 2, toggleW + 4, toggleH + 4)) {
+                // Clicking the chevron icon expands/collapses settings even on left-click
+                if (leftClicked && row.settings.length > 0 && isHovered(mouseX, mouseY, rowChevronX - 4, rowTop + 8, 16, ROW_HEIGHT - 16)) {
+                    row.expanded = !row.expanded;
+                    layoutDirty = true;
+                    SoundUtil.playClick();
+                    return;
+                }
+
+                // Strict Button Separation: Left Click exclusively toggles module; Right Click exclusively toggles settings drawer
+                if (leftClicked) {
                     row.module.toggle();
                     saveConfigNow();
                     SoundUtil.playTogglePop(row.module.isEnabled());
@@ -3165,13 +3364,6 @@ public class GlassClickGuiScreen extends Screen {
                 }
 
                 if (rightClicked) {
-                    row.module.toggle();
-                    saveConfigNow();
-                    SoundUtil.playTogglePop(row.module.isEnabled());
-                    return;
-                }
-
-                if (leftClicked) {
                     if (row.settings.length > 0) {
                         row.expanded = !row.expanded;
                         layoutDirty = true;
@@ -3278,6 +3470,14 @@ public class GlassClickGuiScreen extends Screen {
                         return;
                     }
                     rightEdge = px - 3;
+                }
+            }
+            case 4 -> {
+                if (leftClicked) {
+                    activeStringSettingEntry = se;
+                    searchFocused = false;
+                    friendInputFocused = false;
+                    SoundUtil.playClick();
                 }
             }
         }
@@ -3744,6 +3944,8 @@ public class GlassClickGuiScreen extends Screen {
                         }
                     }
                     settingsObj.add(se.name, arr);
+                } else if (se.type == 4 && se.setting instanceof StringSetting ss) {
+                    settingsObj.addProperty(se.name, ss.getValue() != null ? ss.getValue() : "");
                 }
             }
             mObj.add("settings", settingsObj);
@@ -3837,6 +4039,8 @@ public class GlassClickGuiScreen extends Screen {
                                         toggleMultiModeOption(mms, opt);
                                     }
                                 }
+                            } else if (se.type == 4 && se.setting instanceof StringSetting ss && valEl.isJsonPrimitive()) {
+                                ss.setValue(valEl.getAsString());
                             }
                         } catch (Throwable ignored) {
                         }

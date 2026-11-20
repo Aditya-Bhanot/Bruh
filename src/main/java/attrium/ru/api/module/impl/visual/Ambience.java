@@ -241,7 +241,7 @@ public class Ambience extends Module {
     private float curFogEnd = 280.0F;
 
     public Ambience() {
-        super("Ambience", "Cinematic sky, fog, lighting, weather, and celestial atmosphere presets.", ModuleCategory.VISUAL);
+        super("Ambience", "Customizes sky, fog, time, and weather atmosphere", ModuleCategory.VISUAL);
         instance = this;
 
         this.customTime.visibleWhen(() -> "Custom".equalsIgnoreCase(this.timeMode.getValue()));

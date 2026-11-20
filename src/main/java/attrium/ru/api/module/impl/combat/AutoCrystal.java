@@ -206,7 +206,7 @@ public class AutoCrystal extends Module {
     private long nextAllowedBreakMs = 0L;
 
     public AutoCrystal() {
-        super("AutoCrystal", "Air-Juggle AutoCrystal (2-4 block hitbox clearance, <=1.5m offset, 14-16 CPS variance & 6s continuous slowdown)", ModuleCategory.COMBAT);
+        super("AutoCrystal", "Places and detonates End Crystals with damage prediction", ModuleCategory.COMBAT);
         instance = this;
     }
 

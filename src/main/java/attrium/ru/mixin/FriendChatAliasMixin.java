@@ -5,14 +5,15 @@ import net.minecraft.network.chat.Component;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.ModifyVariable;
+import attrium.ru.api.module.impl.misc.NameProtectModule;
 import attrium.ru.manager.FriendManager;
 
 /**
- * Conditional Chat Friend Aliasing Mixin (Minecraft 1.21.11 Official Mojang Mappings).
+ * Chat NameProtect & Friend Aliasing Mixin (Minecraft 1.21.11 Official Mojang Mappings).
  *
- * Hooks `ChatComponent#addMessage` (Mojang mapping for `ChatHud#addMessage`) and replaces
- * friend usernames with their configured alias ONLY when `NameProtect` / `Hide Nametag` is enabled,
- * using `FriendManager`'s bounded string cache for zero per-frame GC allocations.
+ * Intercepts both ChatComponent#addMessage overloads (system messages and signed player chat)
+ * and masks the local player's IGN + FriendManager allies while preserving original Style
+ * colors, hover events, and click events via NameProtectModule's bounded LRU cache.
  */
 @Mixin(ChatComponent.class)
 public class FriendChatAliasMixin {
@@ -23,7 +24,23 @@ public class FriendChatAliasMixin {
             argsOnly = true,
             require = 0
     )
-    private Component attrium$aliasFriendInChatMessage(Component message) {
+    private Component attrium$protectSimpleChatMessage(Component message) {
+        if (NameProtectModule.isActive()) {
+            return NameProtectModule.protectComponent(message);
+        }
+        return FriendManager.applyConditionalFriendAlias(message);
+    }
+
+    @ModifyVariable(
+            method = "addMessage(Lnet/minecraft/network/chat/Component;Lnet/minecraft/network/chat/MessageSignature;Lnet/minecraft/client/GuiMessageTag;)V",
+            at = @At("HEAD"),
+            argsOnly = true,
+            require = 0
+    )
+    private Component attrium$protectSignedChatMessage(Component message) {
+        if (NameProtectModule.isActive()) {
+            return NameProtectModule.protectComponent(message);
+        }
         return FriendManager.applyConditionalFriendAlias(message);
     }
 }

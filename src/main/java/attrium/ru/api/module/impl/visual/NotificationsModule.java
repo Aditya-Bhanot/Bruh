@@ -96,7 +96,7 @@ public class NotificationsModule extends HudModule {
     private String lastAnchorApplied = "Bottom Right";
 
     public NotificationsModule() {
-        super("Notifications", "Animated glassmorphic toast stack for toggles, totems, and friends.",
+        super("Notifications", "Shows sleek toast alerts for toggles and combat events",
                 "!", 0.985D, 0.935D, 217.0D, true);
         instance = this;
         for (int i = 0; i < MAX_POOL; i++) {

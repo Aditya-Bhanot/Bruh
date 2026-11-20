@@ -10,22 +10,13 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 import attrium.ru.api.drag.core.ElementManager;
-import attrium.ru.api.module.impl.visual.Hud;
 import attrium.ru.utils.render.ui.Render2DCoordinateSpace;
 
 @Mixin(ChatScreen.class)
 public abstract class ChatScreenMixin {
     @Inject(method = "mouseClicked", at = @At("HEAD"), cancellable = true, require = 0)
     private void attrium$dragMouseClicked(MouseButtonEvent event, boolean doubled, CallbackInfoReturnable<Boolean> cir) {
-        MouseButtonEvent dragEvent = attrium$toDragEvent(event);
-        Hud hud = Hud.getInstance();
-        if (hud != null && hud.handleMouseClicked(dragEvent, doubled)) {
-            cir.setReturnValue(true);
-            return;
-        }
-        if (ElementManager.getInstance().handleMouseClicked(dragEvent)) {
-            cir.setReturnValue(true);
-        }
+        return;
     }
 
     @Inject(method = "removed", at = @At("HEAD"), require = 0)

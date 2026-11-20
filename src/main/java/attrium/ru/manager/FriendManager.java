@@ -258,6 +258,7 @@ public final class FriendManager {
                 FRIENDS_BY_LOWER_NAME.put(clean.toLowerCase(Locale.ROOT), upgraded);
                 entriesDirty = true;
                 ALIASED_TEXT_CACHE.clear();
+        attrium.ru.api.module.impl.misc.NameProtectModule.invalidateCache();
                 saveToFile();
             }
             return true;
@@ -362,6 +363,7 @@ public final class FriendManager {
         FRIENDS_BY_LOWER_NAME.put(cleanUser.toLowerCase(Locale.ROOT), record);
         entriesDirty = true;
         ALIASED_TEXT_CACHE.clear();
+        attrium.ru.api.module.impl.misc.NameProtectModule.invalidateCache();
 
         syncLegacyFriendUtils(cleanUser, true);
         HudManager.pushNotification(cleanUser, "Added Friend", HudManager.TYPE_ENABLED);
@@ -384,6 +386,7 @@ public final class FriendManager {
         if (removed != null || removedAlias != null) {
             entriesDirty = true;
             ALIASED_TEXT_CACHE.clear();
+        attrium.ru.api.module.impl.misc.NameProtectModule.invalidateCache();
             if (removed != null) {
                 syncLegacyFriendUtils(removed.username, false);
                 HudManager.pushNotification(removed.username, "Removed Friend", HudManager.TYPE_DISABLED);
@@ -412,6 +415,7 @@ public final class FriendManager {
         if (removedAny) {
             entriesDirty = true;
             ALIASED_TEXT_CACHE.clear();
+        attrium.ru.api.module.impl.misc.NameProtectModule.invalidateCache();
             syncLegacyFriendUtils(clean, false);
             saveToFile();
         }
@@ -694,6 +698,7 @@ public final class FriendManager {
 
         if (ALIASED_TEXT_CACHE.size() >= MAX_ALIAS_CACHE_SIZE) {
             ALIASED_TEXT_CACHE.clear();
+        attrium.ru.api.module.impl.misc.NameProtectModule.invalidateCache();
         }
         ALIASED_TEXT_CACHE.put(rawText, result);
         return result;
@@ -777,6 +782,7 @@ public final class FriendManager {
             }
             entriesDirty = true;
             ALIASED_TEXT_CACHE.clear();
+        attrium.ru.api.module.impl.misc.NameProtectModule.invalidateCache();
         } catch (Throwable ignored) {
         }
     }

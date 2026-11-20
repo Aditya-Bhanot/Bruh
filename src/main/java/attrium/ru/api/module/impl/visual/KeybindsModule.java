@@ -65,7 +65,7 @@ public class KeybindsModule extends HudModule {
     private Component headerComp = null;
 
     public KeybindsModule() {
-        super("Keybinds", "Compact glassmorphic overlay of bound modules and live toggle states.",
+        super("Keybinds", "Lists bound modules and their live toggle states",
                 "K", 0.015D, 0.080D, 204.0D, true);
         instance = this;
         for (int i = 0; i < MAX_ENTRIES; i++) {

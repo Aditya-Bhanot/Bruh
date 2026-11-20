@@ -155,7 +155,7 @@ public class SilentAura extends Module {
     private boolean swappedWeaponThisSession = false;
 
     public SilentAura() {
-        super("SilentAura", "Standalone Silent/Legit Aura with direct entity scan & AutoMace slot mechanics", ModuleCategory.COMBAT);
+        super("SilentAura", "Automatically attacks nearby targets with silent rotations", ModuleCategory.COMBAT);
         instance = this;
     }
 

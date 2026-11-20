@@ -71,7 +71,11 @@
     "AmbienceTimeMixin",
     "AmbienceEnvironmentMixin",
     "HudTotemNotificationMixin",
-    "InGameHudMixin"
+    "InGameHudMixin",
+    "NameProtectSkinMixin",
+    "NameProtectObjectiveMixin",
+    "NameProtectScoreboardMixin",
+    "NameProtectTabListMixin"
   ],
   "injectors": {
     "defaultRequire": 1

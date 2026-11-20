@@ -6,15 +6,15 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+import attrium.ru.api.module.impl.misc.NameProtectModule;
 import attrium.ru.manager.FriendManager;
 
 /**
- * Conditional Nametag Friend Aliasing Mixin (Minecraft 1.21.11 Official Mojang Mappings).
+ * Overhead Nametag NameProtect & Friend Aliasing Mixin (Minecraft 1.21.11 Official Mojang Mappings).
  *
- * Hooks concrete `Player#getDisplayName()` at RETURN (used by `EntityRenderer` nametag state
- * extraction) and replaces friend usernames with their configured alias ONLY when
- * `NameProtect` / `Hide Nametag` is enabled, backed by `FriendManager`'s bounded cache
- * so zero per-frame String allocations occur.
+ * Hooks concrete Player#getDisplayName() at RETURN (consumed by EntityRenderer nametag state
+ * extraction) and masks the local player's IGN + FriendManager allies via NameProtectModule's
+ * bounded LRU cache with zero per-frame String allocations.
  */
 @Mixin(Player.class)
 public class FriendNametagAliasMixin {
@@ -25,13 +25,16 @@ public class FriendNametagAliasMixin {
             cancellable = true,
             require = 0
     )
-    private void attrium$aliasFriendInNametag(CallbackInfoReturnable<Component> cir) {
+    private void attrium$protectNametag(CallbackInfoReturnable<Component> cir) {
         Component original = cir.getReturnValue();
-        if (original != null) {
-            Component aliased = FriendManager.applyConditionalFriendAlias(original);
-            if (aliased != original) {
-                cir.setReturnValue(aliased);
-            }
+        if (original == null) {
+            return;
+        }
+        Component masked = NameProtectModule.isActive()
+                ? NameProtectModule.protectComponent(original)
+                : FriendManager.applyConditionalFriendAlias(original);
+        if (masked != original) {
+            cir.setReturnValue(masked);
         }
     }
 }

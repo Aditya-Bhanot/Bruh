@@ -109,7 +109,7 @@ public class ArrayListModule extends HudModule {
     private boolean poolReady = false;
 
     public ArrayListModule() {
-        super("ArrayList", "Cascading active modules with mode tags and smooth slide animations.",
+        super("ArrayList", "Displays active modules in an animated screen-edge list",
                 "A", 0.985D, 0.025D, 170.0D, true);
         instance = this;
     }

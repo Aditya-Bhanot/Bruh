@@ -142,7 +142,7 @@ public final class ElytraTarget extends Module {
     private int lastDisplayedToggleKey = Integer.MIN_VALUE;
 
     public ElytraTarget() {
-        super("AutoElytra", "GrimAC-safe fast legit hotbar Elytra controller (Elytra Mace & Rocket Mace).", ModuleCategory.MOVEMENT);
+        super("AutoElytra", "Deploys and manages Elytra flight automatically in midair", ModuleCategory.MOVEMENT);
         instance = this;
         savedToggleKeyCode.visibleWhen(() -> false);
         bindToggleKey.visibleWhen(() -> {

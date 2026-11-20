@@ -151,17 +151,15 @@ public final class HudManager {
     }
 
     public static void recordTotemPop(UUID uuid, String playerName) {
-        if (uuid == null) return;
-        int count = TOTEM_POPS.merge(uuid, 1, Integer::sum);
-        NotificationsModule.notifyTotemPop(playerName != null ? playerName : "Player", count);
+        TotemPopManager.recordPop(uuid, playerName);
     }
 
     public static int getTotemPopCount(UUID uuid) {
-        return uuid != null ? TOTEM_POPS.getOrDefault(uuid, 0) : 0;
+        return TotemPopManager.getPopCount(uuid);
     }
 
     public static void clearTotemPop(UUID uuid) {
-        if (uuid != null) TOTEM_POPS.remove(uuid);
+        TotemPopManager.clearPop(uuid);
     }
 
     // =========================================================================
@@ -191,6 +189,7 @@ public final class HudManager {
     // =========================================================================
     public static void renderInGameHud(GuiGraphics guiGraphics, DeltaTracker deltaTracker) {
         Minecraft mc = Minecraft.getInstance();
+        TotemPopManager.tickCleanup(mc);
         if (mc == null || mc.player == null || mc.level == null || mc.font == null || guiGraphics == null) {
             return;
         }

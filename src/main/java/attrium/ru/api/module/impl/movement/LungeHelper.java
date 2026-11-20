@@ -153,7 +153,7 @@ public class LungeHelper extends Module {
     private static final int MAX_PENDING_WAIT_TICKS = 25;
 
     public LungeHelper() {
-        super("LungeHelper", "Keybind-driven Spear-only legit Lunge swap macro for Minecraft 1.21.11", ModuleCategory.COMBAT);
+        super("LungeHelper", "Executes timed weapon swaps for instant lunge momentum", ModuleCategory.COMBAT);
         instance = this;
 
         this.savedLungeKeyCode.visibleWhen(() -> false);

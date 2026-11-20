@@ -9,11 +9,12 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
-import attrium.ru.manager.HudManager;
+import attrium.ru.manager.TotemPopManager;
 
 /**
- * Tracks live totem pop counts and dispatches Gold Shield HUD Notifications whenever
- * a player pops a Totem of Undying (entity event status byte 35).
+ * Listens to incoming ClientboundEntityEventPacket (Yarn: EntityStatusS2CPacket)
+ * where eventId == 35 (USE_TOTEM_OF_UNDYING), increments TotemPopManager's live
+ * pop counter, and dispatches Gold Shield HUD notifications.
  */
 @Mixin(ClientPacketListener.class)
 public class HudTotemNotificationMixin {
@@ -29,7 +30,7 @@ public class HudTotemNotificationMixin {
         }
         Entity entity = packet.getEntity(mc.level);
         if (entity instanceof Player player) {
-            HudManager.recordTotemPop(player.getUUID(), player.getName().getString());
+            TotemPopManager.recordPop(player.getUUID(), player.getName().getString());
         }
     }
 }

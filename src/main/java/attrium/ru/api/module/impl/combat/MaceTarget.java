@@ -955,7 +955,7 @@ public class MaceTarget extends Module {
     private int lastDisplayedToggleKey = Integer.MIN_VALUE;
 
     public MaceTarget() {
-        super("AutoMace", "GrimAC-safe fast legit hotbar AutoMace (Elytra Mace & Rocket Mace ready).", ModuleCategory.COMBAT);
+        super("AutoMace", "Switches to Mace mid-fall for high-damage smash hits", ModuleCategory.COMBAT);
         instance = this;
         savedToggleKeyCode.visibleWhen(() -> false);
         bindToggleKey.visibleWhen(() -> {

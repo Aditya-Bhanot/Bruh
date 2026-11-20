@@ -8,23 +8,29 @@ import net.minecraft.util.Mth;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
+import attrium.ru.api.module.impl.misc.NameProtectModule;
 import attrium.ru.api.settings.impl.BooleanSetting;
 import attrium.ru.api.settings.impl.ModeSetting;
 import attrium.ru.api.settings.impl.NumberSetting;
 import attrium.ru.manager.FriendManager;
 import attrium.ru.manager.HudManager;
 import attrium.ru.manager.TargetManager;
+import attrium.ru.manager.TotemPopManager;
 import attrium.ru.utils.render.AnimationUtil;
 
 /**
  * Standalone TargetHUD Module (Minecraft 1.21.11 Official Mojang Mappings).
  *
  * Features:
- *  - Card Styles: Modern Glass (160x48), Compact Pill (135x34), Minimalist
+ *  - Modern Glass card (165x54px, 10px radius, 0xD9111318), Compact Pill (138x36), Minimalist (145x34)
  *  - Color Themes: Aqua Cyan, Health Dynamic (Green -> Yellow -> Red), Cyber Gradient
  *  - Health Bar Modes: Ghost Trail (lagging easingHealth), Smooth Lerp, Instant
- *  - Show Armor & Pops (compact armor icons + live totem pop badge), Show Status Tag (WINNING / LOSING)
- *  - Hold Duration (0.5 - 3.0s) + live mc.player preview in HUD tab & Layout Editor
+ *  - Enemy Armor Row (Helmet -> Chestplate -> Leggings -> Boots at 0.75f scale) with
+ *    Durability Style: Mini Bar (2px bar shifting #00E5FF -> #FACC15 -> #EF4444), Percentage, or Icon Only
+ *  - Live Totem Pop Counter pill (4px radius, 0x33FFAA00, 0.65f Totem icon + Nunito Bold xN badge,
+ *    auto-hidden when pops == 0; mock "x2" + preview armor in HUD tab / Layout Editor)
+ *  - Zero per-frame ItemStack, collection, or String allocations for FoldCraftLauncher.
  */
 public class TargetHUDModule extends HudModule {
     private static volatile TargetHUDModule instance;
@@ -32,6 +38,12 @@ public class TargetHUDModule extends HudModule {
     private static final EquipmentSlot[] ARMOR_SLOTS = new EquipmentSlot[]{
             EquipmentSlot.HEAD, EquipmentSlot.CHEST, EquipmentSlot.LEGS, EquipmentSlot.FEET
     };
+
+    // Pre-allocated static ItemStacks & percentage Component cache (zero per-frame heap churn)
+    private static ItemStack cachedTotemStack = null;
+    private static ItemStack[] cachedPreviewArmor = null;
+    private static final Component[] PERCENT_COMPS = new Component[101];
+    private static boolean percentCompsInit = false;
 
     private final ModeSetting cardStyle = register(new ModeSetting(
             "Card Style",
@@ -54,15 +66,28 @@ public class TargetHUDModule extends HudModule {
             "Ghost Trail", "Smooth Lerp", "Instant"
     ));
 
-    private final BooleanSetting showArmorAndPops = register(new BooleanSetting(
-            "Show Armor & Pops",
-            "Displays compact armor icons and live totem pop count next to the target.",
+    private final BooleanSetting showArmor = register(new BooleanSetting(
+            "Show Armor",
+            "Renders target armor pieces (Helmet to Boots) above the health bar.",
+            true
+    ));
+
+    private final ModeSetting durabilityStyle = register(new ModeSetting(
+            "Durability Style",
+            "Mini Bar renders a 2px colored bar under each piece; Percentage shows numeric %; Icon Only hides durability.",
+            "Mini Bar",
+            "Mini Bar", "Percentage", "Icon Only"
+    ));
+
+    private final BooleanSetting totemPopCounter = register(new BooleanSetting(
+            "Totem Pop Counter",
+            "Displays a compact golden totem pop counter badge when the target has popped totems.",
             true
     ));
 
     private final BooleanSetting showStatusTag = register(new BooleanSetting(
             "Show Status Tag",
-            "Displays WINNING (cyan) or LOSING (coral) based on combined HP and armor.",
+            "Displays WIN (cyan) or LOSE (coral) based on combined HP and armor.",
             true
     ));
 
@@ -92,20 +117,47 @@ public class TargetHUDModule extends HudModule {
     private Component losingComp = null;
 
     public TargetHUDModule() {
-        super("TargetHUD", "Animated combat status card with avatar, ghost HP bar, armor & pops.",
+        super("TargetHUD", "Displays target health, armor durability, and totem pops",
                 "T", 0.560D, 0.620D, 217.0D, true);
         instance = this;
+        this.durabilityStyle.visibleWhen(() -> Boolean.TRUE.equals(showArmor.getValue()));
     }
 
     public static TargetHUDModule getInstance() {
         return instance;
     }
 
+    private static void ensureStaticCaches() {
+        if (cachedTotemStack == null) {
+            cachedTotemStack = new ItemStack(Items.TOTEM_OF_UNDYING);
+        }
+        if (cachedPreviewArmor == null) {
+            ItemStack helm = new ItemStack(Items.DIAMOND_HELMET);
+            helm.setDamageValue(Math.round(helm.getMaxDamage() * 0.08F)); // 92% -> cyan
+            ItemStack chest = new ItemStack(Items.DIAMOND_CHESTPLATE);
+            chest.setDamageValue(Math.round(chest.getMaxDamage() * 0.28F)); // 72% -> cyan
+            ItemStack legs = new ItemStack(Items.DIAMOND_LEGGINGS);
+            legs.setDamageValue(Math.round(legs.getMaxDamage() * 0.54F)); // 46% -> yellow
+            ItemStack boots = new ItemStack(Items.DIAMOND_BOOTS);
+            boots.setDamageValue(Math.round(boots.getMaxDamage() * 0.80F)); // 20% -> red
+            cachedPreviewArmor = new ItemStack[]{ helm, chest, legs, boots };
+        }
+        if (!percentCompsInit) {
+            percentCompsInit = true;
+            for (int i = 0; i <= 100; i++) {
+                PERCENT_COMPS[i] = Component.literal(i + "%").withStyle(HudManager.getRegularStyle());
+            }
+        }
+    }
+
     @Override
     public void renderHud(Minecraft mc, GuiGraphics guiGraphics, Font font,
                           int screenW, int screenH, float dt, float animClockSeconds,
                           boolean previewMode, boolean editorMode) {
-        Player candidate = resolveTarget(mc, previewMode || editorMode);
+        ensureStaticCaches();
+        boolean isPreview = previewMode || editorMode;
+
+        Player candidate = resolveTarget(mc, isPreview);
         long nowMs = System.currentTimeMillis();
         long holdMs = Math.round(Mth.clamp(holdDuration.getValue().floatValue(), 0.5F, 3.0F) * 1000.0F);
 
@@ -113,7 +165,10 @@ public class TargetHUDModule extends HudModule {
             trackedTarget = candidate;
             lastSeenMs = nowMs;
         } else if (trackedTarget != null) {
-            if (!trackedTarget.isAlive() || trackedTarget.isRemoved() || (nowMs - lastSeenMs) > holdMs) {
+            if (trackedTarget.isDeadOrDying() || !trackedTarget.isAlive() || trackedTarget.isRemoved()) {
+                TotemPopManager.clearPop(trackedTarget.getUUID());
+                trackedTarget = null;
+            } else if ((nowMs - lastSeenMs) > holdMs) {
                 trackedTarget = null;
             }
         }
@@ -123,8 +178,8 @@ public class TargetHUDModule extends HudModule {
         String style = cardStyle.getValue();
         boolean compact = "Compact Pill".equalsIgnoreCase(style);
         boolean minimal = "Minimalist".equalsIgnoreCase(style);
-        int cardW = compact ? 135 : (minimal ? 142 : 160);
-        int cardH = compact ? 34 : (minimal ? 32 : 48);
+        int cardW = compact ? 138 : (minimal ? 145 : 165);
+        int cardH = compact ? 36 : (minimal ? 34 : 54);
 
         float sc = getHudScale();
         int boxW = Math.round(cardW * sc);
@@ -170,7 +225,8 @@ public class TargetHUDModule extends HudModule {
             if (easingHealth < animatedHealth) easingHealth = animatedHealth;
         }
 
-        updateCachedTextComponents(mc, target, hp);
+        int displayPops = isPreview ? 2 : TotemPopManager.getPopCount(target.getUUID());
+        updateCachedTextComponents(mc, target, hp, displayPops);
 
         float alpha = Mth.clamp(popAnim, 0.0F, 1.0F);
         float popScale = sc * (0.85F + 0.15F * AnimationUtil.easeOutCubic(alpha));
@@ -193,19 +249,18 @@ public class TargetHUDModule extends HudModule {
         int mutedCol = AnimationUtil.withAlpha(0xFF9CA3AF, alpha);
 
         if (minimal) {
-            // Minimalist: name + HP/dist + sleek 5px bar
             if ((textCol >>> 24) > 8) {
                 guiGraphics.drawString(font, cachedNameComp, 9, 7, textCol, false);
                 int hpW = font.width(cachedHpComp);
                 guiGraphics.drawString(font, cachedHpComp, cardW - 9 - hpW, 7, barLeftCol, false);
             }
-            drawHealthBar(guiGraphics, 9, 21, cardW - 18, 5, 2, alpha, barMode, barLeftCol, barRightCol);
+            drawHealthBar(guiGraphics, 9, 22, cardW - 18, 5, 2, alpha, barMode, barLeftCol, barRightCol);
             guiGraphics.pose().popMatrix();
             return;
         }
 
-        // Player Avatar on left (28x28 for Modern Glass, 22x22 for Compact Pill)
-        int avatarSize = compact ? 22 : 28;
+        // Player Avatar on left (32x32 for Modern Glass, 24x24 for Compact Pill)
+        int avatarSize = compact ? 24 : 32;
         int avatarX = compact ? 6 : 9;
         int avatarY = (cardH - avatarSize) / 2;
 
@@ -221,64 +276,161 @@ public class TargetHUDModule extends HudModule {
         int infoX = avatarX + avatarSize + 8;
         int infoRight = cardW - 8;
 
-        if ((textCol >>> 24) > 8) {
-            guiGraphics.drawString(font, cachedNameComp, infoX, compact ? 6 : 7, textCol, false);
+        if (compact) {
+            if ((textCol >>> 24) > 8) {
+                guiGraphics.drawString(font, cachedNameComp, infoX, 6, textCol, false);
+                int hpW = font.width(cachedHpComp);
+                guiGraphics.drawString(font, cachedHpComp, infoRight - hpW, 6, barLeftCol, false);
+            }
+            if (Boolean.TRUE.equals(totemPopCounter.getValue()) && displayPops > 0 && cachedPopComp != null) {
+                drawTotemPopPill(guiGraphics, font, infoRight, 15, alpha);
+            }
+            drawHealthBar(guiGraphics, infoX, 26, infoRight - infoX, 5, 2, alpha, barMode, barLeftCol, barRightCol);
+            guiGraphics.pose().popMatrix();
+            return;
+        }
 
-            // Status Tag (WINNING / LOSING) on top-right
-            if (Boolean.TRUE.equals(showStatusTag.getValue()) && !compact) {
+        // =====================================================================
+        // Modern Glass (165 x 54px)
+        // Row 1 (y=7): Target Username (left) + HP Readout & optional WIN/LOSE tag (right)
+        // Row 2 (y=20): Armor Row (0.75f icons + Mini Bar/Percentage durability) + Totem Pop Pill (right)
+        // Row 3 (y=42): Dual-layer rounded Health Bar
+        // =====================================================================
+        if ((textCol >>> 24) > 8) {
+            guiGraphics.drawString(font, cachedNameComp, infoX, 7, textCol, false);
+
+            int rightCursor = infoRight;
+            if (Boolean.TRUE.equals(showStatusTag.getValue())) {
                 boolean winning = isPlayerWinning(mc.player, target);
                 Component statusComp = winning ? winningComp : losingComp;
                 int statusCol = AnimationUtil.withAlpha(winning ? 0xFF00E5FF : 0xFFFF5C77, alpha);
                 int sw = font.width(statusComp);
-                guiGraphics.drawString(font, statusComp, infoRight - sw, 7, statusCol, false);
+                rightCursor -= sw;
+                guiGraphics.drawString(font, statusComp, rightCursor, 7, statusCol, false);
+                rightCursor -= 5;
             }
-
-            // Second row: HP + Distance (and Pops badge if enabled)
-            int row2Y = compact ? 15 : 18;
-            guiGraphics.drawString(font, cachedHpComp, infoX, row2Y, barLeftCol, false);
             int hpW = font.width(cachedHpComp);
-
-            if (!compact && Boolean.TRUE.equals(showArmorAndPops.getValue()) && cachedPopComp != null) {
-                int popW = font.width(cachedPopComp);
-                if (infoX + hpW + 6 + popW <= infoRight) {
-                    guiGraphics.drawString(font, cachedPopComp, infoRight - popW, row2Y,
-                            AnimationUtil.withAlpha(0xFFFFC94A, alpha), false);
-                }
-            } else {
-                int distW = font.width(cachedDistComp);
-                if (infoX + hpW + 5 + distW <= infoRight) {
-                    guiGraphics.drawString(font, cachedDistComp, infoRight - distW, row2Y, mutedCol, false);
-                }
+            if (rightCursor - hpW > infoX + 40) {
+                guiGraphics.drawString(font, cachedHpComp, rightCursor - hpW, 7, barLeftCol, false);
             }
         }
 
-        // Compact Armor Icons in Modern Glass mode (above/right of bar or compact row)
-        if (!compact && Boolean.TRUE.equals(showArmorAndPops.getValue())) {
-            int armorX = infoX;
-            int armorY = 27;
-            for (int i = 0; i < ARMOR_SLOTS.length; i++) {
-                ItemStack stack = target.getItemBySlot(ARMOR_SLOTS[i]);
-                if (stack != null && !stack.isEmpty()) {
-                    guiGraphics.pose().pushMatrix();
-                    guiGraphics.pose().translate(armorX, armorY);
-                    guiGraphics.pose().scale(0.56F, 0.56F);
-                    guiGraphics.renderItem(stack, 0, 0);
-                    guiGraphics.pose().popMatrix();
-                    armorX += 10;
-                }
-            }
-            if ((mutedCol >>> 24) > 8) {
-                int distW = font.width(cachedDistComp);
-                guiGraphics.drawString(font, cachedDistComp, infoRight - distW, 28, mutedCol, false);
-            }
+        // Row 2: Armor Row (Helmet -> Chestplate -> Leggings -> Boots) + Totem Pop Badge
+        boolean armorEnabled = Boolean.TRUE.equals(showArmor.getValue());
+        if (armorEnabled) {
+            renderArmorRow(guiGraphics, font, target, infoX, 20, alpha, isPreview);
+        } else if ((mutedCol >>> 24) > 8) {
+            guiGraphics.drawString(font, cachedDistComp, infoX, 23, mutedCol, false);
         }
 
-        // Dual-Layer Rounded Health Bar
-        int barY = compact ? 25 : 38;
-        int barH = compact ? 5 : 6;
-        drawHealthBar(guiGraphics, infoX, barY, infoRight - infoX, barH, 3, alpha, barMode, barLeftCol, barRightCol);
+        if (Boolean.TRUE.equals(totemPopCounter.getValue()) && displayPops > 0 && cachedPopComp != null) {
+            drawTotemPopPill(guiGraphics, font, infoRight, 20, alpha);
+        } else if (armorEnabled && (mutedCol >>> 24) > 8) {
+            int distW = font.width(cachedDistComp);
+            guiGraphics.drawString(font, cachedDistComp, infoRight - distW, 23, mutedCol, false);
+        }
+
+        // Row 3: Dual-Layer Rounded Health Bar
+        drawHealthBar(guiGraphics, infoX, 42, infoRight - infoX, 6, 3, alpha, barMode, barLeftCol, barRightCol);
 
         guiGraphics.pose().popMatrix();
+    }
+
+    private void renderArmorRow(GuiGraphics guiGraphics, Font font, Player target,
+                                int startX, int startY, float alpha, boolean isPreview) {
+        String durMode = durabilityStyle.getValue();
+        boolean showMiniBar = "Mini Bar".equalsIgnoreCase(durMode);
+        boolean showPct = "Percentage".equalsIgnoreCase(durMode);
+
+        // In preview mode, if the local player isn't wearing any armor, show cached preview diamond armor
+        boolean usePreviewFallback = false;
+        if (isPreview) {
+            boolean anyWorn = false;
+            for (int i = 0; i < ARMOR_SLOTS.length; i++) {
+                ItemStack st = target.getItemBySlot(ARMOR_SLOTS[i]);
+                if (st != null && !st.isEmpty()) {
+                    anyWorn = true;
+                    break;
+                }
+            }
+            usePreviewFallback = !anyWorn;
+        }
+
+        int cursorX = startX;
+        for (int i = 0; i < ARMOR_SLOTS.length; i++) {
+            ItemStack stack = usePreviewFallback ? cachedPreviewArmor[i] : target.getItemBySlot(ARMOR_SLOTS[i]);
+            if (stack == null || stack.isEmpty()) {
+                continue;
+            }
+
+            // Render item icon at 0.75f scale (12x12px)
+            guiGraphics.pose().pushMatrix();
+            guiGraphics.pose().translate(cursorX, startY);
+            guiGraphics.pose().scale(0.75F, 0.75F);
+            guiGraphics.renderItem(stack, 0, 0);
+            guiGraphics.pose().popMatrix();
+
+            // Render durability indicator directly beneath the 12x12 icon
+            if (stack.isDamageableItem() && stack.getMaxDamage() > 0) {
+                int maxD = stack.getMaxDamage();
+                int remD = Mth.clamp(maxD - stack.getDamageValue(), 0, maxD);
+                float ratio = (float) remD / (float) maxD;
+                int durCol = AnimationUtil.withAlpha(resolveDurabilityColor(ratio), alpha);
+
+                if (showMiniBar) {
+                    int barX = cursorX;
+                    int barY = startY + 13;
+                    int barW = 12;
+                    HudManager.drawRoundedRect(guiGraphics, barX, barY, barW, 2, 1,
+                            AnimationUtil.withAlpha(0x66000000, alpha));
+                    int fillW = Math.max(2, Math.round(barW * ratio));
+                    HudManager.drawRoundedRect(guiGraphics, barX, barY, fillW, 2, 1, durCol);
+                } else if (showPct && (durCol >>> 24) > 8) {
+                    int pct = Mth.clamp(Math.round(ratio * 100.0F), 0, 100);
+                    Component pctComp = PERCENT_COMPS[pct];
+                    guiGraphics.pose().pushMatrix();
+                    guiGraphics.pose().translate(cursorX, startY + 12.5F);
+                    guiGraphics.pose().scale(0.58F, 0.58F);
+                    guiGraphics.drawString(font, pctComp, 0, 0, durCol, false);
+                    guiGraphics.pose().popMatrix();
+                }
+            }
+
+            cursorX += 14;
+        }
+    }
+
+    private void drawTotemPopPill(GuiGraphics guiGraphics, Font font, int rightEdge, int y, float alpha) {
+        if (cachedPopComp == null || cachedTotemStack == null) {
+            return;
+        }
+        int textW = font.width(cachedPopComp);
+        int iconW = 11;
+        int pillW = iconW + textW + 7;
+        int pillH = 14;
+        int pillX = rightEdge - pillW;
+
+        int pillBg = AnimationUtil.withAlpha(0x33FFAA00, alpha);
+        HudManager.drawRoundedRect(guiGraphics, pillX, y, pillW, pillH, 4, pillBg);
+
+        // Mini Totem icon at 0.65f scale (~10x10px)
+        guiGraphics.pose().pushMatrix();
+        guiGraphics.pose().translate(pillX + 2.0F, y + 2.0F);
+        guiGraphics.pose().scale(0.65F, 0.65F);
+        guiGraphics.renderItem(cachedTotemStack, 0, 0);
+        guiGraphics.pose().popMatrix();
+
+        int badgeTextCol = AnimationUtil.withAlpha(0xFFFFD54F, alpha);
+        if ((badgeTextCol >>> 24) > 8) {
+            guiGraphics.drawString(font, cachedPopComp, pillX + iconW + 2, y + 3, badgeTextCol, false);
+        }
+    }
+
+    private static int resolveDurabilityColor(float ratio) {
+        if (ratio >= 0.50F) {
+            return AnimationUtil.lerpColor(0xFFFACC15, 0xFF00E5FF, (ratio - 0.50F) * 2.0F);
+        }
+        return AnimationUtil.lerpColor(0xFFEF4444, 0xFFFACC15, Mth.clamp(ratio * 2.0F, 0.0F, 1.0F));
     }
 
     private void drawHealthBar(GuiGraphics guiGraphics, int x, int y, int w, int h, int radius,
@@ -299,23 +451,24 @@ public class TargetHUDModule extends HudModule {
         }
     }
 
-    private void updateCachedTextComponents(Minecraft mc, Player target, float hp) {
+    private void updateCachedTextComponents(Minecraft mc, Player target, float hp, int displayPops) {
         if (winningComp == null) {
             winningComp = Component.literal("WIN").withStyle(HudManager.getBoldStyle());
             losingComp = Component.literal("LOSE").withStyle(HudManager.getBoldStyle());
         }
 
         String rawName = target.getName().getString();
-        if (!rawName.equals(cachedName) || cachedNameComp == null) {
-            cachedName = rawName;
-            String clipped = rawName.length() > 11 ? rawName.substring(0, 11) : rawName;
+        String safeName = NameProtectModule.isActive() ? NameProtectModule.protect(rawName) : rawName;
+        if (!safeName.equals(cachedName) || cachedNameComp == null) {
+            cachedName = safeName;
+            String clipped = safeName.length() > 11 ? safeName.substring(0, 11) : safeName;
             cachedNameComp = Component.literal(clipped).withStyle(HudManager.getBoldStyle());
         }
 
         int hpTenths = Math.round(hp * 10.0F);
         if (hpTenths != cachedHpTenths || cachedHpComp == null) {
             cachedHpTenths = hpTenths;
-            cachedHpComp = Component.literal((hpTenths / 10) + "." + (hpTenths % 10) + " HP")
+            cachedHpComp = Component.literal((hpTenths / 10) + "." + (hpTenths % 10))
                     .withStyle(HudManager.getRegularStyle());
         }
 
@@ -329,11 +482,10 @@ public class TargetHUDModule extends HudModule {
                     .withStyle(HudManager.getRegularStyle());
         }
 
-        int pops = HudManager.getTotemPopCount(target.getUUID());
-        if (pops != cachedPopCount) {
-            cachedPopCount = pops;
-            cachedPopComp = pops > 0
-                    ? Component.literal("Pops: " + pops).withStyle(HudManager.getRegularStyle())
+        if (displayPops != cachedPopCount) {
+            cachedPopCount = displayPops;
+            cachedPopComp = displayPops > 0
+                    ? Component.literal("\u00D7" + displayPops).withStyle(HudManager.getBoldStyle())
                     : null;
         }
     }
