@@ -33,20 +33,20 @@ public final class ConfigManager {
 
     public ConfigManager(ModuleManager moduleManager) {
         this.systemDirectory = systemDirectory();
-        this.modulesFile = systemDirectory.resolve("modules" + CONFIG_EXTENSION);
+        this.modulesFile = systemDirectory.resolve("acc.json");
         this.moduleStorage = new ModuleConfigStorage(moduleManager);
     }
 
     public static Path rootDirectory() {
-        return FabricLoader.getInstance().getGameDir().resolve(ROOT_FOLDER);
+        return FabricLoader.getInstance().getConfigDir();
     }
 
     public static Path userConfigDirectory() {
-        return rootDirectory().resolve(USER_CONFIG_FOLDER);
+        return FabricLoader.getInstance().getConfigDir();
     }
 
     public static Path systemDirectory() {
-        return rootDirectory().resolve(SYSTEM_FOLDER);
+        return FabricLoader.getInstance().getConfigDir();
     }
 
     public static Path legacyDirectory() {

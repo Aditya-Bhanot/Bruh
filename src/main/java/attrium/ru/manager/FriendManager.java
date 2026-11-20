@@ -1,5 +1,7 @@
 package attrium.ru.manager;
 
+
+import net.fabricmc.loader.api.FabricLoader;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
@@ -723,9 +725,7 @@ public final class FriendManager {
     // =========================================================================
 
     private static File resolveFriendsStorageFile() {
-        Minecraft mc = Minecraft.getInstance();
-        File base = (mc != null && mc.gameDirectory != null) ? mc.gameDirectory : new File(".");
-        return new File(base, "friends.json");
+        return FabricLoader.getInstance().getConfigDir().resolve("acf.json").toFile();
     }
 
     public static synchronized void saveToFile() {
