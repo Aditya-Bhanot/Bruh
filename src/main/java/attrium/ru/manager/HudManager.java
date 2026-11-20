@@ -587,19 +587,7 @@ public final class HudManager {
         long winHandle = mc.getWindow().handle();
         if (winHandle == 0L) return;
 
-        // 1. Poll custom ClickGUI keybind when no screen is open
-        int guiKey = ClientThemeManager.getClickGuiKey();
-        if (mc.screen == null && guiKey >= GLFW.GLFW_KEY_SPACE && guiKey <= GLFW.GLFW_KEY_LAST) {
-            boolean down = GLFW.glfwGetKey(winHandle, guiKey) == GLFW.GLFW_PRESS;
-            if (down && !wasCustomGuiKeyDown) {
-                wasCustomGuiKeyDown = true;
-                mc.setScreen(GlassClickGuiScreen.getInstance());
-                return;
-            }
-            wasCustomGuiKeyDown = down;
-        } else {
-            wasCustomGuiKeyDown = false;
-        }
+        // ClickGUI keybind polling & instant GLFW callbacks are handled centrally in GlassClickGuiScreen.
 
         // 2. Render & interact with draggable Floating Touch Button ("A" pill)
         if (!ClientThemeManager.isFloatingButtonEnabled() || mc.screen != null) {
@@ -654,7 +642,7 @@ public final class HudManager {
             double distSq = (guiX - floatingBtnDownX) * (guiX - floatingBtnDownX)
                     + (guiY - floatingBtnDownY) * (guiY - floatingBtnDownY);
             if (distSq <= 25.0D && (System.currentTimeMillis() - floatingBtnDownMs) < 450L) {
-                mc.setScreen(GlassClickGuiScreen.getInstance());
+                GlassClickGuiScreen.openClickGuiFromBind(mc);
             }
         }
         wasFloatingBtnMouseDown = lDown;

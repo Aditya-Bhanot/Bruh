@@ -171,7 +171,13 @@ public final class ClientThemeManager {
     }
 
     public static void setClickGuiKey(int key) {
-        clickGuiKey = (key <= 0 || key == GLFW.GLFW_KEY_UNKNOWN) ? GLFW.GLFW_KEY_RIGHT_SHIFT : key;
+        if (key < -1) {
+            clickGuiKey = key;
+        } else if (key >= GLFW.GLFW_KEY_SPACE && key <= GLFW.GLFW_KEY_LAST) {
+            clickGuiKey = key;
+        } else {
+            clickGuiKey = GLFW.GLFW_KEY_RIGHT_SHIFT;
+        }
     }
 
     public static boolean isFloatingButtonEnabled() {

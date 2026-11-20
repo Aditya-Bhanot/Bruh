@@ -1,9 +1,8 @@
 package attrium.ru.screens;
 
-
-import attrium.ru.manager.AutoUpdater;
 import com.mojang.blaze3d.platform.InputConstants;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.KeyMapping;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -378,6 +377,8 @@ public class GlassClickGuiScreen extends Screen {
     private float guiScalePillX = -1.0F;
     private float guiScalePillW = 0.0F;
     private boolean listeningForGuiKeybind = false;
+    private static boolean wasClickGuiKeyDownInGame = false;
+    private static long lastClickGuiToggleMs = 0L;
     private boolean draggingPanelOpacitySlider = false;
     private boolean draggingFloatingSizeSlider = false;
     private int clientOpacitySliderX = 0;
@@ -475,6 +476,58 @@ public class GlassClickGuiScreen extends Screen {
             instance = new GlassClickGuiScreen();
         }
         return instance;
+    }
+
+    public static void openClickGuiFromBind(Minecraft mc) {
+        if (mc == null || mc.player == null || mc.level == null) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (now - lastClickGuiToggleMs < 180L) {
+            return;
+        }
+        lastClickGuiToggleMs = now;
+        wasClickGuiKeyDownInGame = true;
+        GlassClickGuiScreen gui = getInstance();
+        mc.setScreen(gui);
+    }
+
+    private void syncClickGuiKeyToBindings(int key) {
+        int normalized = (key < -1 || (key >= GLFW.GLFW_KEY_SPACE && key <= GLFW.GLFW_KEY_LAST))
+                ? key : GLFW.GLFW_KEY_RIGHT_SHIFT;
+        if (allModuleRows != null) {
+            for (int i = 0; i < allModuleRows.length; i++) {
+                CachedModuleRow row = allModuleRows[i];
+                if (row != null && ("ClickGUI".equalsIgnoreCase(row.name) || "ClickGui".equalsIgnoreCase(row.name))) {
+                    row.boundKey = normalized;
+                    setModuleBindKey(row.module, normalized);
+                    refreshModuleBindLabelIfNeeded(row, true);
+                }
+            }
+        }
+        try {
+            Minecraft mc = Minecraft.getInstance();
+            if (mc != null && mc.options != null && mc.options.keyMappings != null) {
+                boolean changed = false;
+                for (KeyMapping km : mc.options.keyMappings) {
+                    if (km == null) continue;
+                    String kmName = km.getName();
+                    if (kmName == null) continue;
+                    String low = kmName.toLowerCase(Locale.ROOT);
+                    if (low.contains("clickgui") || (low.contains("attrium") && low.contains("gui"))) {
+                        InputConstants.Key icKey = (normalized < -1)
+                                ? InputConstants.Type.MOUSE.getOrCreate(-100 - normalized)
+                                : InputConstants.Type.KEYSYM.getOrCreate(normalized);
+                        km.setKey(icKey);
+                        changed = true;
+                    }
+                }
+                if (changed) {
+                    KeyMapping.resetMapping();
+                }
+            }
+        } catch (Throwable ignored) {
+        }
     }
 
     public boolean isSearchBarFocused() {
@@ -752,6 +805,7 @@ public class GlassClickGuiScreen extends Screen {
                 gui.allModuleRows[i].wasKeyDownInGame = false;
             }
             // Allow AutoLunge to restore previousSlot if a GUI screen was opened while holding the bind
+            wasClickGuiKeyDownInGame = true;
             LungeHelper.tickMacroGlobal(mc, LungeHelper.getMacroBoundKey());
             return;
         }
@@ -762,6 +816,26 @@ public class GlassClickGuiScreen extends Screen {
         }
 
         long nowMs = System.currentTimeMillis();
+
+        // Poll ClickGUI keybind (supports keyboard keys & mouse buttons)
+        int clickGuiKey = ClientThemeManager.getClickGuiKey();
+        boolean guiKeyDown;
+        if (clickGuiKey < -1) {
+            int btn = -100 - clickGuiKey;
+            guiKeyDown = btn >= 0 && btn <= GLFW.GLFW_MOUSE_BUTTON_LAST
+                    && GLFW.glfwGetMouseButton(windowHandle, btn) == GLFW.GLFW_PRESS;
+        } else {
+            guiKeyDown = clickGuiKey >= GLFW.GLFW_KEY_SPACE && clickGuiKey <= GLFW.GLFW_KEY_LAST
+                    && (InputConstants.isKeyDown(mc.getWindow(), clickGuiKey)
+                    || GLFW.glfwGetKey(windowHandle, clickGuiKey) == GLFW.GLFW_PRESS);
+        }
+        if (guiKeyDown && !wasClickGuiKeyDownInGame) {
+            wasClickGuiKeyDownInGame = true;
+            openClickGuiFromBind(mc);
+            return;
+        }
+        wasClickGuiKeyDownInGame = guiKeyDown;
+
         boolean lungeRowHandled = false;
 
         for (int i = 0; i < gui.allModuleRows.length; i++) {
@@ -839,6 +913,11 @@ public class GlassClickGuiScreen extends Screen {
             return;
         }
         ensureModuleCacheReady();
+        int clickGuiKey = ClientThemeManager.getClickGuiKey();
+        if (clickGuiKey >= GLFW.GLFW_KEY_SPACE && clickGuiKey <= GLFW.GLFW_KEY_LAST && key == clickGuiKey) {
+            openClickGuiFromBind(mc);
+            return;
+        }
         long nowMs = System.currentTimeMillis();
         for (int i = 0; i < allModuleRows.length; i++) {
             CachedModuleRow row = allModuleRows[i];
@@ -2221,6 +2300,10 @@ public class GlassClickGuiScreen extends Screen {
             }
         }
         setModuleBindKey(row.module, normalized);
+        if ("ClickGUI".equalsIgnoreCase(row.name) || "ClickGui".equalsIgnoreCase(row.name)) {
+            ClientThemeManager.setClickGuiKey(normalized);
+            syncClickGuiKeyToBindings(ClientThemeManager.getClickGuiKey());
+        }
         refreshModuleBindLabelIfNeeded(row, true);
         saveConfigNow();
     }
@@ -2806,17 +2889,38 @@ public class GlassClickGuiScreen extends Screen {
         }
 
         if (listeningForGuiKeybind) {
+            if (action != GLFW.GLFW_PRESS) {
+                return true;
+            }
             if (key == GLFW.GLFW_KEY_ESCAPE || key == GLFW.GLFW_KEY_BACKSPACE || key == GLFW.GLFW_KEY_DELETE) {
                 ClientThemeManager.setClickGuiKey(GLFW.GLFW_KEY_RIGHT_SHIFT);
                 SoundUtil.playTogglePop(false);
             } else if (key >= GLFW.GLFW_KEY_SPACE && key <= GLFW.GLFW_KEY_LAST) {
                 ClientThemeManager.setClickGuiKey(key);
                 SoundUtil.playTogglePop(true);
+            } else {
+                return true;
             }
+            syncClickGuiKeyToBindings(ClientThemeManager.getClickGuiKey());
             listeningForGuiKeybind = false;
             waitingForBindRelease = false;
+            lastClickGuiToggleMs = System.currentTimeMillis();
+            wasClickGuiKeyDownInGame = true;
             saveConfigNow();
             return true;
+        }
+
+        if (!isSearchBarFocused() && action == GLFW.GLFW_PRESS) {
+            int guiKey = ClientThemeManager.getClickGuiKey();
+            if (guiKey >= GLFW.GLFW_KEY_SPACE && guiKey <= GLFW.GLFW_KEY_LAST && key == guiKey) {
+                long now = System.currentTimeMillis();
+                if (now - lastClickGuiToggleMs > 180L) {
+                    lastClickGuiToggleMs = now;
+                    wasClickGuiKeyDownInGame = true;
+                    this.onClose();
+                    return true;
+                }
+            }
         }
 
         if (listeningForFriendBind) {
@@ -3161,6 +3265,29 @@ public class GlassClickGuiScreen extends Screen {
             return;
         }
 
+        if (listeningForGuiKeybind) {
+            if (waitingForBindRelease) {
+                if (GLFW.glfwGetMouseButton(windowHandle, GLFW.GLFW_MOUSE_BUTTON_LEFT) != GLFW.GLFW_PRESS
+                        && GLFW.glfwGetMouseButton(windowHandle, GLFW.GLFW_MOUSE_BUTTON_RIGHT) != GLFW.GLFW_PRESS) {
+                    waitingForBindRelease = false;
+                }
+                return;
+            }
+            for (int btn = GLFW.GLFW_MOUSE_BUTTON_MIDDLE; btn <= GLFW.GLFW_MOUSE_BUTTON_8; btn++) {
+                if (GLFW.glfwGetMouseButton(windowHandle, btn) == GLFW.GLFW_PRESS) {
+                    ClientThemeManager.setClickGuiKey(-100 - btn);
+                    syncClickGuiKeyToBindings(ClientThemeManager.getClickGuiKey());
+                    listeningForGuiKeybind = false;
+                    lastClickGuiToggleMs = System.currentTimeMillis();
+                    wasClickGuiKeyDownInGame = true;
+                    saveConfigNow();
+                    SoundUtil.playTogglePop(true);
+                    return;
+                }
+            }
+            return;
+        }
+
         if (listeningForFriendBind) {
             if (waitingForBindRelease) {
                 if (GLFW.glfwGetMouseButton(windowHandle, GLFW.GLFW_MOUSE_BUTTON_LEFT) != GLFW.GLFW_PRESS
@@ -3365,7 +3492,7 @@ public class GlassClickGuiScreen extends Screen {
             handleModuleListClick(mouseX, mouseY, leftClicked, rightClicked);
         } else if (activeTopTabIndex == 4) {
             int bentoTop = navContainerY + navContainerH + 10;
-            handleClientBentoClick(mouseX, mouseY, leftClicked, bentoTop);
+            handleClientBentoClick(mouseX, mouseY, leftClicked, rightClicked, bentoTop);
         }
     }
 
@@ -3683,6 +3810,11 @@ public class GlassClickGuiScreen extends Screen {
 
     private static boolean isHovered(int mouseX, int mouseY, int x, int y, int w, int h) {
         return mouseX >= x && mouseX <= (x + w) && mouseY >= y && mouseY <= (y + h);
+    }
+
+    @Override
+    public boolean shouldCloseOnEsc() {
+        return !listeningForGuiKeybind && !listeningForFriendBind && bindingRow == null;
     }
 
     @Override
@@ -4124,6 +4256,7 @@ public class GlassClickGuiScreen extends Screen {
             }
             if (co.has("clickGuiKey") && co.get("clickGuiKey").isJsonPrimitive()) {
                 ClientThemeManager.setClickGuiKey(co.get("clickGuiKey").getAsInt());
+                syncClickGuiKeyToBindings(ClientThemeManager.getClickGuiKey());
             }
             if (co.has("floatingButtonEnabled") && co.get("floatingButtonEnabled").isJsonPrimitive()) {
                 ClientThemeManager.setFloatingButtonEnabled(co.get("floatingButtonEnabled").getAsBoolean());
@@ -4639,25 +4772,6 @@ public class GlassClickGuiScreen extends Screen {
             if ((whiteCol >>> 24) > 8) {
                 guiGraphics.drawString(this.font, bentoResetLayoutComp, resetX + (resetW - rw) / 2, btnY + 9, multiplyAlpha(accent, p0), false);
             }
-            // AutoUpdater pill button to the left of "Open Folder"
-            boolean updReady = AutoUpdater.updateReady;
-            String updStatus = AutoUpdater.getStatusText();
-            String updText = updReady ? "Restart to Update"
-                    : ("Up to date".equals(updStatus) ? "Check Updates" : updStatus);
-            Component updComp = Component.literal(updText).withStyle(nunitoRegularStyle);
-            int updateW = Math.max(90, this.font.width(updComp) + 16);
-            int updateX = folderX - updateW - 8;
-            boolean hoverUpdate = isHovered(mouseX, mouseY, updateX, btnY, updateW, btnH);
-            int updateBg = updReady
-                    ? multiplyAlpha(hoverUpdate ? 0x5500E5FF : 0x3500E5FF, p0)
-                    : multiplyAlpha(hoverUpdate ? 0x38FFFFFF : 0x20FFFFFF, p0);
-            int updateFg = updReady ? multiplyAlpha(0xFF00E5FF, p0) : whiteCol;
-            HudManager.drawRoundedRect(guiGraphics, updateX, btnY, updateW, btnH, 8, updateBg);
-            int uw = this.font.width(updComp);
-            if ((whiteCol >>> 24) > 8) {
-                guiGraphics.drawString(this.font, updComp, updateX + (updateW - uw) / 2, btnY + 9, updateFg, false);
-            }
-
         }
 
         // ---------------------------------------------------------------------
@@ -4842,8 +4956,8 @@ public class GlassClickGuiScreen extends Screen {
         HudManager.drawRoundedRect(guiGraphics, knobX, y + (h - knobH) / 2, knobW, knobH, knobH / 2, multiplyAlpha(0xFFFFFFFF, alpha));
     }
 
-    private void handleClientBentoClick(int mouseX, int mouseY, boolean leftClicked, int bentoTop) {
-        if (!leftClicked) return;
+    private void handleClientBentoClick(int mouseX, int mouseY, boolean leftClicked, boolean rightClicked, int bentoTop) {
+        if (!leftClicked && !rightClicked) return;
 
         int gap = 10;
         int fullW = rowWidth;
@@ -4855,6 +4969,7 @@ public class GlassClickGuiScreen extends Screen {
         int rightCardX = leftCardX + leftCardW + gap;
         int pad = 14;
 
+        if (leftClicked) {
         // Top Banner Buttons: "Open Folder" & "Reset Layout"
         int btnH = 26;
         int btnY = bentoTop + (bannerH - btnH) / 2;
@@ -4873,18 +4988,6 @@ public class GlassClickGuiScreen extends Screen {
             SoundUtil.playTogglePop(true);
             return;
         }
-        boolean updReadyClick = AutoUpdater.updateReady;
-        String updStatusClick = AutoUpdater.getStatusText();
-        String updTextClick = updReadyClick ? "Restart to Update"
-                : ("Up to date".equals(updStatusClick) ? "Check Updates" : updStatusClick);
-        int updateW = Math.max(90, this.font.width(Component.literal(updTextClick).withStyle(nunitoRegularStyle)) + 16);
-        int updateX = folderX - updateW - 8;
-        if (isHovered(mouseX, mouseY, updateX, btnY, updateW, btnH)) {
-            AutoUpdater.onUpdateButtonClicked();
-            SoundUtil.playClick();
-            return;
-        }
-
 
         // Bottom-Left Card (Appearance)
         int lcx = leftCardX + pad;
@@ -4918,11 +5021,13 @@ public class GlassClickGuiScreen extends Screen {
             return;
         }
 
+        }
+
         // Bottom-Right Card (Controls & Mobile)
         int rcx = rightCardX + pad;
         int rInnerW = rightCardW - pad * 2;
         int segY = bottomYBase + 45;
-        if (isHovered(mouseX, mouseY, rcx, segY, rInnerW, 20)) {
+        if (leftClicked && isHovered(mouseX, mouseY, rcx, segY, rInnerW, 20)) {
             int idx = Mth.clamp((mouseX - rcx) * 4 / Math.max(1, rInnerW), 0, 3);
             ClientThemeManager.setGuiScaleIndex(idx);
             saveConfigNow();
@@ -4931,10 +5036,21 @@ public class GlassClickGuiScreen extends Screen {
         }
         int kbY = bottomYBase + 76;
         if (isHovered(mouseX, mouseY, rcx, kbY - 4, rInnerW, 22)) {
-            listeningForGuiKeybind = true;
-            SoundUtil.playClick();
+            if (rightClicked) {
+                ClientThemeManager.setClickGuiKey(GLFW.GLFW_KEY_RIGHT_SHIFT);
+                syncClickGuiKeyToBindings(ClientThemeManager.getClickGuiKey());
+                listeningForGuiKeybind = false;
+                waitingForBindRelease = false;
+                saveConfigNow();
+                SoundUtil.playTogglePop(false);
+            } else {
+                listeningForGuiKeybind = true;
+                waitingForBindRelease = true;
+                SoundUtil.playClick();
+            }
             return;
         }
+        if (!leftClicked) return;
         int flY = bottomYBase + 104;
         if (isHovered(mouseX, mouseY, rcx, flY - 4, rInnerW, 20)) {
             boolean next = !ClientThemeManager.isFloatingButtonEnabled();
