@@ -1,7 +1,5 @@
 package attrium.ru.screens;
 
-
-import attrium.ru.manager.AutoUpdater;
 import com.mojang.blaze3d.platform.InputConstants;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.KeyMapping;
@@ -31,6 +29,7 @@ import net.minecraft.client.multiplayer.PlayerInfo;
 import attrium.ru.api.module.Module;
 import attrium.ru.manager.FriendManager;
 import attrium.ru.api.module.impl.visual.HudModule;
+import attrium.ru.manager.CleanStateManager;
 import attrium.ru.manager.ClientThemeManager;
 import attrium.ru.manager.HudManager;
 import attrium.ru.utils.render.AnimationUtil;
@@ -64,12 +63,6 @@ import java.util.Locale;
  * Type-Safe Keybinds, World-Join Null Guards, and Tactile UI Volume Mixer.
  */
 public class GlassClickGuiScreen extends Screen {
-    private float updCheckHoverAnim = 0.0F;
-    private float updRestartHoverAnim = 0.0F;
-    private float updPulsePhase = 0.0F;
-
-    private float updChangelogRevealAnim = 0.0F;
-
     private static GlassClickGuiScreen instance;
 
     // =========================================================================
@@ -395,6 +388,13 @@ public class GlassClickGuiScreen extends Screen {
     private float guiScalePillX = -1.0F;
     private float guiScalePillW = 0.0F;
     private boolean listeningForGuiKeybind = false;
+    private boolean listeningForPanicKeybind = false;
+    private float restoreRePressToggleAnim = 1.0F;
+    private int bentoCachedPanicKey = Integer.MIN_VALUE;
+    private Component bentoCleanStateComp = null;
+    private Component bentoPanicKeyLabelComp = null;
+    private Component bentoPanicKeyValComp = null;
+    private Component bentoRestoreLabelComp = null;
     private static boolean wasClickGuiKeyDownInGame = false;
     private static long lastClickGuiToggleMs = 0L;
     private boolean draggingPanelOpacitySlider = false;
@@ -548,7 +548,7 @@ public class GlassClickGuiScreen extends Screen {
     }
 
     public boolean isSearchBarFocused() {
-        return searchFocused || friendInputFocused || activeStringSettingEntry != null || bindingRow != null || listeningForFriendBind || listeningForGuiKeybind;
+        return searchFocused || friendInputFocused || activeStringSettingEntry != null || bindingRow != null || listeningForFriendBind || listeningForGuiKeybind || listeningForPanicKeybind;
     }
 
     public static Style getNunitoBoldStyle() {
@@ -2885,6 +2885,13 @@ public class GlassClickGuiScreen extends Screen {
         prevKeyCallback = GLFW.glfwSetKeyCallback(windowHandle, (window, key, scancode, action, mods) -> {
             Minecraft client = Minecraft.getInstance();
             if (client != null) {
+                if (action == GLFW.GLFW_PRESS) {
+                    boolean bindingAny = (client.screen instanceof GlassClickGuiScreen g)
+                            && (g.listeningForGuiKeybind || g.listeningForPanicKeybind || g.listeningForFriendBind || g.bindingRow != null);
+                    if (!bindingAny && CleanStateManager.onKeyPressed(key)) {
+                        return;
+                    }
+                }
                 if (client.screen instanceof GlassClickGuiScreen gui) {
                     if (gui.handleGlfwKeyCallback(key, scancode, action, mods)) {
                         return;
@@ -2930,6 +2937,30 @@ public class GlassClickGuiScreen extends Screen {
     private boolean handleGlfwKeyCallback(int key, int scancode, int action, int mods) {
         if (action != GLFW.GLFW_PRESS && action != GLFW.GLFW_REPEAT) {
             return false;
+        }
+
+        if (listeningForPanicKeybind) {
+            if (action != GLFW.GLFW_PRESS) {
+                return true;
+            }
+            if (key == GLFW.GLFW_KEY_ESCAPE || key == GLFW.GLFW_KEY_BACKSPACE || key == GLFW.GLFW_KEY_DELETE) {
+                CleanStateManager.setPanicKey(-1);
+                SoundUtil.playTogglePop(false);
+            } else if (key >= GLFW.GLFW_KEY_SPACE && key <= GLFW.GLFW_KEY_LAST) {
+                CleanStateManager.setPanicKey(key);
+                SoundUtil.playTogglePop(true);
+            } else {
+                return true;
+            }
+            bentoCachedPanicKey = Integer.MIN_VALUE;
+            listeningForPanicKeybind = false;
+            waitingForBindRelease = false;
+            saveConfigNow();
+            int pk = CleanStateManager.getPanicKey();
+            HudManager.pushNotification("CleanState",
+                    pk > 0 ? ("Panic Key: " + formatBoundKeyDisplayName(pk)) : "Panic Key cleared",
+                    HudManager.TYPE_ENABLED);
+            return true;
         }
 
         if (listeningForGuiKeybind) {
@@ -3870,7 +3901,7 @@ public class GlassClickGuiScreen extends Screen {
 
     @Override
     public boolean shouldCloseOnEsc() {
-        return !listeningForGuiKeybind && !listeningForFriendBind && bindingRow == null;
+        return !listeningForGuiKeybind && !listeningForPanicKeybind && !listeningForFriendBind && bindingRow == null;
     }
 
     @Override
@@ -4284,6 +4315,8 @@ public class GlassClickGuiScreen extends Screen {
         clientObj.addProperty("floatingBtnXRatio", ClientThemeManager.getFloatingBtnXRatio());
         clientObj.addProperty("floatingBtnYRatio", ClientThemeManager.getFloatingBtnYRatio());
         clientObj.addProperty("uiSoundsEnabled", ClientThemeManager.isUiSoundsEnabled());
+        clientObj.addProperty("panicKey", CleanStateManager.getPanicKey());
+        clientObj.addProperty("restoreOnRePress", CleanStateManager.isRestoreOnRePress());
         root.add("clientTheme", clientObj);
         root.add("modules", modulesObj);
         return root;
@@ -4349,6 +4382,13 @@ public class GlassClickGuiScreen extends Screen {
             }
             if (co.has("uiSoundsEnabled") && co.get("uiSoundsEnabled").isJsonPrimitive()) {
                 ClientThemeManager.setUiSoundsEnabled(co.get("uiSoundsEnabled").getAsBoolean());
+            }
+            if (co.has("panicKey") && co.get("panicKey").isJsonPrimitive()) {
+                CleanStateManager.setPanicKey(co.get("panicKey").getAsInt());
+                bentoCachedPanicKey = Integer.MIN_VALUE;
+            }
+            if (co.has("restoreOnRePress") && co.get("restoreOnRePress").isJsonPrimitive()) {
+                CleanStateManager.setRestoreOnRePress(co.get("restoreOnRePress").getAsBoolean());
             }
         }
         if (root.has("modules") && root.get("modules").isJsonObject()) {
@@ -4778,7 +4818,7 @@ public class GlassClickGuiScreen extends Screen {
             SoundUtil.playTogglePop(true);
             return;
         }
-if (!isHovered(mouseX, mouseY, listLeft, listTop, listRight - listLeft, listHeight)) {
+        if (!isHovered(mouseX, mouseY, listLeft, listTop, listRight - listLeft, listHeight)) {
             return;
         }
 
@@ -4876,6 +4916,9 @@ if (!isHovered(mouseX, mouseY, listLeft, listTop, listRight - listLeft, listHeig
         bentoGuiKeyListenComp = Component.literal("[ ... ]").withStyle(HudManager.getBoldStyle());
         bentoFloatingLabelComp = Component.literal("Floating Touch Button").withStyle(nunitoRegularStyle);
         bentoSoundsLabelComp = Component.literal("UI Feedback Sounds").withStyle(nunitoRegularStyle);
+        bentoCleanStateComp = Component.literal("Clean State").withStyle(HudManager.getBoldStyle());
+        bentoPanicKeyLabelComp = Component.literal("Panic Key").withStyle(nunitoRegularStyle);
+        bentoRestoreLabelComp = Component.literal("Restore on Re-Press").withStyle(nunitoRegularStyle);
     }
 
     private void stepClientBentoAnimations(float dt) {
@@ -4888,6 +4931,7 @@ if (!isHovered(mouseX, mouseY, listLeft, listTop, listRight - listLeft, listHeig
         bgDimToggleAnim += ((ClientThemeManager.isBackgroundDimEnabled() ? 1.0F : 0.0F) - bgDimToggleAnim) * rate;
         floatingBtnToggleAnim += ((ClientThemeManager.isFloatingButtonEnabled() ? 1.0F : 0.0F) - floatingBtnToggleAnim) * rate;
         uiSoundsToggleAnim += ((ClientThemeManager.isUiSoundsEnabled() ? 1.0F : 0.0F) - uiSoundsToggleAnim) * rate;
+        restoreRePressToggleAnim += ((CleanStateManager.isRestoreOnRePress() ? 1.0F : 0.0F) - restoreRePressToggleAnim) * rate;
     }
 
     private float computeBentoCardProgress(int cardIndex) {
@@ -4958,16 +5002,27 @@ if (!isHovered(mouseX, mouseY, listLeft, listTop, listRight - listLeft, listHeig
                 guiGraphics.drawString(this.font, bentoActiveCfgComp, tx, y0 + 30, mutedCol, false);
             }
 
-            // Right: Two 26px-tall, 8px-radius pill buttons ("Open Folder", "Reset Layout")
+            // Right: Three 26px-tall, 8px-radius pill buttons ("Clean State", "Open Folder", "Reset Layout")
             int btnH = 26;
             int btnY = y0 + (bannerH - btnH) / 2;
-            int resetW = 80;
-            int folderW = 78;
-            int resetX = leftCardX + fullW - resetW - 12;
-            int folderX = resetX - folderW - 8;
+            int resetW = 74;
+            int folderW = 72;
+            int cleanW = 74;
+            int resetX = leftCardX + fullW - resetW - 10;
+            int folderX = resetX - folderW - 6;
+            int cleanX = folderX - cleanW - 6;
 
+            boolean hoverClean = isHovered(mouseX, mouseY, cleanX, btnY, cleanW, btnH);
             boolean hoverFolder = isHovered(mouseX, mouseY, folderX, btnY, folderW, btnH);
             boolean hoverReset = isHovered(mouseX, mouseY, resetX, btnY, resetW, btnH);
+
+            HudManager.drawRoundedRect(guiGraphics, cleanX, btnY, cleanW, btnH, 8,
+                    multiplyAlpha(hoverClean ? 0x55EF4444 : 0x33EF4444, p0));
+            int cw = this.font.width(bentoCleanStateComp);
+            if ((whiteCol >>> 24) > 8) {
+                guiGraphics.drawString(this.font, bentoCleanStateComp, cleanX + (cleanW - cw) / 2, btnY + 9,
+                        multiplyAlpha(hoverClean ? 0xFFFF6B6B : 0xFFEF4444, p0), false);
+            }
 
             HudManager.drawRoundedRect(guiGraphics, folderX, btnY, folderW, btnH, 8,
                     multiplyAlpha(hoverFolder ? 0x38FFFFFF : 0x20FFFFFF, p0));
@@ -4982,44 +5037,7 @@ if (!isHovered(mouseX, mouseY, listLeft, listTop, listRight - listLeft, listHeig
             if ((whiteCol >>> 24) > 8) {
                 guiGraphics.drawString(this.font, bentoResetLayoutComp, resetX + (resetW - rw) / 2, btnY + 9, multiplyAlpha(accent, p0), false);
             }
-
-            // === ATTRIUM_UPDATER_RENDER_START ===
-            float updStep = Math.min(1.0F, Math.max(0.05F, dt * 14.0F));
-            updPulsePhase += dt * 3.8F;
-            boolean updReady = AutoUpdater.updateReady;
-            String updStatus = AutoUpdater.getStatusText();
-            String checkText = AutoUpdater.isChecking() ? updStatus : "Updates";
-            Component checkComp = Component.literal(checkText).withStyle(nunitoRegularStyle);
-            int checkW = Math.max(66, this.font.width(checkComp) + 14);
-            int checkX = folderX - checkW - 8;
-            boolean hoverCheck = isHovered(mouseX, mouseY, checkX, btnY, checkW, btnH);
-            updCheckHoverAnim = Mth.lerp(updStep, updCheckHoverAnim, hoverCheck ? 1.0F : 0.0F);
-            int checkBg = multiplyAlpha(lerpColor(0x24FFFFFF, 0x4800E5FF, updCheckHoverAnim), p0);
-            int checkFg = multiplyAlpha(lerpColor(0xFFFFFFFF, 0xFF00E5FF, updCheckHoverAnim * 0.85F), p0);
-            HudManager.drawRoundedRect(guiGraphics, checkX, btnY, checkW, btnH, 8, checkBg);
-            int cw = this.font.width(checkComp);
-            if ((whiteCol >>> 24) > 8) {
-                guiGraphics.drawString(this.font, checkComp, checkX + (checkW - cw) / 2, btnY + 9, checkFg, false);
-            }
-            updChangelogRevealAnim = Mth.lerp(updStep, updChangelogRevealAnim, updReady ? 1.0F : 0.0F);
-            if (updReady) {
-                Component restartComp = Component.literal("Restart").withStyle(nunitoRegularStyle);
-                int restartW = Math.max(62, this.font.width(restartComp) + 14);
-                int restartX = checkX - restartW - 8;
-                boolean hoverRestart = isHovered(mouseX, mouseY, restartX, btnY, restartW, btnH);
-                updRestartHoverAnim = Mth.lerp(updStep, updRestartHoverAnim, hoverRestart ? 1.0F : 0.0F);
-                float pulse = 0.5F + 0.5F * (float) Math.sin(updPulsePhase);
-                int baseGlow = lerpColor(0x3400E5FF, 0x6200E5FF, Math.max(pulse * 0.65F, updRestartHoverAnim));
-                HudManager.drawRoundedRect(guiGraphics, restartX, btnY, restartW, btnH, 8, multiplyAlpha(baseGlow, p0));
-                int rsw = this.font.width(restartComp);
-                if ((whiteCol >>> 24) > 8) {
-                    guiGraphics.drawString(this.font, restartComp, restartX + (restartW - rsw) / 2, btnY + 9, multiplyAlpha(0xFF00E5FF, p0), false);
-                }
-            }
-            // === ATTRIUM_UPDATER_RENDER_END ===
-
-
-            }
+        }
 
         // ---------------------------------------------------------------------
         // Card 1: Bottom-Left — Appearance & Theme Engine (12px radius)
@@ -5137,18 +5155,18 @@ if (!isHovered(mouseX, mouseY, listLeft, listTop, listRight - listLeft, listHeig
                 }
             }
 
-            // ClickGUI Keybind Pill ([ RSHIFT ]) with soft pulsing accent while listening
-            int kbY = y2 + 76;
+            // ClickGUI Keybind Pill ([ RSHIFT ])
+            int kbY = y2 + 72;
             int guiKey = ClientThemeManager.getClickGuiKey();
             if (guiKey != bentoCachedGuiKey || bentoGuiKeyValComp == null) {
                 bentoCachedGuiKey = guiKey;
                 bentoGuiKeyValComp = Component.literal("[ " + formatBoundKeyDisplayName(guiKey) + " ]").withStyle(HudManager.getBoldStyle());
             }
             Component kbComp = listeningForGuiKeybind ? bentoGuiKeyListenComp : bentoGuiKeyValComp;
-            int kbPillW = Math.max(54, this.font.width(kbComp) + 14);
+            int kbPillW = Math.max(52, this.font.width(kbComp) + 12);
             int kbPillX = cx + innerW - kbPillW;
             float pulse = listeningForGuiKeybind ? (0.35F + 0.30F * (float) Math.sin(System.currentTimeMillis() * 0.008D)) : 0.16F;
-            HudManager.drawRoundedRect(guiGraphics, kbPillX, kbY - 3, kbPillW, 18, 6,
+            HudManager.drawRoundedRect(guiGraphics, kbPillX, kbY - 2, kbPillW, 16, 6,
                     ClientThemeManager.getAccentWithAlpha(pulse * p2));
             if ((whiteCol >>> 24) > 8) {
                 guiGraphics.drawString(this.font, bentoKeybindLabelComp, cx, kbY + 2, whiteCol, false);
@@ -5157,14 +5175,43 @@ if (!isHovered(mouseX, mouseY, listLeft, listTop, listRight - listLeft, listHeig
                         multiplyAlpha(listeningForGuiKeybind ? accent : 0xFFFFFFFF, p2), false);
             }
 
-            // Floating Touch Button Toggle + Size Slider (20px - 36px)
-            int flY = y2 + 104;
+            // Panic Key Pill ([ NONE ] / [ END ]) with coral-red pulse when listening
+            int pkY = y2 + 94;
+            int pKey = CleanStateManager.getPanicKey();
+            if (pKey != bentoCachedPanicKey || bentoPanicKeyValComp == null) {
+                bentoCachedPanicKey = pKey;
+                String pkStr = pKey > 0 ? formatBoundKeyDisplayName(pKey) : "NONE";
+                bentoPanicKeyValComp = Component.literal("[ " + pkStr + " ]").withStyle(HudManager.getBoldStyle());
+            }
+            Component pkComp = listeningForPanicKeybind ? bentoGuiKeyListenComp : bentoPanicKeyValComp;
+            int pkPillW = Math.max(52, this.font.width(pkComp) + 12);
+            int pkPillX = cx + innerW - pkPillW;
+            int pkBg = listeningForPanicKeybind
+                    ? multiplyAlpha(0x55EF4444, p2)
+                    : multiplyAlpha(0x28EF4444, p2);
+            HudManager.drawRoundedRect(guiGraphics, pkPillX, pkY - 2, pkPillW, 16, 6, pkBg);
+            if ((whiteCol >>> 24) > 8) {
+                guiGraphics.drawString(this.font, bentoPanicKeyLabelComp, cx, pkY + 2, whiteCol, false);
+                int pkw = this.font.width(pkComp);
+                guiGraphics.drawString(this.font, pkComp, pkPillX + (pkPillW - pkw) / 2, pkY + 2,
+                        multiplyAlpha(listeningForPanicKeybind ? 0xFFFF6B6B : 0xFFEF4444, p2), false);
+            }
+
+            // Restore on Re-Press Toggle
+            int rstY = y2 + 115;
+            if ((whiteCol >>> 24) > 8) {
+                guiGraphics.drawString(this.font, bentoRestoreLabelComp, cx, rstY + 2, whiteCol, false);
+            }
+            drawElasticPillImmediate(guiGraphics, cx + innerW - 26, rstY, 26, 13, restoreRePressToggleAnim, p2);
+
+            // Floating Touch Button Toggle + Compact Size Slider
+            int flY = y2 + 133;
             if ((whiteCol >>> 24) > 8) {
                 guiGraphics.drawString(this.font, bentoFloatingLabelComp, cx, flY + 2, whiteCol, false);
             }
-            drawElasticPillImmediate(guiGraphics, cx + innerW - 26, flY, 26, 14, floatingBtnToggleAnim, p2);
+            drawElasticPillImmediate(guiGraphics, cx + innerW - 26, flY, 26, 13, floatingBtnToggleAnim, p2);
 
-            int flSizeY = y2 + 123;
+            int flSizeY = y2 + 149;
             int flSizeInt = Math.round(ClientThemeManager.getFloatingButtonSize());
             if (flSizeInt != bentoCachedFloatSize || bentoFloatSizeValComp == null) {
                 bentoCachedFloatSize = flSizeInt;
@@ -5175,45 +5222,14 @@ if (!isHovered(mouseX, mouseY, listLeft, listTop, listRight - listLeft, listHeig
             clientFloatSizeSliderX = cx;
             clientFloatSizeSliderW = flTrackW;
             float flRatio = Mth.clamp((ClientThemeManager.getFloatingButtonSize() - 20.0F) / 16.0F, 0.0F, 1.0F);
-            HudManager.drawRoundedRect(guiGraphics, cx, flSizeY + 2, flTrackW, 5, 2, multiplyAlpha(0xFF232735, p2));
+            HudManager.drawRoundedRect(guiGraphics, cx, flSizeY + 2, flTrackW, 4, 2, multiplyAlpha(0xFF232735, p2));
             int flFillW = Math.max(5, Math.round(flTrackW * flRatio));
-            HudManager.drawRoundedRect(guiGraphics, cx, flSizeY + 2, flFillW, 5, 2, multiplyAlpha(accent, p2));
-            HudManager.drawRoundedRect(guiGraphics, cx + flFillW - 4, flSizeY, 9, 9, 4, multiplyAlpha(0xFFFFFFFF, p2));
+            HudManager.drawRoundedRect(guiGraphics, cx, flSizeY + 2, flFillW, 4, 2, multiplyAlpha(accent, p2));
+            HudManager.drawRoundedRect(guiGraphics, cx + flFillW - 4, flSizeY, 8, 8, 4, multiplyAlpha(0xFFFFFFFF, p2));
             if ((mutedCol >>> 24) > 8) {
                 guiGraphics.drawString(this.font, bentoFloatSizeValComp, cx + innerW - flValW, flSizeY, mutedCol, false);
             }
-
-            // UI Feedback Sounds Toggle
-            int sndY = y2 + 142;
-            if ((whiteCol >>> 24) > 8) {
-                guiGraphics.drawString(this.font, bentoSoundsLabelComp, cx, sndY + 2, whiteCol, false);
-            }
-            drawElasticPillImmediate(guiGraphics, cx + innerW - 26, sndY, 26, 14, uiSoundsToggleAnim, p2);
         }
-    
-        
-        // === ATTRIUM_UPDATER_OVERLAY_START ===
-        // Rendered LAST in renderClientBentoDashboard so it always floats ON TOP of Card 1 & Card 2
-        if (updChangelogRevealAnim > 0.04F) {
-            java.util.List<String> changes = AutoUpdater.getChangelogLines();
-            int lineCount = Math.min(3, changes.size());
-            int cardH = 24 + lineCount * 11;
-            int cardW = Math.min(fullW, 310);
-            int cardX = leftCardX + fullW - cardW;
-            int cardY = y0 + bannerH + 6 - Math.round(6.0F * (1.0F - updChangelogRevealAnim));
-            float ca = p0 * updChangelogRevealAnim;
-            HudManager.drawRoundedRect(guiGraphics, cardX - 1, cardY - 1, cardW + 2, cardH + 2, 11, multiplyAlpha(0x8800E5FF, ca));
-            HudManager.drawRoundedRect(guiGraphics, cardX, cardY, cardW, cardH, 10, multiplyAlpha(0xF510141F, ca));
-            Component hdr = Component.literal("What's New in v" + AutoUpdater.getLatestVersion()).withStyle(nunitoRegularStyle);
-            if (((int) (255 * ca)) > 10) {
-                guiGraphics.drawString(this.font, hdr, cardX + 10, cardY + 7, multiplyAlpha(0xFF00E5FF, ca), false);
-                for (int ci = 0; ci < lineCount; ci++) {
-                    Component lineComp = Component.literal("• " + changes.get(ci)).withStyle(nunitoRegularStyle);
-                    guiGraphics.drawString(this.font, lineComp, cardX + 10, cardY + 20 + ci * 11, multiplyAlpha(0xFFE5E7EB, ca), false);
-                }
-            }
-        }
-        // === ATTRIUM_UPDATER_OVERLAY_END ===
     }
 
     private void drawElasticPillImmediate(GuiGraphics guiGraphics, int x, int y, int w, int h, float anim, float alpha) {
@@ -5241,13 +5257,19 @@ if (!isHovered(mouseX, mouseY, listLeft, listTop, listRight - listLeft, listHeig
         int pad = 14;
 
         if (leftClicked) {
-        // Top Banner Buttons: "Open Folder" & "Reset Layout"
+        // Top Banner Buttons: "Clean State", "Open Folder", & "Reset Layout"
         int btnH = 26;
         int btnY = bentoTop + (bannerH - btnH) / 2;
-        int resetW = 80;
-        int folderW = 78;
-        int resetX = leftCardX + fullW - resetW - 12;
-        int folderX = resetX - folderW - 8;
+        int resetW = 74;
+        int folderW = 72;
+        int cleanW = 74;
+        int resetX = leftCardX + fullW - resetW - 10;
+        int folderX = resetX - folderW - 6;
+        int cleanX = folderX - cleanW - 6;
+        if (isHovered(mouseX, mouseY, cleanX, btnY, cleanW, btnH)) {
+            CleanStateManager.activateCleanState();
+            return;
+        }
         if (isHovered(mouseX, mouseY, folderX, btnY, folderW, btnH)) {
             ClientThemeManager.openConfigFolder();
             SoundUtil.playClick();
@@ -5259,25 +5281,6 @@ if (!isHovered(mouseX, mouseY, listLeft, listTop, listRight - listLeft, listHeig
             SoundUtil.playTogglePop(true);
             return;
         }
-        // === ATTRIUM_UPDATER_CLICK_START ===
-        String checkTextClick = AutoUpdater.isChecking() ? AutoUpdater.getStatusText() : "Updates";
-        int checkW = Math.max(66, this.font.width(Component.literal(checkTextClick).withStyle(nunitoRegularStyle)) + 14);
-        int checkX = folderX - checkW - 8;
-        if (isHovered(mouseX, mouseY, checkX, btnY, checkW, btnH)) {
-            AutoUpdater.checkForUpdatesAsync(true);
-            SoundUtil.playClick();
-            return;
-        }
-        if (AutoUpdater.updateReady) {
-            int restartW = Math.max(62, this.font.width(Component.literal("Restart").withStyle(nunitoRegularStyle)) + 14);
-            int restartX = checkX - restartW - 8;
-            if (isHovered(mouseX, mouseY, restartX, btnY, restartW, btnH)) {
-                SoundUtil.playClick();
-                AutoUpdater.restartToApply();
-                return;
-            }
-        }
-        // === ATTRIUM_UPDATER_CLICK_END ===
 
         // Bottom-Left Card (Appearance)
         int lcx = leftCardX + pad;
@@ -5324,36 +5327,45 @@ if (!isHovered(mouseX, mouseY, listLeft, listTop, listRight - listLeft, listHeig
             SoundUtil.playClick();
             return;
         }
-        int kbY = bottomYBase + 76;
-        if (leftClicked && isHovered(mouseX, mouseY, rcx - 4, kbY - 6, rInnerW + 8, 24)) {
+        int kbY = bottomYBase + 72;
+        if (leftClicked && isHovered(mouseX, mouseY, rcx - 4, kbY - 4, rInnerW + 8, 20)) {
             listeningForGuiKeybind = true;
+            listeningForPanicKeybind = false;
+            waitingForBindRelease = true;
+            SoundUtil.playClick();
+            return;
+        }
+        int pkY = bottomYBase + 94;
+        if (leftClicked && isHovered(mouseX, mouseY, rcx - 4, pkY - 4, rInnerW + 8, 20)) {
+            listeningForPanicKeybind = true;
+            listeningForGuiKeybind = false;
             waitingForBindRelease = true;
             SoundUtil.playClick();
             return;
         }
         if (!leftClicked) return;
-        int flY = bottomYBase + 104;
-        if (isHovered(mouseX, mouseY, rcx, flY - 4, rInnerW, 20)) {
+        int rstY = bottomYBase + 115;
+        if (isHovered(mouseX, mouseY, rcx, rstY - 3, rInnerW, 17)) {
+            boolean next = !CleanStateManager.isRestoreOnRePress();
+            CleanStateManager.setRestoreOnRePress(next);
+            saveConfigNow();
+            SoundUtil.playTogglePop(next);
+            return;
+        }
+        int flY = bottomYBase + 133;
+        if (isHovered(mouseX, mouseY, rcx, flY - 3, rInnerW, 16)) {
             boolean next = !ClientThemeManager.isFloatingButtonEnabled();
             ClientThemeManager.setFloatingButtonEnabled(next);
             saveConfigNow();
             SoundUtil.playTogglePop(next);
             return;
         }
-        int flSizeY = bottomYBase + 123;
-        if (isHovered(mouseX, mouseY, clientFloatSizeSliderX - 4, flSizeY - 4, clientFloatSizeSliderW + 8, 16)) {
+        int flSizeY = bottomYBase + 149;
+        if (isHovered(mouseX, mouseY, clientFloatSizeSliderX - 4, flSizeY - 4, clientFloatSizeSliderW + 8, 14)) {
             draggingFloatingSizeSlider = true;
             float r = Mth.clamp((float) (mouseX - clientFloatSizeSliderX) / (float) Math.max(1, clientFloatSizeSliderW), 0.0F, 1.0F);
             ClientThemeManager.setFloatingButtonSize(20.0F + r * 16.0F);
             SoundUtil.playClick();
-            return;
-        }
-        int sndY = bottomYBase + 142;
-        if (isHovered(mouseX, mouseY, rcx, sndY - 4, rInnerW, 22)) {
-            boolean next = !ClientThemeManager.isUiSoundsEnabled();
-            ClientThemeManager.setUiSoundsEnabled(next);
-            saveConfigNow();
-            SoundUtil.playTogglePop(next);
             return;
         }
     }

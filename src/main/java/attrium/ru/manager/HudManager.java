@@ -20,6 +20,7 @@ import attrium.ru.api.module.impl.visual.NotificationsModule;
 import attrium.ru.api.module.impl.visual.TargetHUDModule;
 import attrium.ru.screens.GlassClickGuiScreen;
 import attrium.ru.utils.render.AnimationUtil;
+import attrium.ru.utils.render.RenderSafeGuard;
 
 import java.lang.reflect.Method;
 import java.util.ArrayList;
@@ -245,13 +246,22 @@ public final class HudManager {
         // Always tick ArrayList module toggle watcher so Notifications fire even if ArrayList is disabled
         ArrayListModule al = ArrayListModule.getInstance();
         if (al != null) {
-            al.tickModuleStates(mc.font, dt);
+            try {
+                al.tickModuleStates(mc.font, dt);
+            } catch (Throwable t) {
+                RenderSafeGuard.onRenderFailure(al, t);
+            }
         }
 
-        for (int i = 0; i < CACHED_HUD_MODULES.size(); i++) {
+        for (int i = 0, size = CACHED_HUD_MODULES.size(); i < size; i++) {
             HudModule mod = CACHED_HUD_MODULES.get(i);
             if (mod != null && mod.isEnabled()) {
-                mod.renderHud(mc, guiGraphics, mc.font, screenW, screenH, dt, animClockSeconds, previewMode, editorMode);
+                try {
+                    mod.renderHud(mc, guiGraphics, mc.font, screenW, screenH, dt, animClockSeconds, previewMode, editorMode);
+                    RenderSafeGuard.onRenderSuccess(mod);
+                } catch (Throwable t) {
+                    RenderSafeGuard.onRenderFailure(mod, t);
+                }
             }
         }
     }

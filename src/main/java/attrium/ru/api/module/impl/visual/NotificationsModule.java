@@ -36,6 +36,11 @@ public class NotificationsModule extends HudModule {
     public static final int TYPE_FRIEND = 3;
 
     private static volatile NotificationsModule instance;
+    private static volatile boolean suppressToggles = false;
+
+    public static void setSuppressToggles(boolean suppress) {
+        suppressToggles = suppress;
+    }
 
     private final ModeSetting anchorPosition = register(new ModeSetting(
             "Anchor Position",
@@ -131,6 +136,7 @@ public class NotificationsModule extends HudModule {
     // Event Dispatch Entry Points
     // =========================================================================
     public static void notifyModuleToggle(String moduleName, boolean enabled) {
+        if (suppressToggles) return;
         NotificationsModule mod = instance;
         if (mod == null || !mod.isEnabled() || !Boolean.TRUE.equals(mod.moduleToggles.getValue())) return;
         mod.push(moduleName, enabled ? "Enabled" : "Disabled", enabled ? TYPE_ENABLED : TYPE_DISABLED);
