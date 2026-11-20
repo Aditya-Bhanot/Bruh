@@ -47,6 +47,15 @@ import net.minecraft.world.phys.Vec3;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 
+/**
+ * Reliable, Grim-safe AutoCrystal for Attrium (Minecraft 1.21.11 Official Mojang Mappings).
+ *
+ * - Normal mode: Activates when enemy feet are >= Min Target Y-Delta above player feet
+ *   (default 0.85 blocks so 1-block ledges and jump/knockback peaks trigger reliably).
+ * - Hit Crystal mode: Dual melee-hit detection (ServerboundInteractPacket + 6-tick swing-window
+ *   hurtTime fallback) for instant crystal combos after melee hits.
+ * - Deferred next-tick hotbar restore prevents Grim BadPackets from cancelling placements.
+ */
 public class AutoCrystal extends Module {
 
     private static AutoCrystal instance;
@@ -75,7 +84,7 @@ public class AutoCrystal extends Module {
     private final NumberSetting obsidianDelayTicks = register(new NumberSetting(
             "Obsidian Delay (Ticks)",
             "Cooldown ticks after placing an Obsidian block",
-            4.0D, 1.0D, 20.0D, 1.0D
+            3.0D, 1.0D, 20.0D, 1.0D
     ));
     private final NumberSetting placeDelayTicks = register(new NumberSetting(
             "Place Delay (Ticks)",
@@ -89,8 +98,8 @@ public class AutoCrystal extends Module {
     ));
     private final NumberSetting minTargetYDelta = register(new NumberSetting(
             "Min Target Y-Delta",
-            "Minimum height (blocks) the enemy must be above your feet before AutoCrystal activates (default 1.0)",
-            1.0D, 0.0D, 2.5D, 0.05D
+            "Minimum height (blocks) the enemy must be above your feet before AutoCrystal activates",
+            0.85D, 0.0D, 2.5D, 0.05D
     ));
     private final BooleanSetting autoSwitchCrystal = register(new BooleanSetting(
             "Auto Switch Crystal",
@@ -99,18 +108,18 @@ public class AutoCrystal extends Module {
     ));
     private final BooleanSetting swapBackToWeapon = register(new BooleanSetting(
             "Swap Back Weapon",
-            "Restore your previous hotbar slot after placing/detonating a crystal",
+            "Restore your previous hotbar slot on the next tick after placing/detonating",
             true
     ));
     private final NumberSetting crystalRange = register(new NumberSetting(
             "Crystal Range",
-            "Maximum reach distance (2.0 - 6.0 blocks) to place and detonate End Crystals",
-            4.0D, 2.0D, 6.0D, 0.1D
+            "Maximum reach distance (2.0 - 4.5 blocks) to place and detonate End Crystals",
+            4.2D, 2.0D, 4.5D, 0.1D
     ));
     private final NumberSetting minTargetDamage = register(new NumberSetting(
             "Min Target Damage",
             "Minimum damage required to place or detonate a crystal near the target",
-            2.5D, 0.5D, 20.0D, 0.5D
+            2.0D, 0.5D, 20.0D, 0.5D
     ));
     private final BooleanSetting antiSuicide = register(new BooleanSetting(
             "Anti-Suicide",
@@ -132,7 +141,8 @@ public class AutoCrystal extends Module {
     private LivingEntity juggleTargetPlayer;
     private boolean isJuggling;
     private int juggleLastHitTick = -100;
-    private static final int JUGGLE_TIMEOUT_TICKS = 35;
+    private int lastPlayerSwingTick = -100;
+    private static final int JUGGLE_TIMEOUT_TICKS = 40;
 
     private BlockPos lockedBasePos;
     private int lastProcessedTick = -1;
@@ -147,6 +157,7 @@ public class AutoCrystal extends Module {
     private static final long CONTINUOUS_FATIGUE_TRIGGER_MS = 6000L;
 
     private int savedHotbarSlot = -1;
+    private boolean pendingSlotRestore = false;
 
     private Vec3 activeAimPoint;
     private Entity activeAimEntity;
@@ -156,7 +167,7 @@ public class AutoCrystal extends Module {
     private boolean holdingSilentRotation = false;
 
     public AutoCrystal() {
-        super("AutoCrystal", "1-block elevation AutoCrystal & responsive Hit Crystal PvP module", ModuleCategory.COMBAT);
+        super("AutoCrystal", "Grim-safe elevated AutoCrystal & Hit Crystal PvP module", ModuleCategory.COMBAT);
         instance = this;
     }
 
@@ -227,6 +238,7 @@ public class AutoCrystal extends Module {
         this.juggleTargetPlayer = null;
         this.isJuggling = false;
         this.juggleLastHitTick = -100;
+        this.lastPlayerSwingTick = -100;
         this.lockedBasePos = null;
         this.lastProcessedTick = -1;
         this.placeTickTimer = 100;
@@ -236,6 +248,7 @@ public class AutoCrystal extends Module {
         this.nextActionDelayMs = 0L;
         this.continuousStartMs = 0L;
         this.savedHotbarSlot = -1;
+        this.pendingSlotRestore = false;
         this.activeAimPoint = null;
         this.activeAimEntity = null;
         this.yawVelocity = 0.0F;
@@ -293,6 +306,10 @@ public class AutoCrystal extends Module {
         }
         Packet<?> packet = event.getPacket();
         if (packet instanceof ServerboundInteractPacket interactPacket) {
+            Minecraft mc = Minecraft.getInstance();
+            if (mc != null && mc.player != null) {
+                lastPlayerSwingTick = mc.player.tickCount;
+            }
             interactPacket.dispatch(new AutoCrystalAttackHandler(this));
         }
     }
@@ -312,13 +329,26 @@ public class AutoCrystal extends Module {
         breakTickTimer++;
         obsidianTickTimer++;
 
+        if (client.player.swinging || client.player.swingTime > 0 || client.options.keyAttack.isDown()) {
+            lastPlayerSwingTick = tick;
+        }
+
         if (client.screen instanceof AbstractContainerScreen) {
             releaseAim(client);
             return;
         }
 
+        // Handle deferred next-tick hotbar restore so Grim never sees same-tick place + swap-back
+        if (pendingSlotRestore) {
+            pendingSlotRestore = false;
+            if (Boolean.TRUE.equals(swapBackToWeapon.getValue())) {
+                restoreHotbarSlotIfNeeded(client);
+            }
+        }
+
+        // Target Resolution
         if (isHitCrystalEnabled()) {
-            detectRecentMeleeHitFallback(client);
+            detectRecentMeleeHitFallback(client, tick);
 
             if (!isJuggling || juggleTargetPlayer == null || !juggleTargetPlayer.isAlive()
                     || (tick - juggleLastHitTick) > JUGGLE_TIMEOUT_TICKS) {
@@ -372,6 +402,7 @@ public class AutoCrystal extends Module {
             }
         }
 
+        // PRIORITY 1: Detonate an existing viable End Crystal
         EndCrystal bestCrystal = findBestCrystalToDetonate(client, currentTarget);
         if (bestCrystal != null) {
             boolean readyToBreak = !isJuggling || isEnemyReadyForHitCrystalBreak(currentTarget, bestCrystal);
@@ -379,9 +410,7 @@ public class AutoCrystal extends Module {
                 if (detonateCrystal(client, bestCrystal)) {
                     breakTickTimer = 0;
                     recordActionTimestamp();
-                    if (Boolean.TRUE.equals(swapBackToWeapon.getValue())) {
-                        restoreHotbarSlotIfNeeded(client);
-                    }
+                    pendingSlotRestore = true;
                     return;
                 }
             } else if (readyToBreak) {
@@ -390,6 +419,7 @@ public class AutoCrystal extends Module {
             }
         }
 
+        // PRIORITY 2: Place End Crystal on best existing Obsidian/Bedrock base
         if (placeTickTimer >= placeDelayTicks.getValue().intValue() && isHumanizedClickReady()) {
             BlockPos placeBase = findBestCrystalBase(client, currentTarget);
             if (placeBase != null) {
@@ -397,14 +427,13 @@ public class AutoCrystal extends Module {
                     placeTickTimer = 0;
                     lockedBasePos = placeBase.immutable();
                     recordActionTimestamp();
-                    if (Boolean.TRUE.equals(swapBackToWeapon.getValue())) {
-                        restoreHotbarSlotIfNeeded(client);
-                    }
+                    pendingSlotRestore = true;
                     return;
                 }
             }
         }
 
+        // PRIORITY 3: Place Obsidian base if Auto Obsidian is enabled
         if (Boolean.TRUE.equals(autoObsidian.getValue())
                 && obsidianTickTimer >= obsidianDelayTicks.getValue().intValue()
                 && isHumanizedClickReady()) {
@@ -414,9 +443,7 @@ public class AutoCrystal extends Module {
                     obsidianTickTimer = 0;
                     lockedBasePos = candidate.basePos.immutable();
                     recordActionTimestamp();
-                    if (Boolean.TRUE.equals(swapBackToWeapon.getValue())) {
-                        restoreHotbarSlotIfNeeded(client);
-                    }
+                    pendingSlotRestore = true;
                     return;
                 }
             }
@@ -430,17 +457,10 @@ public class AutoCrystal extends Module {
         }
     }
 
-    private void detectRecentMeleeHitFallback(Minecraft client) {
-        if (client == null || client.player == null || client.level == null) {
+    private void detectRecentMeleeHitFallback(Minecraft client, int tick) {
+        if ((tick - lastPlayerSwingTick) > 6) {
             return;
         }
-        boolean playerAttacking = client.player.swinging
-                || client.player.swingTime > 0
-                || client.options.keyAttack.isDown();
-        if (!playerAttacking) {
-            return;
-        }
-
         LivingEntity bestHit = null;
         double bestDistSq = 36.0D;
         for (Entity entity : client.level.entitiesForRendering()) {
@@ -450,7 +470,7 @@ public class AutoCrystal extends Module {
             if (!isValidTarget(client, living)) {
                 continue;
             }
-            if (living.hurtTime >= 8) {
+            if (living.hurtTime >= 7) {
                 double dSq = client.player.distanceToSqr(living);
                 if (dSq < bestDistSq) {
                     bestDistSq = dSq;
@@ -464,14 +484,14 @@ public class AutoCrystal extends Module {
     }
 
     private double getClampedRange() {
-        return Mth.clamp(crystalRange.getValue(), 2.0D, 6.0D);
+        return Mth.clamp(crystalRange.getValue(), 2.0D, 4.5D);
     }
 
     private boolean isTargetElevatedAbovePlayer(Minecraft client, LivingEntity target) {
         double requiredDelta = Math.max(0.0D, minTargetYDelta.getValue());
         double targetMinY = target.getBoundingBox().minY;
         double playerMinY = client.player.getBoundingBox().minY;
-        return (targetMinY - playerMinY) >= (requiredDelta - 0.02D);
+        return (targetMinY - playerMinY) >= (requiredDelta - 0.05D);
     }
 
     private boolean isEnemyReadyForHitCrystalBreak(LivingEntity target, EndCrystal crystal) {
@@ -484,7 +504,7 @@ public class AutoCrystal extends Module {
         if (verticalAboveCrystal < -1.0D || verticalAboveCrystal > 4.0D) {
             return false;
         }
-        return target.onGround() || target.getDeltaMovement().y <= 0.22D || verticalAboveCrystal <= 1.25D;
+        return target.onGround() || target.getDeltaMovement().y <= 0.25D || verticalAboveCrystal <= 1.35D;
     }
 
     private LivingEntity findOptimalTarget(Minecraft client) {
@@ -780,7 +800,8 @@ public class AutoCrystal extends Module {
 
     private boolean canPlaceCrystalAbovePos(Minecraft client, BlockPos basePos) {
         BlockPos above = basePos.above();
-        if (!client.level.getBlockState(above).isAir()) {
+        BlockState aboveState = client.level.getBlockState(above);
+        if (!aboveState.isAir() && !aboveState.canBeReplaced()) {
             return false;
         }
         AABB crystalBox = new AABB(
@@ -921,9 +942,9 @@ public class AutoCrystal extends Module {
         }
         lastActionTimeMs = now;
         boolean fatigued = (now - continuousStartMs) >= CONTINUOUS_FATIGUE_TRIGGER_MS;
-        double baseMs = fatigued ? 120.0D : 52.0D;
-        double jitter = Mth.clamp(ThreadLocalRandom.current().nextGaussian() * 10.0D, -12.0D, 20.0D);
-        nextActionDelayMs = Math.max(42L, Math.round(baseMs + jitter));
+        double baseMs = fatigued ? 115.0D : 50.0D;
+        double jitter = Mth.clamp(ThreadLocalRandom.current().nextGaussian() * 9.0D, -10.0D, 18.0D);
+        nextActionDelayMs = Math.max(40L, Math.round(baseMs + jitter));
     }
 
     private void setActiveAim(Minecraft client, Vec3 targetVec, Entity targetEntity) {
@@ -932,11 +953,14 @@ public class AutoCrystal extends Module {
         if ("Silent".equalsIgnoreCase(aimMode.getValue()) && client != null && client.player != null && targetVec != null) {
             float[] angles = computeAngles(client, targetVec);
             if (angles != null) {
-                RotationManager.getInstance().submitInstantSilentRotation(
+                RotationManager.getInstance().submitRotationRequest(
                         RotationManager.RotationPriority.AUTO_CRYSTAL,
                         angles[0],
                         angles[1],
+                        1.0F,
+                        false,
                         true,
+                        targetEntity instanceof LivingEntity le ? le : currentTarget,
                         this
                 );
                 holdingSilentRotation = true;
