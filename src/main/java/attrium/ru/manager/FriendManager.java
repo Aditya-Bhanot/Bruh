@@ -29,6 +29,7 @@ import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
@@ -63,6 +64,7 @@ public final class FriendManager {
 
     // Metadata map storing authentic username alongside UUID and custom alias for UI & aliasing
     private static final ConcurrentHashMap<UUID, FriendRecord> FRIEND_RECORDS = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<String, FriendRecord> FRIENDS_BY_LOWER_NAME = new ConcurrentHashMap<>();
 
     // Bounded string aliasing cache (cleared only when friend list mutates — zero per-frame GC churn)
     private static final ConcurrentHashMap<String, String> ALIASED_TEXT_CACHE = new ConcurrentHashMap<>();
@@ -126,20 +128,74 @@ public final class FriendManager {
      * Operates strictly on the entity's authentic `GameProfile` UUID (`entity.getUUID()`),
      * preventing fake server-spawned NPC bots or `/nick` players from bypassing the filter.
      */
+    /**
+     * Verifies that a player exists in the active tab list (`mc.getConnection().getOnlinePlayers()`)
+     * with a matching GameProfile UUID so fake server-spawned bots are rejected while supporting
+     * both online-mode (v4) and offline-mode (v3) servers.
+     */
+    public static boolean isVerifiedInTabList(Minecraft mc, UUID entityUuid, String profileName) {
+        if (mc == null || mc.getConnection() == null) {
+            return true;
+        }
+        if (entityUuid == null && (profileName == null || profileName.isBlank())) {
+            return false;
+        }
+        try {
+            Collection<PlayerInfo> online = mc.getConnection().getOnlinePlayers();
+            if (online == null || online.isEmpty()) {
+                return true;
+            }
+            for (PlayerInfo info : online) {
+                if (info == null || info.getProfile() == null) {
+                    continue;
+                }
+                GameProfile tabProf = info.getProfile();
+                if (entityUuid != null && entityUuid.equals(tabProf.id())) {
+                    return true;
+                }
+            }
+            return false;
+        } catch (Throwable ignored) {
+            return true;
+        }
+    }
+
     public static boolean isFriend(Entity entity) {
         if (entity == null) {
             return false;
         }
         ensureLoaded();
+        if (FRIENDS.isEmpty() && FRIENDS_BY_LOWER_NAME.isEmpty()) {
+            return false;
+        }
         if (entity instanceof Player player) {
             GameProfile profile = player.getGameProfile();
             UUID uuid = (profile != null && profile.id() != null) ? profile.id() : player.getUUID();
+            String rawName = (profile != null && profile.name() != null) ? profile.name().trim() : null;
+
+            // Anti-bot tab-list verification: ensure the entity matches a real tab-list GameProfile
+            if (!isVerifiedInTabList(Minecraft.getInstance(), uuid, rawName)) {
+                return false;
+            }
+
+            // 1. Direct Dual-UUID match (matches online v4 UUID or offline v3 UUID)
             if (uuid != null && FRIENDS.containsKey(uuid)) {
                 return true;
             }
-            // If a friend was added by name while offline, reconcile their live GameProfile UUID once
-            if (profile != null && profile.name() != null && !FRIENDS.isEmpty()) {
-                return reconcileOnlineProfileIfMatched(uuid, profile.name());
+
+            // 2. Match by raw GameProfile.name() (persists even under /nick) or computed offline v3 UUID
+            if (rawName != null && !rawName.isEmpty()) {
+                String lower = rawName.toLowerCase(Locale.ROOT);
+                FriendRecord byName = FRIENDS_BY_LOWER_NAME.get(lower);
+                if (byName != null) {
+                    if (uuid != null) {
+                        FRIENDS.putIfAbsent(uuid, byName.alias);
+                    }
+                    return true;
+                }
+                if (reconcileOnlineProfileIfMatched(uuid, rawName)) {
+                    return true;
+                }
             }
             return false;
         }
@@ -183,16 +239,27 @@ public final class FriendManager {
         if (liveUuid == null || profileName == null || profileName.isEmpty()) {
             return false;
         }
-        UUID offlineUuid = computeOfflineUuid(profileName);
-        FriendRecord offlineRec = FRIEND_RECORDS.remove(offlineUuid);
-        if (offlineRec != null) {
-            FRIENDS.remove(offlineUuid);
-            FriendRecord upgraded = new FriendRecord(liveUuid, profileName, offlineRec.alias);
-            FRIENDS.put(liveUuid, upgraded.alias);
-            FRIEND_RECORDS.put(liveUuid, upgraded);
-            entriesDirty = true;
-            ALIASED_TEXT_CACHE.clear();
-            saveToFile();
+        String clean = profileName.trim();
+        FriendRecord matched = FRIENDS_BY_LOWER_NAME.get(clean.toLowerCase(Locale.ROOT));
+        if (matched == null) {
+            matched = FRIEND_RECORDS.get(computeOfflineUuid(clean));
+        }
+        if (matched == null) {
+            matched = FRIEND_RECORDS.get(computeLowercaseOfflineUuid(clean));
+        }
+        if (matched != null) {
+            FRIENDS.put(liveUuid, matched.alias);
+            FRIENDS.put(computeOfflineUuid(clean), matched.alias);
+            FRIENDS.put(computeLowercaseOfflineUuid(clean), matched.alias);
+            if (!liveUuid.equals(matched.uuid)) {
+                FRIEND_RECORDS.remove(matched.uuid);
+                FriendRecord upgraded = new FriendRecord(liveUuid, clean, matched.alias);
+                FRIEND_RECORDS.put(liveUuid, upgraded);
+                FRIENDS_BY_LOWER_NAME.put(clean.toLowerCase(Locale.ROOT), upgraded);
+                entriesDirty = true;
+                ALIASED_TEXT_CACHE.clear();
+                saveToFile();
+            }
             return true;
         }
         return false;
@@ -289,7 +356,10 @@ public final class FriendManager {
 
         FriendRecord record = new FriendRecord(uuid, cleanUser, cleanAlias);
         FRIENDS.put(uuid, cleanAlias);
+        FRIENDS.put(computeOfflineUuid(cleanUser), cleanAlias);
+        FRIENDS.put(computeLowercaseOfflineUuid(cleanUser), cleanAlias);
         FRIEND_RECORDS.put(uuid, record);
+        FRIENDS_BY_LOWER_NAME.put(cleanUser.toLowerCase(Locale.ROOT), record);
         entriesDirty = true;
         ALIASED_TEXT_CACHE.clear();
 
@@ -304,6 +374,11 @@ public final class FriendManager {
         }
         ensureLoaded();
         FriendRecord removed = FRIEND_RECORDS.remove(uuid);
+        if (removed != null && removed.username != null) {
+            FRIENDS.remove(computeOfflineUuid(removed.username));
+            FRIENDS.remove(computeLowercaseOfflineUuid(removed.username));
+            FRIENDS_BY_LOWER_NAME.remove(removed.username.toLowerCase(Locale.ROOT));
+        }
         String removedAlias = FRIENDS.remove(uuid);
         if (removed != null || removedAlias != null) {
             entriesDirty = true;
@@ -411,8 +486,16 @@ public final class FriendManager {
         return null;
     }
 
+    /**
+     * Computes vanilla Minecraft's deterministic Version 3 offline UUID (`"OfflinePlayer:" + name`).
+     */
     public static UUID computeOfflineUuid(String username) {
-        String lower = username != null ? username.trim().toLowerCase(Locale.ROOT) : "friend";
+        String clean = (username != null && !username.isBlank()) ? username.trim() : "friend";
+        return UUID.nameUUIDFromBytes(("OfflinePlayer:" + clean).getBytes(StandardCharsets.UTF_8));
+    }
+
+    public static UUID computeLowercaseOfflineUuid(String username) {
+        String lower = (username != null && !username.isBlank()) ? username.trim().toLowerCase(Locale.ROOT) : "friend";
         return UUID.nameUUIDFromBytes(("OfflinePlayer:" + lower).getBytes(StandardCharsets.UTF_8));
     }
 
@@ -706,6 +789,9 @@ public final class FriendManager {
                         FriendRecord rec = new FriendRecord(uuid, name, name);
                         FRIENDS.put(uuid, rec.alias);
                         FRIEND_RECORDS.put(uuid, rec);
+                            FRIENDS.put(computeOfflineUuid(rec.username), rec.alias);
+                            FRIENDS.put(computeLowercaseOfflineUuid(rec.username), rec.alias);
+                            FRIENDS_BY_LOWER_NAME.put(rec.username.toLowerCase(Locale.ROOT), rec);
                     }
                 } else if (el.isJsonObject()) {
                     JsonObject obj = el.getAsJsonObject();

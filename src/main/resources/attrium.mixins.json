@@ -66,7 +66,10 @@
     "InventorySlotSyncMixin"
   ],
   "client": [
-    "accessor.CarriedItemSyncInvoker"
+    "accessor.CarriedItemSyncInvoker",
+    "AmbienceWeatherMixin",
+    "AmbienceTimeMixin",
+    "AmbienceEnvironmentMixin"
   ],
   "injectors": {
     "defaultRequire": 1
