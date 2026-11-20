@@ -207,6 +207,7 @@ public final class HudManager {
         if (layoutEditorActive && mc.screen instanceof GlassClickGuiScreen) {
             return;
         }
+        GlassClickGuiScreen.pollGlobalKeybinds();
         boolean previewMode = (mc.screen instanceof GlassClickGuiScreen gui) && gui.isHudTabActive();
         renderAllWidgets(mc, guiGraphics, previewMode, false);
         ClientThemeManager.tick(lastDtSeconds, mc.screen instanceof GlassClickGuiScreen);

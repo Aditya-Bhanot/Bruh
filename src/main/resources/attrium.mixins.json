@@ -74,7 +74,8 @@
     "NameProtectSkinMixin",
     "NameProtectObjectiveMixin",
     "NameProtectScoreboardMixin",
-    "NameProtectTabListMixin"
+    "NameProtectTabListMixin",
+    "TickPipelineMixin"
   ],
   "injectors": {
     "defaultRequire": 1
