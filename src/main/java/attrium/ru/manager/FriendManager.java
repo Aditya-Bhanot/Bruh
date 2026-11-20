@@ -364,6 +364,7 @@ public final class FriendManager {
         ALIASED_TEXT_CACHE.clear();
 
         syncLegacyFriendUtils(cleanUser, true);
+        HudManager.pushNotification(cleanUser, "Added Friend", HudManager.TYPE_ENABLED);
         saveToFile();
         return true;
     }
@@ -385,6 +386,7 @@ public final class FriendManager {
             ALIASED_TEXT_CACHE.clear();
             if (removed != null) {
                 syncLegacyFriendUtils(removed.username, false);
+                HudManager.pushNotification(removed.username, "Removed Friend", HudManager.TYPE_DISABLED);
             }
             saveToFile();
             return true;

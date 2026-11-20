@@ -69,7 +69,9 @@
     "accessor.CarriedItemSyncInvoker",
     "AmbienceWeatherMixin",
     "AmbienceTimeMixin",
-    "AmbienceEnvironmentMixin"
+    "AmbienceEnvironmentMixin",
+    "HudTotemNotificationMixin",
+    "InGameHudMixin"
   ],
   "injectors": {
     "defaultRequire": 1
