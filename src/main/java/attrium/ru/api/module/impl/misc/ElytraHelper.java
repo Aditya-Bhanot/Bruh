@@ -72,12 +72,12 @@ public class ElytraHelper extends Module {
     private final NumberSetting minRandomTicks = register(new NumberSetting(
             "Min Random (Ticks)",
             "Minimum tick delay per stage when Randomization is enabled",
-            1.0D, 1.0D, 10.0D, 1.0D
+            1.0D, 1.0D, 5.0D, 1.0D
     ));
     private final NumberSetting maxRandomTicks = register(new NumberSetting(
             "Max Random (Ticks)",
             "Maximum tick delay per stage when Randomization is enabled",
-            2.0D, 1.0D, 10.0D, 1.0D
+            2.0D, 1.0D, 5.0D, 1.0D
     ));
     private final NumberSetting savedElytraKeyCode = register(new NumberSetting(
             "_elytraHelperKeyCode",
@@ -183,9 +183,7 @@ public class ElytraHelper extends Module {
 
     @SubscribeEvent
     public void onDraw(DrawEvent event) {
-        if (maxRandomTicks.getValue() < minRandomTicks.getValue()) {
-            maxRandomTicks.setValue(minRandomTicks.getValue());
-        }
+        // Handled via Math.min/Math.max at read time so dragging Min never inflates Max
     }
 
     @SubscribeEvent
@@ -206,6 +204,9 @@ public class ElytraHelper extends Module {
         }
         lastProcessedGameTime = gameTime;
         clientTickCounter++;
+        if (nextAllowedSwapTick - clientTickCounter > 10L) {
+            nextAllowedSwapTick = clientTickCounter;
+        }
 
         if (client.screen != null) {
             if (phase != SwapPhase.IDLE && previousHotbarSlot >= 0 && previousHotbarSlot < 9) {
@@ -381,8 +382,10 @@ public class ElytraHelper extends Module {
         if (!Boolean.TRUE.equals(randomization.getValue())) {
             return 1;
         }
-        int lo = Math.max(1, minRandomTicks.getValue().intValue());
-        int hi = Math.max(lo, maxRandomTicks.getValue().intValue());
+        int a = Math.max(1, minRandomTicks.getValue().intValue());
+        int b = Math.max(1, maxRandomTicks.getValue().intValue());
+        int lo = Math.min(a, b);
+        int hi = Math.max(a, b);
         return lo == hi ? lo : ThreadLocalRandom.current().nextInt(lo, hi + 1);
     }
 

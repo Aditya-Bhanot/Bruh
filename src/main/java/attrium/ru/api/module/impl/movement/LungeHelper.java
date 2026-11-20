@@ -96,7 +96,7 @@ public class LungeHelper extends Module {
             "Minimum extra client ticks (0 - 10) to wait between repeated lunges",
             1.0D,
             0.0D,
-            10.0D,
+            5.0D,
             1.0D
     ));
 
@@ -105,7 +105,7 @@ public class LungeHelper extends Module {
             "Maximum extra client ticks (0 - 10) to wait between repeated lunges",
             2.0D,
             0.0D,
-            10.0D,
+            5.0D,
             1.0D
     ));
 
@@ -263,6 +263,9 @@ public class LungeHelper extends Module {
         }
         lastTickProcessedGameTime = currentGameTime;
         clientTickCounter++;
+        if (nextAllowedLungeTick - clientTickCounter > 10) {
+            nextAllowedLungeTick = clientTickCounter;
+        }
 
         if (client.screen != null) {
             callbackPressLatched = false;
