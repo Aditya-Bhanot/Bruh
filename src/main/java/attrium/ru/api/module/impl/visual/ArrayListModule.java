@@ -258,13 +258,13 @@ public class ArrayListModule extends HudModule {
             int slidePx = Math.round((1.0F - ease) * (pillW + 10));
             int drawX = alignRight ? (targetLocalX + slidePx) : (targetLocalX - slidePx);
 
-            int scX1 = baseX + Math.round(targetLocalX * sc);
-            int scY1 = baseY + Math.round(yInt * sc);
-            int scX2 = baseX + Math.round((targetLocalX + pillW) * sc);
-            int scY2 = baseY + Math.round((yInt + rowH * e.heightAnim + 1.0F) * sc);
-
-            if (scX2 > scX1 && scY2 > scY1) {
-                guiGraphics.enableScissor(scX1, scY1, scX2, scY2);
+            int localY2 = Math.round(yInt + rowH * e.heightAnim + 1.0F);
+            boolean useScissor = e.slideAnim < 0.98F && (localY2 > yInt);
+            if (pillW > 0 && localY2 > yInt) {
+                // Local coordinates inside pose().translate(baseX, baseY).scale(sc, sc)
+                if (useScissor) {
+                    guiGraphics.enableScissor(targetLocalX, yInt, targetLocalX + pillW, localY2);
+                }
 
                 int accentCol = AnimationUtil.withAlpha(
                         resolveEntryColor(e.module, i, animClockSeconds), ease);
@@ -308,7 +308,7 @@ public class ArrayListModule extends HudModule {
                     }
                 }
 
-                guiGraphics.disableScissor();
+                if (useScissor) { guiGraphics.disableScissor(); }
             }
 
             cursorY += (rowH + gap) * e.heightAnim;
