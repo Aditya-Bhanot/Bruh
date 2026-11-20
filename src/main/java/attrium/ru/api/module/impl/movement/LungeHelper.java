@@ -149,7 +149,7 @@ public class LungeHelper extends Module {
     private int clientTickCounter = 0;
     private int nextAllowedLungeTick = 0;
 
-    private static final int VISIBLE_SPEAR_HOLD_TICKS = 2;
+    private static final int VISIBLE_SPEAR_HOLD_TICKS = 1;
     private static final int MAX_PENDING_WAIT_TICKS = 25;
 
     public LungeHelper() {
@@ -360,7 +360,7 @@ public class LungeHelper extends Module {
         }
 
         // Vanilla 1.21.11 requires a 100% charged attack bar for Spear STAB / Lunge (works on ground and in air)
-        if (client.player.getAttackStrengthScale(0.5F) < 1.0F) {
+        if (client.player.getAttackStrengthScale(0.5F) < 0.85F) {
             int cooldownSlot = getSelectedCooldownSlotIndex();
             if (cooldownSlot >= 0 && cooldownSlot < 9) {
                 selectHotbarSlotWithPacket(client, cooldownSlot);
@@ -506,12 +506,8 @@ public class LungeHelper extends Module {
         return false;
     }
 
-    private boolean isSpearOnCooldown(Minecraft client, int hotbarSlot) {
-        if (client == null || client.player == null || hotbarSlot < 0 || hotbarSlot >= 9) {
-            return false;
-        }
-        ItemStack stack = client.player.getInventory().getItem(hotbarSlot);
-        return !stack.isEmpty() && client.player.getCooldowns().isOnCooldown(stack);
+    private boolean isSpearOnCooldown(Minecraft client, int spearSlot) {
+        return false;
     }
 
     private int computeRandomizedDelayTicks() {
