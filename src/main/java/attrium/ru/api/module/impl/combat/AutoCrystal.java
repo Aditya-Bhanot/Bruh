@@ -99,7 +99,7 @@ public class AutoCrystal extends Module {
     private final NumberSetting minTargetYDelta = register(new NumberSetting(
             "Min Target Y-Delta",
             "Minimum height (blocks) the enemy must be above your feet before AutoCrystal activates",
-            0.85D, 0.0D, 2.5D, 0.05D
+            0.75D, 0.0D, 2.5D, 0.05D
     ));
     private final BooleanSetting autoSwitchCrystal = register(new BooleanSetting(
             "Auto Switch Crystal",
@@ -493,7 +493,7 @@ public class AutoCrystal extends Module {
     }
 
     private boolean isTargetElevatedAbovePlayer(Minecraft client, LivingEntity target) {
-        double requiredDelta = Math.max(0.50D, minTargetYDelta.getValue());
+        double requiredDelta = Math.max(0.0D, minTargetYDelta.getValue());
         double targetMinY = target.getBoundingBox().minY;
         double playerMinY = client.player.getBoundingBox().minY;
         return (targetMinY - playerMinY) >= (requiredDelta - 0.05D);
@@ -680,7 +680,7 @@ public class AutoCrystal extends Module {
 
 
         // Never place a crystal above the enemy's feet (obsidian blocks feet blast -> 0 dmg)
-        if (hitY > target.getBoundingBox().minY + 0.15D) {
+        if (hitY > target.getBoundingBox().minY + 0.45D) {
             return -Float.MAX_VALUE;
         }
         if (eyePos.distanceToSqr(hitX, hitY, hitZ) > rangeSq) {
