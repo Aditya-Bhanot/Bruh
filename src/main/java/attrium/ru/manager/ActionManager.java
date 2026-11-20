@@ -1,5 +1,7 @@
 package attrium.ru.manager;
 
+
+import net.minecraft.network.protocol.game.ServerboundContainerClosePacket;
 import net.minecraft.client.Minecraft;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.inventory.ClickType;
@@ -302,6 +304,9 @@ public class ActionManager {
         if (containerSlot >= 36 && containerSlot <= 44) {
             int hotbarIndex = containerSlot - 36;
             mc.gameMode.handleInventoryMouseClick(containerId, 6, hotbarIndex, ClickType.SWAP, mc.player);
+        if (mc.screen == null && mc.player.connection != null) {
+            mc.player.connection.send(new ServerboundContainerClosePacket(mc.player.inventoryMenu.containerId));
+        }
         }
     }
 }

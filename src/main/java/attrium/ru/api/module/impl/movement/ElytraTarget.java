@@ -93,7 +93,7 @@ public final class ElytraTarget extends Module {
     private final NumberSetting heightRange = register(new NumberSetting(
             "Height Range", "Maximum target distance within which height drop triggers (6.0 default).", 6.0D, 1.0D, 30.0D, 0.1D));
     private final NumberSetting macePreHitRange = register(new NumberSetting(
-            "Mace Pre-Hit Range", "Pre-impact distance threshold to unequip elytra before a mace hit (2.7 default).", 2.7D, 0.5D, 12.0D, 0.1D));
+            "Mace Pre-Hit Range", "Pre-impact distance threshold to unequip elytra before a mace hit (2.7 default).", 5.2D, 0.5D, 12.0D, 0.1D));
     private final NumberSetting minDropDist = register(new NumberSetting(
             "Min Drop Dist", "Minimum drop distance required for chestplate drop and smash preparation (1.5 default).", 1.5D, 0.0D, 20.0D, 0.1D));
 
@@ -118,6 +118,7 @@ public final class ElytraTarget extends Module {
     private int lastElytraEquipCompletedTick = -100;
     private long lastElytraEquippedTimeMs = 0L;
     private boolean wasWearingElytraLastTick = false;
+    private int nextGlidePulseAllowedTick = 0;
     private boolean jumpPulseToggle = false;
     private boolean forceCancelFlightInput = false;
     private boolean migratedLegacyDefaultsOnce = false;
@@ -629,8 +630,11 @@ public final class ElytraTarget extends Module {
         }
 
         if (shouldSendLegalGlideStartPulse()) {
-            jumpPulseToggle = !jumpPulseToggle;
-            event.setJumping(jumpPulseToggle);
+            int _nowTick = MaceTarget.ActionManager.getInstance().getClientTick();
+            if (_nowTick >= nextGlidePulseAllowedTick && mc.player.getDeltaMovement().y < -0.05D) {
+                event.setJumping(true);
+                nextGlidePulseAllowedTick = _nowTick + 5;
+            }
             if (mc.player.isFallFlying()) {
                 windChargeAscentDetected = false;
             }

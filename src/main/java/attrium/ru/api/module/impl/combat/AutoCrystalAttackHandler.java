@@ -19,11 +19,6 @@ import net.minecraft.world.phys.Vec3;
 
 import java.util.Locale;
 
-/**
- * Client-Side Crystal Optimizer Handler (Mojang 1.21.11 Official Mappings):
- * Intercepts outgoing crystal attack packets and immediately discards the EndCrystal client-side
- * when the player is capable of breaking it (accounting for Weakness vs. Strength/Tool).
- */
 public class AutoCrystalAttackHandler implements ServerboundInteractPacket.Handler {
     private final AutoCrystal module;
 
@@ -46,19 +41,29 @@ public class AutoCrystalAttackHandler implements ServerboundInteractPacket.Handl
             return;
         }
 
+        Entity entity = null;
         HitResult hit = mc.hitResult;
-        if (!(hit instanceof EntityHitResult entityHit) || hit.getType() != HitResult.Type.ENTITY) {
+        if (hit instanceof EntityHitResult entityHit && hit.getType() == HitResult.Type.ENTITY) {
+            entity = entityHit.getEntity();
+        } else if (mc.crosshairPickEntity != null) {
+            entity = mc.crosshairPickEntity;
+        }
+
+        if (entity == null || !entity.isAlive()) {
             return;
         }
 
-        Entity entity = entityHit.getEntity();
-        if (entity != null && entity.isAlive() && !(entity instanceof EndCrystal)) {
-            AutoCrystal.notifyMeleeHitEntity(entity);
+        if (!(entity instanceof EndCrystal)) {
+            if (module.isHitCrystalEnabled()) {
+                AutoCrystal.notifyMeleeHitEntity(entity);
+            }
             return;
         }
-        if (!(entity instanceof EndCrystal crystal) || !crystal.isAlive()) {
+
+        if (!module.isCrystalOptimizerEnabled()) {
             return;
         }
+        EndCrystal crystal = (EndCrystal) entity;
 
         int weaknessAmp = getActiveEffectAmplifier(mc, "weakness");
         int strengthAmp = getActiveEffectAmplifier(mc, "strength");

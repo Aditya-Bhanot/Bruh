@@ -416,7 +416,6 @@ public class MaceTarget extends Module {
 
             if (client.gameMode != null) {
                 client.gameMode.useItem(client.player, InteractionHand.MAIN_HAND);
-                client.player.swing(InteractionHand.MAIN_HAND);
             }
 
             this.stageStartTick = clientTickCounter;
@@ -741,7 +740,7 @@ public class MaceTarget extends Module {
             Vec3 lookVec = customLookVec != null ? customLookVec.normalize() : client.player.getViewVector(1.0F);
             Vec3 rayEnd = eyePos.add(lookVec.scale(legalReach));
 
-            AABB targetBox = target.getBoundingBox().inflate(target.getPickRadius());
+            AABB targetBox = target.getBoundingBox().deflate(0.05D);
             if (targetBox.contains(eyePos)) {
                 return true;
             }
@@ -865,7 +864,7 @@ public class MaceTarget extends Module {
     private final NumberSetting aimRange = register(new NumberSetting(
             "Aim Range", "Maximum range to acquire and track targets.", 12.0D, 1.0D, 20.0D, 0.1D));
     private final NumberSetting maceFov = register(new NumberSetting(
-            "Mace FOV", "Field of view cone in degrees for target acquisition.", 360.0D, 1.0D, 360.0D, 1.0D));
+            "Mace FOV", "Field of view cone in degrees for target acquisition.", 120.0D, 1.0D, 360.0D, 1.0D));
     private final NumberSetting aimInAir = register(new NumberSetting(
             "Aim In Air", "Minimum fall distance required before airborne aiming begins.", 1.5D, 0.0D, 10.0D, 0.1D));
 
@@ -1725,7 +1724,7 @@ public class MaceTarget extends Module {
             return;
         }
 
-        double maxSnapDeg = 48.0D;
+        double maxSnapDeg = 24.0D;
         double scale = angularDist > maxSnapDeg ? (maxSnapDeg / angularDist) : 0.95D;
         float nextYaw = currentYaw + (float) (yawDelta * scale);
         float nextPitch = Mth.clamp(currentPitch + (float) (pitchDelta * scale), -89.5F, 89.5F);
