@@ -1,5 +1,7 @@
 package attrium.ru.screens;
 
+
+import attrium.ru.manager.AutoUpdater;
 import com.mojang.blaze3d.platform.InputConstants;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
@@ -4637,6 +4639,25 @@ public class GlassClickGuiScreen extends Screen {
             if ((whiteCol >>> 24) > 8) {
                 guiGraphics.drawString(this.font, bentoResetLayoutComp, resetX + (resetW - rw) / 2, btnY + 9, multiplyAlpha(accent, p0), false);
             }
+            // AutoUpdater pill button to the left of "Open Folder"
+            boolean updReady = AutoUpdater.updateReady;
+            String updStatus = AutoUpdater.getStatusText();
+            String updText = updReady ? "Restart to Update"
+                    : ("Up to date".equals(updStatus) ? "Check Updates" : updStatus);
+            Component updComp = Component.literal(updText).withStyle(nunitoRegularStyle);
+            int updateW = Math.max(90, this.font.width(updComp) + 16);
+            int updateX = folderX - updateW - 8;
+            boolean hoverUpdate = isHovered(mouseX, mouseY, updateX, btnY, updateW, btnH);
+            int updateBg = updReady
+                    ? multiplyAlpha(hoverUpdate ? 0x5500E5FF : 0x3500E5FF, p0)
+                    : multiplyAlpha(hoverUpdate ? 0x38FFFFFF : 0x20FFFFFF, p0);
+            int updateFg = updReady ? multiplyAlpha(0xFF00E5FF, p0) : whiteCol;
+            HudManager.drawRoundedRect(guiGraphics, updateX, btnY, updateW, btnH, 8, updateBg);
+            int uw = this.font.width(updComp);
+            if ((whiteCol >>> 24) > 8) {
+                guiGraphics.drawString(this.font, updComp, updateX + (updateW - uw) / 2, btnY + 9, updateFg, false);
+            }
+
         }
 
         // ---------------------------------------------------------------------
@@ -4852,6 +4873,18 @@ public class GlassClickGuiScreen extends Screen {
             SoundUtil.playTogglePop(true);
             return;
         }
+        boolean updReadyClick = AutoUpdater.updateReady;
+        String updStatusClick = AutoUpdater.getStatusText();
+        String updTextClick = updReadyClick ? "Restart to Update"
+                : ("Up to date".equals(updStatusClick) ? "Check Updates" : updStatusClick);
+        int updateW = Math.max(90, this.font.width(Component.literal(updTextClick).withStyle(nunitoRegularStyle)) + 16);
+        int updateX = folderX - updateW - 8;
+        if (isHovered(mouseX, mouseY, updateX, btnY, updateW, btnH)) {
+            AutoUpdater.onUpdateButtonClicked();
+            SoundUtil.playClick();
+            return;
+        }
+
 
         // Bottom-Left Card (Appearance)
         int lcx = leftCardX + pad;
