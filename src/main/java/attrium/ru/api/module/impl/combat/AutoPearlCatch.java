@@ -1,21 +1,4 @@
-#!/usr/bin/env python3
-"""
-install_autopearlcatch.py
-Installs AutoPearlCatch.java (Elytra-Gliding & Diagonal 3D Interception for Fabric 1.21.11
-Official Mojang Mappings) into ~/Meow/Bruh and registers it in ModuleManager.java.
-
-Usage (in Termux):
-    python3 install_autopearlcatch.py ~/Meow/Bruh
-"""
-
-from __future__ import annotations
-
-import re
-import shutil
-import sys
-from pathlib import Path
-
-AUTO_PEARL_CATCH_JAVA = r'''package attrium.ru.api.module.impl.combat;
+package attrium.ru.api.module.impl.combat;
 
 import attrium.ru.api.events.annotation.SubscribeEvent;
 import attrium.ru.api.events.impl.TickEvent;
@@ -522,60 +505,3 @@ public class AutoPearlCatch extends Module {
         }
     }
 }
-'''
-
-
-def resolve_repo() -> Path:
-    candidates = [Path(sys.argv[1]).expanduser()] if len(sys.argv) > 1 else []
-    candidates.extend([Path.cwd(), Path.home() / "Meow" / "Bruh", Path.home() / "Bruh"])
-    for c in candidates:
-        if (c / "src" / "main" / "java" / "attrium" / "ru").is_dir():
-            return c.resolve()
-    print("[ERROR] Could not locate Attrium repository (src/main/java/attrium/ru).")
-    sys.exit(1)
-
-
-def main() -> None:
-    root = resolve_repo()
-
-    # 1. Write AutoPearlCatch.java
-    mod_path = root / "src/main/java/attrium/ru/api/module/impl/combat/AutoPearlCatch.java"
-    mod_path.parent.mkdir(parents=True, exist_ok=True)
-    if mod_path.exists():
-        shutil.copy2(mod_path, mod_path.with_suffix(".java.bak"))
-    mod_path.write_text(AUTO_PEARL_CATCH_JAVA, encoding="utf-8")
-    print(f"[WRITTEN] {mod_path.relative_to(root)}")
-
-    # 2. Register in ModuleManager.java
-    mm_path = root / "src/main/java/attrium/ru/api/module/ModuleManager.java"
-    if mm_path.exists():
-        src = mm_path.read_text(encoding="utf-8")
-        if "new AutoPearlCatch()" in src:
-            print("[OK]      ModuleManager.java already registers AutoPearlCatch")
-        else:
-            updated = src
-            imp = "import attrium.ru.api.module.impl.combat.AutoPearlCatch;"
-            if imp not in updated and "import attrium.ru.api.module.impl.combat.AutoCrystal;" in updated:
-                updated = updated.replace(
-                    "import attrium.ru.api.module.impl.combat.AutoCrystal;",
-                    "import attrium.ru.api.module.impl.combat.AutoCrystal;\n" + imp,
-                    1,
-                )
-            updated, n = re.subn(
-                r"(\bregister\(\s*new\s+AutoCrystal\(\)\s*\)\s*;)",
-                r"\1\n        register(new AutoPearlCatch());",
-                updated,
-                count=1,
-            )
-            if n > 0:
-                shutil.copy2(mm_path, mm_path.with_suffix(".java.bak"))
-                mm_path.write_text(updated, encoding="utf-8")
-                print("[PATCHED] ModuleManager.java (registered AutoPearlCatch)")
-            else:
-                print("[MANUAL]  Register new AutoPearlCatch() in ModuleManager.java next to AutoCrystal")
-
-    print(f"\nNext step:\n  cd {root} && ./gradlew build --no-daemon")
-
-
-if __name__ == "__main__":
-    main()

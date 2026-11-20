@@ -21,6 +21,7 @@ import attrium.ru.api.module.impl.combat.AuraModule;
 import attrium.ru.api.module.impl.combat.AntiBot;
 import attrium.ru.api.module.impl.combat.AimAssist;
 import attrium.ru.api.module.impl.combat.AutoCrystal;
+import attrium.ru.api.module.impl.combat.AutoPearlCatch;
 import attrium.ru.api.module.impl.combat.AutoGApple;
 import attrium.ru.api.module.impl.combat.AutoSwap;
 import attrium.ru.api.module.impl.combat.AutoTotem;
@@ -197,6 +198,7 @@ public final class ModuleManager {
         register(new AimAssist());
         register(new AuraModule());
         register(new AutoCrystal());
+        register(new AutoPearlCatch());
         register(new AutoGApple());
         register(new AutoSwap());
         register(new AutoTotem());
