@@ -1,10 +1,14 @@
-name: Rolling JAR Release
+name: Build & Auto-Versioned Release
 
 on:
   push:
-    branches:
-      - master
-      - main
+    branches: [ master ]
+  workflow_dispatch:
+    inputs:
+      release_notes:
+        description: "Optional extra changelog notes"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -14,31 +18,86 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v4
         with:
-          java-version: '21'
-          distribution: 'temurin'
-          cache: gradle
+          java-version: "21"
+          distribution: "temurin"
+          cache: "gradle"
 
-      - name: Grant execute permission for gradlew
-        run: chmod +x gradlew
-
-      - name: Build JAR with Gradle
-        run: ./gradlew build --no-daemon
-
-      - name: Remove sources JAR
-        run: rm -f build/libs/*-sources.jar
-
-      - name: Replace Single Rolling Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Compute automatic version
+        id: ver
         run: |
-          gh release delete latest --yes || true
-          git push origin :refs/tags/latest || true
-          gh release create latest build/libs/*.jar \
-            --title "Attrium Client (Latest)" \
-            --notes "Latest build from commit $(git rev-parse --short HEAD)"
+          BASE_VER="1.0.${{ github.run_number }}"
+          TAG="v${BASE_VER}"
+          echo "version=${BASE_VER}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Auto-versioning build as ${TAG}"
+
+      - name: Inject version into gradle.properties & fabric.mod.json
+        run: |
+          VER="${{ steps.ver.outputs.version }}"
+          if [ -f gradle.properties ]; then
+            sed -i "s/^mod_version=.*/mod_version=${VER}/" gradle.properties
+          fi
+          if [ -f src/main/resources/fabric.mod.json ]; then
+            python3 -c "
+          import json, pathlib
+          p = pathlib.Path('src/main/resources/fabric.mod.json')
+          data = json.loads(p.read_text(encoding='utf-8'))
+          data['version'] = '${VER}'
+          p.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
+          "
+          fi
+
+      - name: Build Fabric JAR
+        run: |
+          chmod +x gradlew
+          ./gradlew build --no-daemon
+
+      - name: Stage versioned JAR artifact
+        run: |
+          mkdir -p dist
+          JAR_FILE=$(find build/libs -maxdepth 1 -type f -name '*.jar' ! -name '*-sources.jar' ! -name '*-dev.jar' | head -n 1)
+          if [ -z "$JAR_FILE" ]; then
+            echo "No built JAR found in build/libs!"
+            exit 1
+          fi
+          cp "$JAR_FILE" "dist/Attrium-${{ steps.ver.outputs.tag }}.jar"
+          ls -lh dist/
+
+      - name: Generate commit changelog
+        id: notes
+        run: |
+          PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -n "$PREV_TAG" ]; then
+            CHANGES=$(git log "${PREV_TAG}..HEAD" --pretty=format:"- %s" -n 10)
+          else
+            CHANGES=$(git log -n 8 --pretty=format:"- %s")
+          fi
+          EXTRA="${{ github.event.inputs.release_notes }}"
+          {
+            echo "body<<EOF"
+            if [ -n "$EXTRA" ]; then
+              echo "$EXTRA"
+              echo ""
+            fi
+            echo "$CHANGES"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: "Attrium ${{ steps.ver.outputs.tag }}"
+          body: ${{ steps.notes.outputs.body }}
+          generate_release_notes: false
+          files: dist/Attrium-${{ steps.ver.outputs.tag }}.jar
+          make_latest: true
+          
