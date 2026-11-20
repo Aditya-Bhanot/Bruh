@@ -101,3 +101,14 @@ jobs:
           files: dist/Attrium-${{ steps.ver.outputs.tag }}.jar
           make_latest: true
           
+
+      - name: Keep only latest 3 releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release list --limit 100 --json tagName,createdAt --jq 'sort_by(.createdAt) | reverse | .[3:] | .[].tagName' | while read -r TAG; do
+            if [ -n "$TAG" ]; then
+              echo "Deleting old release & tag: $TAG"
+              gh release delete "$TAG" --yes --cleanup-tag
+            fi
+          done
