@@ -1,6 +1,8 @@
 package attrium.ru.api.module.impl.visual;
 
+import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.util.Mth;
+import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.attribute.EnvironmentAttribute;
 import net.minecraft.world.attribute.EnvironmentAttributes;
 import attrium.ru.api.module.Module;
@@ -126,6 +128,12 @@ public class Ambience extends Module {
             true
     ));
 
+    private final NumberSetting saturation = register(new NumberSetting(
+            "Saturation",
+            "Color vibrancy multiplier for the world (0.5 - 1.8).",
+            1.15D, 0.50D, 1.80D, 0.05D
+    ));
+
     private final NumberSetting brightnessBoost = register(new NumberSetting(
             "Brightness Boost",
             "Lifts ambient sky light floor so dark/night themes stay crisp and easy to see.",
@@ -155,7 +163,7 @@ public class Ambience extends Module {
             "Weather",
             "Client-side weather override without affecting the server.",
             "Clear",
-            "Server", "Clear", "Rain", "Thunder"
+            "Server", "Clear", "Rain", "Snow", "Thunder"
     ));
 
     private final ModeSetting fogStyle = register(new ModeSetting(
@@ -583,7 +591,7 @@ public class Ambience extends Module {
         if (mod == null || !mod.isEnabled()) return original;
         String w = mod.weather.getValue();
         if ("Clear".equalsIgnoreCase(w)) return 0.0F;
-        if ("Rain".equalsIgnoreCase(w) || "Thunder".equalsIgnoreCase(w)) return 1.0F;
+        if ("Rain".equalsIgnoreCase(w) || "Snow".equalsIgnoreCase(w) || "Thunder".equalsIgnoreCase(w)) return 1.0F;
         return original;
     }
 
@@ -592,7 +600,7 @@ public class Ambience extends Module {
         if (mod == null || !mod.isEnabled()) return original;
         String w = mod.weather.getValue();
         if ("Thunder".equalsIgnoreCase(w)) return 1.0F;
-        if ("Clear".equalsIgnoreCase(w) || "Rain".equalsIgnoreCase(w)) return 0.0F;
+        if ("Clear".equalsIgnoreCase(w) || "Rain".equalsIgnoreCase(w) || "Snow".equalsIgnoreCase(w)) return 0.0F;
         return original;
     }
 
@@ -647,4 +655,73 @@ public class Ambience extends Module {
         }
         return packRgb(r * 255.0F, g * 255.0F, b * 255.0F);
     }
+
+    // =========================================================================
+    // Compatibility Bridges for Existing Attrium World/Fog/Weather/Light Mixins
+    // =========================================================================
+    public Biome.Precipitation getForcedPrecipitation() {
+        if (!isEnabled()) {
+            return null;
+        }
+        String w = weather.getValue();
+        if ("Clear".equalsIgnoreCase(w)) {
+            return Biome.Precipitation.NONE;
+        }
+        if ("Snow".equalsIgnoreCase(w)) {
+            return Biome.Precipitation.SNOW;
+        }
+        if ("Rain".equalsIgnoreCase(w) || "Thunder".equalsIgnoreCase(w)) {
+            return Biome.Precipitation.RAIN;
+        }
+        return null;
+    }
+
+    public long getInternalTime() {
+        updateFrame();
+        return getOverriddenDayTime(12000L);
+    }
+
+    public void syncWeather(ClientLevel level, ClientLevel.ClientLevelData clientLevelData) {
+        if (!isEnabled() || level == null) {
+            return;
+        }
+        String w = weather.getValue();
+        if ("Server".equalsIgnoreCase(w)) {
+            return;
+        }
+        if ("Clear".equalsIgnoreCase(w)) {
+            level.setRainLevel(0.0F);
+            level.setThunderLevel(0.0F);
+        } else if ("Rain".equalsIgnoreCase(w) || "Snow".equalsIgnoreCase(w)) {
+            level.setRainLevel(1.0F);
+            level.setThunderLevel(0.0F);
+        } else if ("Thunder".equalsIgnoreCase(w)) {
+            level.setRainLevel(1.0F);
+            level.setThunderLevel(1.0F);
+        }
+    }
+
+    public boolean hasCustomFog() {
+        return isEnabled() && !isVanillaTheme();
+    }
+
+    public int getCustomFogColor() {
+        updateFrame();
+        return 0xFF000000 | packRgb(curFogR, curFogG, curFogB);
+    }
+
+    public float getSaturationFactor() {
+        if (!isEnabled()) {
+            return 1.0F;
+        }
+        return Mth.clamp(saturation.getValue().floatValue(), 0.50F, 1.80F);
+    }
+
+    public float getBrightnessValue() {
+        if (!isEnabled()) {
+            return 0.0F;
+        }
+        return Mth.clamp(brightnessBoost.getValue().floatValue(), 0.0F, 1.0F);
+    }
+
 }
