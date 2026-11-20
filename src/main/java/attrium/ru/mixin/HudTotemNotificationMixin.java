@@ -12,8 +12,8 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import attrium.ru.manager.HudManager;
 
 /**
- * Dispatches an animated Gold Star HUD Notification toast whenever a player pops a Totem of Undying
- * (entity event status byte 35).
+ * Tracks live totem pop counts and dispatches Gold Shield HUD Notifications whenever
+ * a player pops a Totem of Undying (entity event status byte 35).
  */
 @Mixin(ClientPacketListener.class)
 public class HudTotemNotificationMixin {
@@ -29,8 +29,7 @@ public class HudTotemNotificationMixin {
         }
         Entity entity = packet.getEntity(mc.level);
         if (entity instanceof Player player) {
-            String name = player.getName().getString();
-            HudManager.pushNotification(name, "Popped a Totem!", HudManager.TYPE_ALERT);
+            HudManager.recordTotemPop(player.getUUID(), player.getName().getString());
         }
     }
 }

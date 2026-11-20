@@ -1,449 +1,538 @@
 package attrium.ru.api.module.impl.combat;
 
-import com.mojang.blaze3d.platform.InputConstants;
-import net.minecraft.client.KeyMapping;
+import attrium.ru.api.events.annotation.SubscribeEvent;
+import attrium.ru.api.events.impl.PacketEvent;
+import attrium.ru.api.events.impl.TickEvent;
+import attrium.ru.api.module.Module;
+import attrium.ru.api.module.ModuleCategory;
+import attrium.ru.api.settings.impl.BooleanSetting;
+import attrium.ru.api.settings.impl.ModeSetting;
+import attrium.ru.api.settings.impl.NumberSetting;
 import net.minecraft.client.Minecraft;
-import net.minecraft.world.entity.Entity;
-import net.minecraft.world.entity.boss.enderdragon.EndCrystal;
+import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
+import net.minecraft.client.gui.screens.inventory.InventoryScreen;
+import net.minecraft.network.protocol.Packet;
+import net.minecraft.network.protocol.game.ClientboundEntityEventPacket;
+import net.minecraft.network.protocol.game.ServerboundContainerClosePacket;
 import net.minecraft.world.inventory.ClickType;
 import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
-import attrium.ru.api.module.Module;
-import attrium.ru.api.module.ModuleCategory;
-import attrium.ru.api.settings.impl.BooleanSetting;
-import attrium.ru.api.settings.impl.MultiModeSetting;
-import attrium.ru.api.settings.impl.NumberSetting;
-import attrium.ru.utils.inventory.InventoryTask;
 
-import java.util.Locale;
-import java.util.function.Predicate;
+import java.lang.reflect.Field;
+import java.util.concurrent.ThreadLocalRandom;
 
+/**
+ * Multi-Mode AutoTotem (Legit, Hover, Silent) for Attrium (Minecraft 1.21.11 Official Mojang Mappings).
+ *
+ * - Exact InventoryMenu container slot mapping (main 9-35, hotbar 36-44, offhand 45).
+ * - Instant totem pop detection via ClientboundEntityEventPacket (eventId == 35) + tick health guard.
+ * - Zero-allocation primitive state machine + cursor-stack failsafe so items are never dropped.
+ */
 public class AutoTotem extends Module {
-    private static final long EQUIP_ATTEMPT_COOLDOWN_MS = 250L;
-    private static final long SLOWING_DOWN_DELAY_MS = 1L;
-    private static final long SWAP_DELAY_MS = 25L;
-    private static final long AWAIT_SWITCH_TIMEOUT_MS = 50L;
-    private static final long RESTORE_SLOT_DELAY_MS = 25L;
-    private static final long SPEEDING_UP_DELAY_MS = 25L;
 
-    private final NumberSetting healthThreshold = register(new NumberSetting("Health", "Health threshold.", 4.5, 1.0, 20.0, 0.5));
-    private final NumberSetting elytraHealth = register(new NumberSetting("Elytra Health", "Elytra health threshold.", 8.5, 1.0, 20.0, 0.5));
-    private final MultiModeSetting triggers = register(new MultiModeSetting("Triggers", "Totem equip triggers.", new String[]{"Crystal", "Fall", "Elytra"}, "Crystal", "Fall", "Elytra"));
-    private final BooleanSetting returnItem = register(new BooleanSetting("Return Item", "Return offhand item after danger.", true));
-    private final NumberSetting crystalDistance = register(new NumberSetting("Crystal Distance", "Danger crystal distance.", 4.0, 1.0, 6.0, 0.5));
-    private final NumberSetting crystalHeight = register(new NumberSetting("Crystal Height", "Danger crystal vertical distance.", 2.5, 0.5, 8.0, 0.5));
-    private final NumberSetting fallHeight = register(new NumberSetting("Fall Height", "Danger fall height.", 15.0, 5.0, 50.0, 1.0));
+    // State machine constants (primitive int for zero-allocation ticks)
+    private static final int STATE_IDLE = 0;
+    private static final int STATE_REACTION_WAIT = 1;
+    private static final int STATE_OPEN_INVENTORY = 2;
+    private static final int STATE_ACTION_WAIT = 3;
+    private static final int STATE_CLICK_SECOND_STEP = 4;
+    private static final int STATE_CLOSE_WAIT = 5;
 
-    private int savedSlot = -1;
-    private int totemSlot = -1;
-    private int previousOffhandSourceSlot = -1;
-    private float fallStartY;
-    private boolean wasFalling;
-    private boolean keysOverridden;
-    private boolean wasForwardPressed;
-    private boolean wasBackPressed;
-    private boolean wasLeftPressed;
-    private boolean wasRightPressed;
-    private boolean wasJumpPressed;
-    private boolean wasSprintPressed;
-    private ItemStack previousOffhandStack = ItemStack.EMPTY;
-    private boolean needsReturn;
-    private long actionStartTime;
-    private long lastEquipAttemptMs;
-    private Phase phase = Phase.READY;
+    private static final int OFFHAND_SLOT = 45;
+    private static final int OFFHAND_SWAP_BUTTON = 40;
+    private static final byte TOTEM_POP_EVENT_ID = 35;
 
-    private enum Phase {
-        READY,
-        SLOWING_DOWN,
-        SWAP_TOTEM,
-        AWAIT_SWITCH,
-        RESTORE_SLOT,
-        RETURN_SLOWING_DOWN,
-        RETURN_ITEM,
-        SPEEDING_UP
-    }
+    // One-time cached reflection handle for AbstractContainerScreen.hoveredSlot (no per-tick allocation)
+    private static final Field HOVERED_SLOT_FIELD = resolveHoveredSlotField();
+
+    private final ModeSetting mode = register(new ModeSetting(
+            "Mode",
+            "Legit (opens real inventory), Hover (manual inventory assist), or Silent (packet swap)",
+            "Legit", "Legit", "Hover", "Silent"
+    ));
+    private final ModeSetting swapMethod = register(new ModeSetting(
+            "Swap Method",
+            "Offhand Key (F) 1-click SWAP (button 40) or 2-step Click & Move PICKUP",
+            "Offhand Key (F)", "Offhand Key (F)", "Click & Move"
+    ));
+    private final NumberSetting minReactionDelay = register(new NumberSetting(
+            "Min Reaction Delay",
+            "Minimum ticks before reacting to a totem pop or low-health trigger",
+            1.0D, 1.0D, 4.0D, 1.0D
+    ));
+    private final NumberSetting maxReactionDelay = register(new NumberSetting(
+            "Max Reaction Delay",
+            "Maximum ticks before reacting to a totem pop or low-health trigger",
+            3.0D, 1.0D, 4.0D, 1.0D
+    ));
+    private final NumberSetting minActionDelay = register(new NumberSetting(
+            "Min Action Delay",
+            "Minimum ticks between opening inventory, clicking totem, and closing",
+            1.0D, 1.0D, 3.0D, 1.0D
+    ));
+    private final NumberSetting maxActionDelay = register(new NumberSetting(
+            "Max Action Delay",
+            "Maximum ticks between opening inventory, clicking totem, and closing",
+            2.0D, 1.0D, 3.0D, 1.0D
+    ));
+    private final NumberSetting healthThreshold = register(new NumberSetting(
+            "Health Threshold",
+            "Equip totem if health + absorption drops at or below this value",
+            12.0D, 1.0D, 20.0D, 0.5D
+    ));
+    private final BooleanSetting autoClose = register(new BooleanSetting(
+            "Auto Close",
+            "Automatically close the inventory screen after equipping a totem in Legit/Hover modes",
+            true
+    ));
+
+    // Primitive state fields (zero per-tick heap allocations)
+    private int state = STATE_IDLE;
+    private int delayTicks = 0;
+    private int targetContainerSlot = -1;
+    private boolean openedScreenOurselves = false;
+    private boolean popTriggered = false;
+    private int hoverWaitTicks = -1;
 
     public AutoTotem() {
-        super("Auto Totem", "Automatically equips totems.", ModuleCategory.COMBAT);
-        crystalDistance.visibleWhen(() -> triggers.isSelected("Crystal"));
-        crystalHeight.visibleWhen(() -> triggers.isSelected("Crystal"));
-        fallHeight.visibleWhen(() -> triggers.isSelected("Fall"));
-        elytraHealth.visibleWhen(() -> triggers.isSelected("Elytra"));
+        super("AutoTotem", "Multi-mode AutoTotem (Legit, Hover, Silent) with exact slot mapping", ModuleCategory.COMBAT);
     }
 
     @Override
-    public void onTick(Minecraft client) {
-        if (client.player == null || client.gameMode == null || client.level == null) {
-            resetState();
-            clearReturnState();
-            return;
-        }
-
-        updateFallTracking(client);
-
-        if (phase != Phase.READY) {
-            execute(client);
-            return;
-        }
-
-        boolean shouldEquip = shouldEquipTotem(client);
-        if (shouldEquip) {
-            long now = System.currentTimeMillis();
-            if (now - lastEquipAttemptMs >= EQUIP_ATTEMPT_COOLDOWN_MS) {
-                tryEquipTotem(client);
-            }
-            return;
-        }
-
-        if (needsReturn && returnItem.getValue() && !previousOffhandStack.isEmpty()) {
-            if (isTotemInOffhand(client)) {
-                startLegitReturn(client);
-            } else {
-                clearReturnState();
-            }
-        }
+    protected void onEnable() {
+        resetState();
     }
 
     @Override
     protected void onDisable() {
+        Minecraft mc = Minecraft.getInstance();
+        if (mc != null && mc.player != null && mc.gameMode != null) {
+            returnCarriedStackSafely(mc);
+            if (openedScreenOurselves && mc.screen instanceof InventoryScreen) {
+                mc.player.closeContainer();
+            }
+        }
         resetState();
-        clearReturnState();
     }
 
-    private void tryEquipTotem(Minecraft client) {
-        if (phase != Phase.READY || client.screen != null || isPreferredTotemAlreadyInOffhand(client)) {
+    private void resetState() {
+        this.state = STATE_IDLE;
+        this.delayTicks = 0;
+        this.targetContainerSlot = -1;
+        this.openedScreenOurselves = false;
+        this.popTriggered = false;
+        this.hoverWaitTicks = -1;
+    }
+
+    @SubscribeEvent
+    public void onPacket(PacketEvent event) {
+        if (!this.isEnabled() || event == null || event.isSend()) {
             return;
         }
+        Packet<?> packet = event.getPacket();
+        if (packet instanceof ClientboundEntityEventPacket entityEvent) {
+            if (entityEvent.getEventId() != TOTEM_POP_EVENT_ID) {
+                return;
+            }
+            Minecraft mc = Minecraft.getInstance();
+            if (mc == null || mc.player == null || mc.level == null) {
+                return;
+            }
+            if (entityEvent.getEntity(mc.level) == mc.player) {
+                this.popTriggered = true;
+            }
+        }
+    }
 
-        lastEquipAttemptMs = System.currentTimeMillis();
-        Slot slot = findPreferredTotemSlot(client);
-        if (slot == null) {
+    @SubscribeEvent
+    public void onTick(TickEvent.Pre event) {
+        if (!this.isEnabled()) {
             return;
         }
-
-        int slotId = getMenuSlotId(client, slot);
-        if (slotId == -1) {
-            return;
-        }
-
-        savedSlot = client.player.getInventory().getSelectedSlot();
-        totemSlot = slotId;
-        previousOffhandStack = client.player.getOffhandItem().copy();
-        previousOffhandSourceSlot = slotId;
-        needsReturn = !previousOffhandStack.isEmpty();
-        startLegitEquip(client);
-    }
-
-    private void startLegitEquip(Minecraft client) {
-        captureKeyStates(client);
-        phase = Phase.SLOWING_DOWN;
-        actionStartTime = System.currentTimeMillis();
-        keysOverridden = false;
-    }
-
-    private void startLegitReturn(Minecraft client) {
-        captureKeyStates(client);
-        phase = Phase.RETURN_SLOWING_DOWN;
-        actionStartTime = System.currentTimeMillis();
-        keysOverridden = false;
-    }
-
-    private void execute(Minecraft client) {
-        if (client.player == null || client.gameMode == null || client.screen != null) {
+        Minecraft mc = event != null ? event.getClient() : Minecraft.getInstance();
+        if (mc == null || mc.player == null || mc.level == null || mc.gameMode == null) {
             resetState();
             return;
         }
 
-        long elapsed = System.currentTimeMillis() - actionStartTime;
-        switch (phase) {
-            case SLOWING_DOWN -> {
-                stopPlayerInput(client);
-                if (elapsed > SLOWING_DOWN_DELAY_MS) {
-                    phase = Phase.SWAP_TOTEM;
-                    actionStartTime = System.currentTimeMillis();
-                }
+        // If offhand already holds a totem and we're not waiting to close our own screen, stay idle
+        if (hasTotemInOffhand(mc)) {
+            this.popTriggered = false;
+            if (state == STATE_CLOSE_WAIT) {
+                tickCloseWait(mc);
+            } else if (state != STATE_IDLE) {
+                returnCarriedStackSafely(mc);
+                resetState();
             }
-            case SWAP_TOTEM -> {
-                stopPlayerInput(client);
-                if (elapsed <= SWAP_DELAY_MS) {
+            return;
+        }
+
+        String activeMode = mode.getValue();
+        if ("Hover".equalsIgnoreCase(activeMode)) {
+            tickHoverMode(mc);
+        } else if ("Silent".equalsIgnoreCase(activeMode)) {
+            tickSilentMode(mc);
+        } else {
+            tickLegitMode(mc);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Mode 1: LEGIT (Opens real InventoryScreen, mimics human pacing)
+    // -------------------------------------------------------------------------
+    private void tickLegitMode(Minecraft mc) {
+        switch (state) {
+            case STATE_IDLE -> {
+                if (!shouldTriggerRefill(mc)) {
                     return;
                 }
-                if (totemSlot == -1 || !clickOffhandSwap(client, totemSlot)) {
+                int slot = findTotemContainerSlot(mc);
+                if (slot == -1) {
+                    popTriggered = false;
+                    return;
+                }
+                targetContainerSlot = slot;
+                delayTicks = randomRange(minReactionDelay.getValue().intValue(), maxReactionDelay.getValue().intValue());
+                state = STATE_REACTION_WAIT;
+            }
+            case STATE_REACTION_WAIT -> {
+                if (delayTicks > 0) {
+                    delayTicks--;
+                    return;
+                }
+                // Wait if another container (chest, anvil, etc.) is currently open
+                if (mc.screen != null && !(mc.screen instanceof InventoryScreen)) {
+                    return;
+                }
+                state = STATE_OPEN_INVENTORY;
+            }
+            case STATE_OPEN_INVENTORY -> {
+                if (!(mc.screen instanceof InventoryScreen)) {
+                    mc.setScreen(new InventoryScreen(mc.player));
+                    openedScreenOurselves = true;
+                }
+                delayTicks = randomRange(minActionDelay.getValue().intValue(), maxActionDelay.getValue().intValue());
+                state = STATE_ACTION_WAIT;
+            }
+            case STATE_ACTION_WAIT -> {
+                if (!(mc.screen instanceof InventoryScreen)) {
+                    // User manually closed screen early
+                    returnCarriedStackSafely(mc);
                     resetState();
                     return;
                 }
-                phase = Phase.AWAIT_SWITCH;
-                actionStartTime = System.currentTimeMillis();
-            }
-            case AWAIT_SWITCH -> {
-                stopPlayerInput(client);
-                if (isTotemInOffhand(client) || elapsed > AWAIT_SWITCH_TIMEOUT_MS) {
-                    phase = Phase.RESTORE_SLOT;
-                    actionStartTime = System.currentTimeMillis();
-                }
-            }
-            case RESTORE_SLOT -> {
-                stopPlayerInput(client);
-                if (elapsed <= RESTORE_SLOT_DELAY_MS) {
+                if (delayTicks > 0) {
+                    delayTicks--;
                     return;
                 }
-                if (savedSlot >= 0 && savedSlot <= 8) {
-                    InventoryTask.switchTo(savedSlot);
-                }
-                phase = Phase.SPEEDING_UP;
-                actionStartTime = System.currentTimeMillis();
-            }
-            case RETURN_SLOWING_DOWN -> {
-                stopPlayerInput(client);
-                if (elapsed > SLOWING_DOWN_DELAY_MS) {
-                    phase = Phase.RETURN_ITEM;
-                    actionStartTime = System.currentTimeMillis();
-                }
-            }
-            case RETURN_ITEM -> {
-                stopPlayerInput(client);
-                if (elapsed <= SWAP_DELAY_MS) {
+                targetContainerSlot = findTotemContainerSlot(mc);
+                if (targetContainerSlot == -1) {
+                    finishAndQueueClose(mc);
                     return;
                 }
-                if (attemptReturnPreviousItem(client)) {
-                    clearReturnState();
-                    phase = Phase.SPEEDING_UP;
-                    actionStartTime = System.currentTimeMillis();
+                int syncId = mc.player.inventoryMenu.containerId;
+                if (isOffhandKeySwap()) {
+                    mc.gameMode.handleInventoryMouseClick(
+                            syncId, targetContainerSlot, OFFHAND_SWAP_BUTTON, ClickType.SWAP, mc.player
+                    );
+                    finishAndQueueClose(mc);
                 } else {
-                    resetState();
-                    clearReturnState();
+                    mc.gameMode.handleInventoryMouseClick(
+                            syncId, targetContainerSlot, 0, ClickType.PICKUP, mc.player
+                    );
+                    delayTicks = 1;
+                    state = STATE_CLICK_SECOND_STEP;
                 }
             }
-            case SPEEDING_UP -> {
-                if (elapsed >= SPEEDING_UP_DELAY_MS) {
-                    restoreKeyStates(client);
+            case STATE_CLICK_SECOND_STEP -> {
+                if (!(mc.screen instanceof InventoryScreen)) {
+                    returnCarriedStackSafely(mc);
                     resetState();
+                    return;
+                }
+                if (delayTicks > 0) {
+                    delayTicks--;
+                    return;
+                }
+                int syncId = mc.player.inventoryMenu.containerId;
+                mc.gameMode.handleInventoryMouseClick(
+                        syncId, OFFHAND_SLOT, 0, ClickType.PICKUP, mc.player
+                );
+                // If an old item ended up on the cursor, put it back cleanly
+                returnCarriedStackSafely(mc);
+                finishAndQueueClose(mc);
+            }
+            case STATE_CLOSE_WAIT -> tickCloseWait(mc);
+            default -> resetState();
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Mode 2: HOVER (Manual Inventory Assist)
+    // -------------------------------------------------------------------------
+    private void tickHoverMode(Minecraft mc) {
+        if (!(mc.screen instanceof InventoryScreen invScreen)) {
+            hoverWaitTicks = -1;
+            if (state != STATE_IDLE) {
+                returnCarriedStackSafely(mc);
+                resetState();
+            }
+            return;
+        }
+
+        if (state == STATE_CLICK_SECOND_STEP) {
+            if (delayTicks > 0) {
+                delayTicks--;
+                return;
+            }
+            int syncId = mc.player.inventoryMenu.containerId;
+            mc.gameMode.handleInventoryMouseClick(syncId, OFFHAND_SLOT, 0, ClickType.PICKUP, mc.player);
+            returnCarriedStackSafely(mc);
+            finishAndQueueClose(mc);
+            return;
+        }
+
+        if (state == STATE_CLOSE_WAIT) {
+            tickCloseWait(mc);
+            return;
+        }
+
+        // First check if the player's cursor is hovering directly over a Totem slot
+        int slotToSwap = getHoveredTotemContainerSlot(invScreen);
+        if (slotToSwap == -1) {
+            // Fall back to automatic nearest totem after Action Delay ticks
+            if (hoverWaitTicks < 0) {
+                hoverWaitTicks = randomRange(minActionDelay.getValue().intValue(), maxActionDelay.getValue().intValue());
+                return;
+            }
+            if (hoverWaitTicks > 0) {
+                hoverWaitTicks--;
+                return;
+            }
+            slotToSwap = findTotemContainerSlot(mc);
+            if (slotToSwap == -1) {
+                return;
+            }
+        }
+
+        int syncId = mc.player.inventoryMenu.containerId;
+        if (isOffhandKeySwap()) {
+            mc.gameMode.handleInventoryMouseClick(
+                    syncId, slotToSwap, OFFHAND_SWAP_BUTTON, ClickType.SWAP, mc.player
+            );
+            hoverWaitTicks = -1;
+            finishAndQueueClose(mc);
+        } else {
+            mc.gameMode.handleInventoryMouseClick(
+                    syncId, slotToSwap, 0, ClickType.PICKUP, mc.player
+            );
+            hoverWaitTicks = -1;
+            delayTicks = 1;
+            state = STATE_CLICK_SECOND_STEP;
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Mode 3: SILENT (No-GUI Packet Swap + Close Packet)
+    // -------------------------------------------------------------------------
+    private void tickSilentMode(Minecraft mc) {
+        if (mc.screen != null) {
+            return;
+        }
+
+        switch (state) {
+            case STATE_IDLE -> {
+                if (!shouldTriggerRefill(mc)) {
+                    return;
+                }
+                int slot = findTotemContainerSlot(mc);
+                if (slot == -1) {
+                    popTriggered = false;
+                    return;
+                }
+                targetContainerSlot = slot;
+                delayTicks = randomRange(minReactionDelay.getValue().intValue(), maxReactionDelay.getValue().intValue());
+                state = STATE_REACTION_WAIT;
+            }
+            case STATE_REACTION_WAIT -> {
+                if (delayTicks > 0) {
+                    delayTicks--;
+                    return;
+                }
+                targetContainerSlot = findTotemContainerSlot(mc);
+                if (targetContainerSlot == -1) {
+                    resetState();
+                    return;
+                }
+                int syncId = mc.player.inventoryMenu.containerId;
+                if (isOffhandKeySwap()) {
+                    mc.gameMode.handleInventoryMouseClick(
+                            syncId, targetContainerSlot, OFFHAND_SWAP_BUTTON, ClickType.SWAP, mc.player
+                    );
+                    sendSilentClosePacket(mc, syncId);
+                    resetState();
+                } else {
+                    mc.gameMode.handleInventoryMouseClick(
+                            syncId, targetContainerSlot, 0, ClickType.PICKUP, mc.player
+                    );
+                    delayTicks = 1;
+                    state = STATE_CLICK_SECOND_STEP;
                 }
             }
-            case READY -> {
+            case STATE_CLICK_SECOND_STEP -> {
+                if (delayTicks > 0) {
+                    delayTicks--;
+                    return;
+                }
+                int syncId = mc.player.inventoryMenu.containerId;
+                mc.gameMode.handleInventoryMouseClick(
+                        syncId, OFFHAND_SLOT, 0, ClickType.PICKUP, mc.player
+                );
+                returnCarriedStackSafely(mc);
+                sendSilentClosePacket(mc, syncId);
+                resetState();
             }
+            default -> resetState();
         }
     }
 
-    private void updateFallTracking(Minecraft client) {
-        boolean falling = client.player.getDeltaMovement().y < -0.1 && !client.player.onGround() && !client.player.onClimbable() && !client.player.isInWater();
-        if (falling && !wasFalling) {
-            fallStartY = (float) client.player.getY();
+    private void finishAndQueueClose(Minecraft mc) {
+        popTriggered = false;
+        if (Boolean.TRUE.equals(autoClose.getValue()) && mc.screen instanceof InventoryScreen) {
+            delayTicks = 1;
+            state = STATE_CLOSE_WAIT;
+        } else {
+            returnCarriedStackSafely(mc);
+            resetState();
         }
-        if (client.player.onGround() || client.player.isInWater() || client.player.onClimbable()) {
-            fallStartY = (float) client.player.getY();
-        }
-        wasFalling = falling;
     }
 
-    private boolean shouldEquipTotem(Minecraft client) {
-        if (client.player.getHealth() <= healthThreshold.getFloat()) {
+    private void tickCloseWait(Minecraft mc) {
+        if (delayTicks > 0) {
+            delayTicks--;
+            return;
+        }
+        returnCarriedStackSafely(mc);
+        if (Boolean.TRUE.equals(autoClose.getValue()) && mc.screen instanceof InventoryScreen) {
+            mc.player.closeContainer();
+        }
+        resetState();
+    }
+
+    private void sendSilentClosePacket(Minecraft mc, int syncId) {
+        if (mc.player.connection != null) {
+            mc.player.connection.send(new ServerboundContainerClosePacket(syncId));
+        }
+    }
+
+    private boolean shouldTriggerRefill(Minecraft mc) {
+        if (popTriggered) {
             return true;
         }
-        if (triggers.isSelected("Elytra") && client.player.isFallFlying() && client.player.getHealth() <= elytraHealth.getFloat()) {
-            return true;
-        }
-        if (triggers.isSelected("Fall") && fallStartY - (float) client.player.getY() >= fallHeight.getFloat() && client.player.getDeltaMovement().y < -0.1) {
-            return true;
-        }
-        return triggers.isSelected("Crystal") && checkCrystalDanger(client);
+        float totalHp = mc.player.getHealth() + mc.player.getAbsorptionAmount();
+        return totalHp <= healthThreshold.getValue().floatValue();
     }
 
-    private boolean checkCrystalDanger(Minecraft client) {
-        double maxHorizontal = crystalDistance.getValue();
-        double maxVertical = crystalHeight.getValue();
-        for (Entity entity : client.level.entitiesForRendering()) {
-            if (!(entity instanceof EndCrystal)) {
-                continue;
-            }
-            double vertical = Math.abs(entity.getY() - client.player.getY());
-            if (vertical > maxVertical) {
-                continue;
-            }
-            double horizontal = Math.hypot(entity.getX() - client.player.getX(), entity.getZ() - client.player.getZ());
-            if (horizontal <= maxHorizontal) {
-                return true;
-            }
-        }
-        return false;
+    private boolean hasTotemInOffhand(Minecraft mc) {
+        return mc.player.getOffhandItem().is(Items.TOTEM_OF_UNDYING);
     }
 
-    private Slot findPreferredTotemSlot(Minecraft client) {
-        Slot plain = findSlot(client, this::isPlainTotem);
-        if (plain != null) {
-            return plain;
-        }
-
-        Slot nonSphere = findSlot(client, this::isTotemButNotSphere);
-        if (nonSphere != null) {
-            return nonSphere;
-        }
-
-        return findSlot(client, stack -> stack.getItem() == Items.TOTEM_OF_UNDYING);
+    private boolean isOffhandKeySwap() {
+        return "Offhand Key (F)".equalsIgnoreCase(swapMethod.getValue());
     }
 
-    private Slot findSlot(Minecraft client, Predicate<ItemStack> predicate) {
-        for (int i = 0; i < client.player.inventoryMenu.slots.size(); i++) {
-            Slot slot = client.player.inventoryMenu.getSlot(i);
-            if (!isValidInventorySlot(client, i, slot)) {
-                continue;
-            }
-            ItemStack stack = slot.getItem();
-            if (!stack.isEmpty() && predicate.test(stack)) {
-                return slot;
+    /**
+     * Exact PlayerInventory -> InventoryMenu container slot mapping:
+     * - Prioritizes main inventory slots 9-35 (maps 1:1 to container slots 9-35)
+     * - Falls back to hotbar slots 0-8 (maps to container slots 36-44)
+     */
+    private int findTotemContainerSlot(Minecraft mc) {
+        for (int invSlot = 9; invSlot < 36; invSlot++) {
+            ItemStack stack = mc.player.getInventory().getItem(invSlot);
+            if (!stack.isEmpty() && stack.is(Items.TOTEM_OF_UNDYING)) {
+                return invSlot;
             }
         }
-        return null;
-    }
-
-    private boolean isValidInventorySlot(Minecraft client, int slotId, Slot slot) {
-        return slot != null
-                && slot.container == client.player.getInventory()
-                && slotId != 45
-                && slotId != 46;
-    }
-
-    private boolean isPlainTotem(ItemStack stack) {
-        return isTotemButNotSphere(stack) && !stack.isEnchanted();
-    }
-
-    private boolean isTotemButNotSphere(ItemStack stack) {
-        return stack.getItem() == Items.TOTEM_OF_UNDYING && !isSphereTotem(stack);
-    }
-
-    private boolean isSphereTotem(ItemStack stack) {
-        if (stack.getItem() != Items.TOTEM_OF_UNDYING) {
-            return false;
-        }
-        String name = stack.getHoverName().getString().toLowerCase(Locale.ROOT);
-        return name.contains("sphere");
-    }
-
-    private boolean isTotemInOffhand(Minecraft client) {
-        return client.player.getOffhandItem().getItem() == Items.TOTEM_OF_UNDYING;
-    }
-
-    private boolean isPreferredTotemAlreadyInOffhand(Minecraft client) {
-        if (!isTotemInOffhand(client)) {
-            return false;
-        }
-        ItemStack offhand = client.player.getOffhandItem();
-        return isPlainTotem(offhand) || findSlot(client, this::isPlainTotem) == null;
-    }
-
-    private boolean attemptReturnPreviousItem(Minecraft client) {
-        if (!returnItem.getValue() || previousOffhandStack.isEmpty() || !isTotemInOffhand(client)) {
-            return false;
-        }
-
-        if (isValidMenuSlot(client, previousOffhandSourceSlot)) {
-            Slot restoreSlot = client.player.inventoryMenu.getSlot(previousOffhandSourceSlot);
-            if (stackMatchesForReturn(restoreSlot.getItem())) {
-                return clickOffhandSwap(client, previousOffhandSourceSlot);
-            }
-        }
-
-        Slot exactSlot = findSlot(client, this::stackMatchesForReturn);
-        if (exactSlot != null) {
-            return clickOffhandSwap(client, getMenuSlotId(client, exactSlot));
-        }
-
-        Slot sameItemSlot = findSlot(client, stack -> !stack.isEmpty() && stack.getItem() == previousOffhandStack.getItem());
-        return sameItemSlot != null && clickOffhandSwap(client, getMenuSlotId(client, sameItemSlot));
-    }
-
-    private boolean stackMatchesForReturn(ItemStack stack) {
-        if (stack == null || stack.isEmpty() || previousOffhandStack.isEmpty()) {
-            return false;
-        }
-        return stack.getItem() == previousOffhandStack.getItem()
-                && stack.isEnchanted() == previousOffhandStack.isEnchanted()
-                && stack.getHoverName().getString().equals(previousOffhandStack.getHoverName().getString());
-    }
-
-    private boolean clickOffhandSwap(Minecraft client, int slotId) {
-        if (!isValidMenuSlot(client, slotId)) {
-            return false;
-        }
-        client.gameMode.handleInventoryMouseClick(client.player.inventoryMenu.containerId, slotId, 40, ClickType.SWAP, client.player);
-        return true;
-    }
-
-    private boolean isValidMenuSlot(Minecraft client, int slotId) {
-        return slotId >= 0 && slotId < client.player.inventoryMenu.slots.size();
-    }
-
-    private int getMenuSlotId(Minecraft client, Slot slot) {
-        if (slot == null) {
-            return -1;
-        }
-        for (int i = 0; i < client.player.inventoryMenu.slots.size(); i++) {
-            if (client.player.inventoryMenu.getSlot(i) == slot) {
-                return i;
+        for (int invSlot = 0; invSlot < 9; invSlot++) {
+            ItemStack stack = mc.player.getInventory().getItem(invSlot);
+            if (!stack.isEmpty() && stack.is(Items.TOTEM_OF_UNDYING)) {
+                return invSlot + 36;
             }
         }
         return -1;
     }
 
-    private void captureKeyStates(Minecraft client) {
-        wasForwardPressed = isCurrentlyPressed(client, client.options.keyUp);
-        wasBackPressed = isCurrentlyPressed(client, client.options.keyDown);
-        wasLeftPressed = isCurrentlyPressed(client, client.options.keyLeft);
-        wasRightPressed = isCurrentlyPressed(client, client.options.keyRight);
-        wasJumpPressed = isCurrentlyPressed(client, client.options.keyJump);
-        wasSprintPressed = isCurrentlyPressed(client, client.options.keySprint);
-    }
-
-    private void stopPlayerInput(Minecraft client) {
-        client.player.setSprinting(false);
-        if (client.options == null) {
+    /**
+     * Cursor Stack Failsafe: returns any carried item on the mouse cursor to an empty
+     * inventory slot before closing a screen so items are never accidentally dropped.
+     */
+    private void returnCarriedStackSafely(Minecraft mc) {
+        if (mc.player == null || mc.gameMode == null || mc.player.containerMenu == null) {
             return;
         }
-        client.options.keyUp.setDown(false);
-        client.options.keyDown.setDown(false);
-        client.options.keyLeft.setDown(false);
-        client.options.keyRight.setDown(false);
-        client.options.keyJump.setDown(false);
-        client.options.keySprint.setDown(false);
-        keysOverridden = true;
-    }
-
-    private void restoreKeyStates(Minecraft client) {
-        if (!keysOverridden || client.options == null) {
+        if (mc.player.containerMenu.getCarried().isEmpty()) {
             return;
         }
-        client.options.keyUp.setDown(wasForwardPressed && isCurrentlyPressed(client, client.options.keyUp));
-        client.options.keyDown.setDown(wasBackPressed && isCurrentlyPressed(client, client.options.keyDown));
-        client.options.keyLeft.setDown(wasLeftPressed && isCurrentlyPressed(client, client.options.keyLeft));
-        client.options.keyRight.setDown(wasRightPressed && isCurrentlyPressed(client, client.options.keyRight));
-        client.options.keyJump.setDown(wasJumpPressed && isCurrentlyPressed(client, client.options.keyJump));
-        client.options.keySprint.setDown(wasSprintPressed && isCurrentlyPressed(client, client.options.keySprint));
-        keysOverridden = false;
-    }
-
-    private boolean isCurrentlyPressed(Minecraft client, KeyMapping key) {
-        if (client.getWindow() == null || key == null) {
-            return false;
+        int emptyContainerSlot = findEmptyContainerSlot(mc);
+        if (emptyContainerSlot != -1) {
+            mc.gameMode.handleInventoryMouseClick(
+                    mc.player.inventoryMenu.containerId,
+                    emptyContainerSlot,
+                    0,
+                    ClickType.PICKUP,
+                    mc.player
+            );
         }
-        return InputConstants.isKeyDown(client.getWindow(), InputConstants.getKey(key.saveString()).getValue());
     }
 
-    private void clearReturnState() {
-        previousOffhandStack = ItemStack.EMPTY;
-        previousOffhandSourceSlot = -1;
-        needsReturn = false;
-    }
-
-    private void resetState() {
-        Minecraft client = Minecraft.getInstance();
-        if (client.player != null) {
-            restoreKeyStates(client);
+    private int findEmptyContainerSlot(Minecraft mc) {
+        for (int invSlot = 9; invSlot < 36; invSlot++) {
+            if (mc.player.getInventory().getItem(invSlot).isEmpty()) {
+                return invSlot;
+            }
         }
-        savedSlot = -1;
-        totemSlot = -1;
-        actionStartTime = 0L;
-        phase = Phase.READY;
-        keysOverridden = false;
+        for (int invSlot = 0; invSlot < 9; invSlot++) {
+            if (mc.player.getInventory().getItem(invSlot).isEmpty()) {
+                return invSlot + 36;
+            }
+        }
+        return -1;
+    }
+
+    private int getHoveredTotemContainerSlot(InventoryScreen screen) {
+        if (HOVERED_SLOT_FIELD == null || screen == null) {
+            return -1;
+        }
+        try {
+            Object val = HOVERED_SLOT_FIELD.get(screen);
+            if (val instanceof Slot slot && slot.hasItem() && slot.getItem().is(Items.TOTEM_OF_UNDYING)) {
+                int idx = slot.index;
+                if (idx >= 9 && idx <= 44) {
+                    return idx;
+                }
+            }
+        } catch (IllegalAccessException ignored) {
+        }
+        return -1;
+    }
+
+    private static Field resolveHoveredSlotField() {
+        for (Field f : AbstractContainerScreen.class.getDeclaredFields()) {
+            if (Slot.class.isAssignableFrom(f.getType())) {
+                f.setAccessible(true);
+                return f;
+            }
+        }
+        return null;
+    }
+
+    private int randomRange(int minVal, int maxVal) {
+        int lo = Math.min(minVal, maxVal);
+        int hi = Math.max(minVal, maxVal);
+        if (lo == hi) {
+            return lo;
+        }
+        return ThreadLocalRandom.current().nextInt(lo, hi + 1);
     }
 }

@@ -1,6 +1,14 @@
 package attrium.ru.api.module;
 
 
+
+
+
+
+import attrium.ru.api.module.impl.visual.ArrayListModule;
+import attrium.ru.api.module.impl.visual.NotificationsModule;
+import attrium.ru.api.module.impl.visual.TargetHUDModule;
+import attrium.ru.api.module.impl.visual.KeybindsModule;
 import attrium.ru.api.module.impl.combat.SilentAura;
 import net.minecraft.client.Minecraft;
 import attrium.ru.api.events.annotation.SubscribeEvent;
@@ -210,6 +218,10 @@ public final class ModuleManager {
         register(new Criticals());
         register(new HitBoxModule());
         register(new MaceTarget());
+        register(new KeybindsModule());
+        register(new TargetHUDModule());
+        register(new NotificationsModule());
+        register(new ArrayListModule());
         register(new SilentAura());
         register(new LungeHelper());
         register(new HitSound());

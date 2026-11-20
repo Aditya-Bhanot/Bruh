@@ -20,10 +20,9 @@ import net.minecraft.world.phys.Vec3;
 import java.util.Locale;
 
 /**
- * Client-Side Crystal Optimizer & Hit-Crystal Trigger Handler (Mojang 1.21.11 Official Mappings):
- * - Triggers Hit Crystal air-juggle only when Hit Crystal is enabled.
- * - Immediately discards attacked End Crystals client-side when Crystal Optimizer is enabled
- *   (accounting for Weakness vs. Strength/Tool).
+ * Client-Side Crystal Optimizer Handler (Mojang 1.21.11 Official Mappings):
+ * Intercepts outgoing crystal attack packets and immediately discards the EndCrystal client-side
+ * when the player is capable of breaking it (accounting for Weakness vs. Strength/Tool).
  */
 public class AutoCrystalAttackHandler implements ServerboundInteractPacket.Handler {
     private final AutoCrystal module;
@@ -54,13 +53,7 @@ public class AutoCrystalAttackHandler implements ServerboundInteractPacket.Handl
 
         Entity entity = entityHit.getEntity();
         if (entity != null && entity.isAlive() && !(entity instanceof EndCrystal)) {
-            if (module.isHitCrystalEnabled()) {
-                AutoCrystal.notifyMeleeHitEntity(entity);
-            }
-            return;
-        }
-
-        if (!module.isCrystalOptimizerEnabled()) {
+            AutoCrystal.notifyMeleeHitEntity(entity);
             return;
         }
         if (!(entity instanceof EndCrystal crystal) || !crystal.isAlive()) {
