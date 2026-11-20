@@ -16,7 +16,6 @@
     "ConnectionMixin",
     "EntityMixin",
     "EntityRendererMixin",
-    "FireworkRocketEntityMixin",
     "FogRendererMixin",
     "GameRendererHandsMixin",
     "GameRendererMixin",

@@ -12,7 +12,6 @@ import attrium.ru.api.events.impl.InputEvent;
 import attrium.ru.api.module.impl.combat.aura.Angle;
 import attrium.ru.api.module.impl.combat.aura.AngleConnection;
 import attrium.ru.api.module.impl.combat.aura.AngleConstructor;
-import attrium.ru.api.module.impl.movement.InventoryMove;
 import attrium.ru.manager.Manager;
 import attrium.ru.utils.inventory.InventoryFlowManager;
 
@@ -64,8 +63,7 @@ public abstract class KeyboardInputMixin {
 
     @Unique
     private boolean attrium$shouldPreserveInventoryMovement() {
-        InventoryMove inventoryMove = InventoryMove.getInstance();
-        return inventoryMove != null && inventoryMove.shouldPreserveInventoryMovementInput();
+        return false;
     }
 
     @Unique

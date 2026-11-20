@@ -21,7 +21,6 @@ import attrium.ru.IMinecraft;
 import attrium.ru.api.events.impl.PacketEvent;
 import attrium.ru.api.events.impl.UsingItemEvent;
 import attrium.ru.api.module.impl.combat.AuraModule;
-import attrium.ru.api.module.impl.combat.Criticals;
 import attrium.ru.api.module.impl.combat.TriggerBot;
 import attrium.ru.api.module.impl.combat.aura.AngleConnection;
 import attrium.ru.api.module.impl.combat.aura.context.AutoRegressionContext;
@@ -679,10 +678,6 @@ public class StrikeManager implements IMinecraft {
 
     private boolean isPlayerInCriticalState(PlayerSimulation simulated) {
         boolean inCobweb = PlayerInteractionHelper.isBoxInBlock(simulated.boundingBox.inflate(-1e-3), Blocks.COBWEB);
-        Criticals criticals = Criticals.getInstance();
-        if (criticals != null && criticals.isEnabled() && inCobweb) {
-            return !simulated.onGround || inCobweb || simulated.fallDistance > 0.001F;
-        }
         if (simulated.onGround || hasCriticalRestrictions(simulated)) {
             return false;
         }

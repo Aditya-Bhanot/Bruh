@@ -12,7 +12,6 @@ import org.lwjgl.glfw.GLFW;
 import attrium.ru.utils.inventory.script.ScriptAction;
 import attrium.ru.IMinecraft;
 import attrium.ru.api.events.impl.InputEvent;
-import attrium.ru.api.module.impl.movement.InventoryMove;
 import attrium.ru.utils.inventory.script.Script;
 
 import java.util.List;
@@ -57,11 +56,6 @@ public final class InventoryFlowManager implements IMinecraft {
     public static void input(InputEvent event) {
         if (event == null) {
             return;
-        }
-
-        InventoryMove inventoryMove = InventoryMove.getInstance();
-        if (inventoryMove != null && inventoryMove.isEnabled() && inventoryMove.shouldSuppressSprintInput()) {
-            event.setSprinting(false);
         }
 
         if (canMove) {
@@ -276,11 +270,7 @@ public final class InventoryFlowManager implements IMinecraft {
     }
 
     private static String getSelectedMode() {
-        InventoryMove inventoryMove = InventoryMove.getInstance();
-        if (inventoryMove == null || !inventoryMove.isEnabled()) {
-            return "Normal";
-        }
-        return normalizeModeName(inventoryMove.getSelectedMode());
+        return "Normal";
     }
 
     private static String normalizeModeName(String mode) {

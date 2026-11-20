@@ -28,6 +28,7 @@ import net.minecraft.client.multiplayer.PlayerInfo;
 import attrium.ru.api.module.Module;
 import attrium.ru.manager.FriendManager;
 import attrium.ru.api.module.impl.visual.HudModule;
+import attrium.ru.manager.ClientThemeManager;
 import attrium.ru.manager.HudManager;
 import attrium.ru.utils.render.AnimationUtil;
 import attrium.ru.manager.FriendManager.FriendRecord;
@@ -366,6 +367,44 @@ public class GlassClickGuiScreen extends Screen {
     private float scrollbarFadeAnim = 0.0F;
     private long lastScrollActivityMs = 0L;
     private Component emptySearchComponent = null;
+    private float clientTabOpenTime = 0.0F;
+    private int lastObservedTopTab = -1;
+    private final float[] swatchRingAnim = new float[]{1.0F, 0.0F, 0.0F, 0.0F};
+    private float bgDimToggleAnim = 1.0F;
+    private float floatingBtnToggleAnim = 0.0F;
+    private float uiSoundsToggleAnim = 1.0F;
+    private float guiScalePillX = -1.0F;
+    private float guiScalePillW = 0.0F;
+    private boolean listeningForGuiKeybind = false;
+    private boolean draggingPanelOpacitySlider = false;
+    private boolean draggingFloatingSizeSlider = false;
+    private int clientOpacitySliderX = 0;
+    private int clientOpacitySliderW = 1;
+    private int clientFloatSizeSliderX = 0;
+    private int clientFloatSizeSliderW = 1;
+    private Component bentoBrandComp = null;
+    private Component bentoVerComp = null;
+    private String bentoCachedConfigStr = "";
+    private Component bentoActiveCfgComp = null;
+    private Component bentoOpenFolderComp = null;
+    private Component bentoResetLayoutComp = null;
+    private Component bentoAppearanceTitleComp = null;
+    private Component bentoAccentLabelComp = null;
+    private Component bentoOpacityLabelComp = null;
+    private int bentoCachedOpacityPct = -1;
+    private Component bentoOpacityValComp = null;
+    private Component bentoBgDimLabelComp = null;
+    private Component bentoControlsTitleComp = null;
+    private Component bentoScaleLabelComp = null;
+    private final Component[] bentoScaleOptComps = new Component[4];
+    private Component bentoKeybindLabelComp = null;
+    private int bentoCachedGuiKey = -999;
+    private Component bentoGuiKeyValComp = null;
+    private Component bentoGuiKeyListenComp = null;
+    private Component bentoFloatingLabelComp = null;
+    private int bentoCachedFloatSize = -1;
+    private Component bentoFloatSizeValComp = null;
+    private Component bentoSoundsLabelComp = null;
     private boolean wasRightMouseDown = false;
     private long lastFrameTimeNs = 0L;
 
@@ -437,7 +476,7 @@ public class GlassClickGuiScreen extends Screen {
     }
 
     public boolean isSearchBarFocused() {
-        return searchFocused || friendInputFocused || activeStringSettingEntry != null || bindingRow != null || listeningForFriendBind;
+        return searchFocused || friendInputFocused || activeStringSettingEntry != null || bindingRow != null || listeningForFriendBind || listeningForGuiKeybind;
     }
 
     public static Style getNunitoBoldStyle() {
@@ -1155,62 +1194,108 @@ public class GlassClickGuiScreen extends Screen {
         long nowNs = System.nanoTime();
         float dtSeconds = lastFrameTimeNs == 0L
                 ? 0.016F
-                : Mth.clamp((nowNs - lastFrameTimeNs) / 1_000_000_000.0F, 0.001F, 0.1F);
+                : Mth.clamp((nowNs - lastFrameTimeNs) / 1_000_000_000.0F, 0.001F, 0.05F);
         lastFrameTimeNs = nowNs;
 
-        processDirtyCachesIfNeeded();
-        pollGlfwInputAndInteractions(mouseX, mouseY);
-        stepAnimationsAndScroll(dtSeconds);
+        ClientThemeManager.tick(dtSeconds, true);
+
+        if (activeTopTabIndex != lastObservedTopTab) {
+            lastObservedTopTab = activeTopTabIndex;
+            if (activeTopTabIndex == 4) {
+                clientTabOpenTime = 0.0F;
+            }
+        }
+        if (activeTopTabIndex == 4) {
+            clientTabOpenTime = Math.min(2.0F, clientTabOpenTime + dtSeconds);
+        }
+
         processDirtyCachesIfNeeded();
 
         if (HudManager.isLayoutEditorActive()) {
+            pollGlfwInputAndInteractions(mouseX, mouseY);
+            stepAnimationsAndScroll(dtSeconds);
             HudManager.renderLayoutEditor(Minecraft.getInstance(), guiGraphics, this.font, mouseX, mouseY);
             return;
         }
 
-        resetBatchQueues();
-        enqueueBgQuad(0, 0, this.width, this.height, COLOR_SCREEN_BACKDROP);
-        drawRoundedRect(winX, winY, winW, winH, WINDOW_CORNER_RADIUS, COLOR_WINDOW_BG);
+        float guiScale = ClientThemeManager.getAnimatedGuiScale();
+        float centerX = winX + winW * 0.5F;
+        float centerY = winY + winH * 0.5F;
+        int effMouseX = Math.round(centerX + (mouseX - centerX) / guiScale);
+        int effMouseY = Math.round(centerY + (mouseY - centerY) / guiScale);
 
-        enqueueTopNavigationBar(dtSeconds, mouseX, mouseY);
-        if (activeTopTabIndex == 0) {
-            enqueueSubNavigationBar(dtSeconds, mouseX, mouseY);
-        } else if (activeTopTabIndex == 1) {
-            enqueueConfigsTopInputBar(mouseX, mouseY);
-        } else if (activeTopTabIndex == 2) {
-            enqueueHudTopBar(mouseX, mouseY);
-        } else if (activeTopTabIndex == 3) {
-            enqueueFriendsTopInputBar(mouseX, mouseY);
+        pollGlfwInputAndInteractions(effMouseX, effMouseY);
+        stepAnimationsAndScroll(dtSeconds);
+        stepClientBentoAnimations(dtSeconds);
+        processDirtyCachesIfNeeded();
+
+        // Full-screen animated Background Dim vignette (0x00000000 -> 0x88000000)
+        int dimCol = ClientThemeManager.getAnimatedBackdropDimColor();
+        if ((dimCol >>> 24) > 1) {
+            guiGraphics.fill(0, 0, this.width, this.height, dimCol);
         }
 
-        // Zero 1px divider lines: separation via clean glassmorphic spacing
+        boolean applyScale = Math.abs(guiScale - 1.0F) > 0.002F;
+        if (applyScale) {
+            guiGraphics.pose().pushMatrix();
+            guiGraphics.pose().translate(centerX, centerY);
+            guiGraphics.pose().scale(guiScale, guiScale);
+            guiGraphics.pose().translate(-centerX, -centerY);
+        }
+
+        resetBatchQueues();
+        drawRoundedRect(winX, winY, winW, winH, WINDOW_CORNER_RADIUS, ClientThemeManager.getWindowBgColor());
+
+        enqueueTopNavigationBar(dtSeconds, effMouseX, effMouseY);
+        if (activeTopTabIndex == 0) {
+            enqueueSubNavigationBar(dtSeconds, effMouseX, effMouseY);
+        } else if (activeTopTabIndex == 1) {
+            enqueueConfigsTopInputBar(effMouseX, effMouseY);
+        } else if (activeTopTabIndex == 2) {
+            enqueueHudTopBar(effMouseX, effMouseY);
+        } else if (activeTopTabIndex == 3) {
+            enqueueFriendsTopInputBar(effMouseX, effMouseY);
+        }
 
         if (activeTopTabIndex == 0 && maxScrollOffset > 1.0F) {
             enqueueScrollbar();
         }
         flushBatchedRenderPasses(guiGraphics);
 
-        guiGraphics.enableScissor(listLeft, listTop, listRight, listBottom);
-        resetBatchQueues();
+        int scX1 = applyScale ? Math.max(0, Math.round(centerX + (listLeft - centerX) * guiScale)) : listLeft;
+        int scY1 = applyScale ? Math.max(0, Math.round(centerY + (listTop - centerY) * guiScale)) : listTop;
+        int scX2 = applyScale ? Math.min(this.width, Math.round(centerX + (listRight - centerX) * guiScale)) : listRight;
+        int scY2 = applyScale ? Math.min(this.height, Math.round(centerY + (listBottom - centerY) * guiScale)) : listBottom;
 
-        if (activeTopTabIndex == 0) {
-            enqueueScrollingModuleList(dtSeconds, mouseX, mouseY);
-            flushBatchedRenderPasses(guiGraphics);
-        } else if (activeTopTabIndex == 1) {
-            renderConfigsListPanel(guiGraphics, dtSeconds, mouseX, mouseY);
-        } else if (activeTopTabIndex == 2) {
-            renderHudTabPanel(guiGraphics, dtSeconds, mouseX, mouseY);
-        } else if (activeTopTabIndex == 3) {
-            renderFriendsListPanel(guiGraphics, dtSeconds, mouseX, mouseY);
-        } else if (activeTopTabIndex == 4) {
-            enqueueClientAudioTabView(mouseX, mouseY);
-            flushBatchedRenderPasses(guiGraphics);
+        if (activeTopTabIndex == 4) {
+            // Bento dashboard renders across the full content area below the top navigation bar
+            int bentoTop = navContainerY + navContainerH + 10;
+            int scBentoY1 = applyScale ? Math.max(0, Math.round(centerY + (bentoTop - centerY) * guiScale)) : bentoTop;
+            guiGraphics.enableScissor(scX1, scBentoY1, scX2, scY2);
+            renderClientBentoDashboard(guiGraphics, dtSeconds, effMouseX, effMouseY, bentoTop);
+            guiGraphics.disableScissor();
         } else {
-            enqueueSecondaryTabView();
-            flushBatchedRenderPasses(guiGraphics);
+            guiGraphics.enableScissor(scX1, scY1, scX2, scY2);
+            resetBatchQueues();
+            if (activeTopTabIndex == 0) {
+                enqueueScrollingModuleList(dtSeconds, effMouseX, effMouseY);
+                flushBatchedRenderPasses(guiGraphics);
+            } else if (activeTopTabIndex == 1) {
+                renderConfigsListPanel(guiGraphics, dtSeconds, effMouseX, effMouseY);
+            } else if (activeTopTabIndex == 2) {
+                renderHudTabPanel(guiGraphics, dtSeconds, effMouseX, effMouseY);
+            } else if (activeTopTabIndex == 3) {
+                renderFriendsListPanel(guiGraphics, dtSeconds, effMouseX, effMouseY);
+            } else {
+                enqueueSecondaryTabView();
+                flushBatchedRenderPasses(guiGraphics);
+            }
+            guiGraphics.disableScissor();
         }
 
-        guiGraphics.disableScissor();
+        if (applyScale) {
+            guiGraphics.pose().popMatrix();
+        }
     }
 
     private void stepAnimationsAndScroll(float dt) {
@@ -1320,7 +1405,7 @@ public class GlassClickGuiScreen extends Screen {
             int ix = Math.round(topTabIndicatorX);
             int iw = Math.round(topTabIndicatorW);
             drawRoundedRect(ix, navContainerY + 2, iw, navContainerH - 4, 5, COLOR_TOP_NAV_ACTIVE_PILL);
-            drawRoundedRect(ix + 6, navContainerY + navContainerH - 4, Math.max(4, iw - 12), 2, 1, COLOR_ACCENT_CYAN);
+            drawRoundedRect(ix + 6, navContainerY + navContainerH - 4, Math.max(4, iw - 12), 2, 1, ClientThemeManager.getAccentArgb());
         }
 
         float hoverStep = Mth.clamp(dt / 0.15F, 0.05F, 1.0F);
@@ -1381,7 +1466,7 @@ public class GlassClickGuiScreen extends Screen {
         float hoverStep = Mth.clamp(dt / 0.15F, 0.05F, 1.0F);
         int pillTextY = searchBoxY + (searchBoxH - 8) / 2;
         if (catPillIndicatorW > 2.0F) {
-            drawRoundedRect(Math.round(catPillIndicatorX), searchBoxY + 1, Math.round(catPillIndicatorW), searchBoxH - 2, CATEGORY_PILL_RADIUS, COLOR_ACCENT_CYAN);
+            drawRoundedRect(Math.round(catPillIndicatorX), searchBoxY + 1, Math.round(catPillIndicatorW), searchBoxH - 2, CATEGORY_PILL_RADIUS, ClientThemeManager.getAccentArgb());
         }
         for (int i = 0; i < CATEGORY_PILLS.length; i++) {
             int px = categoryPillX[i];
@@ -1444,7 +1529,7 @@ public class GlassClickGuiScreen extends Screen {
             // Illuminated 3px rounded Aqua-Cyan (#00E5FF) indicator pill on left edge when enabled
             if (row.toggleAnim > 0.02F && !isActionMacroRow(row)) {
                 int pillA = Mth.clamp(Math.round(row.toggleAnim * 255.0F), 0, 255);
-                int indicatorCol = (pillA << 24) | 0x00E5FF;
+                int indicatorCol = (pillA << 24) | ClientThemeManager.getAccentRgb();
                 int indH = Math.max(8, Math.round((ROW_HEIGHT - 16) * row.toggleAnim));
                 int indY = rowTop + (ROW_HEIGHT - indH) / 2;
                 drawRoundedRect(listLeft + 2, indY, 3, indH, 1, indicatorCol);
@@ -1454,7 +1539,7 @@ public class GlassClickGuiScreen extends Screen {
             int iconBoxY = rowTop + (ROW_HEIGHT - iconBoxSize) / 2;
             int iconBoxBg = lerpColor(COLOR_ICON_BOX_BG, COLOR_ICON_BOX_HOVER_BG, row.hoverAnim);
             drawRoundedRect(iconBoxX, iconBoxY, iconBoxSize, iconBoxSize, ICON_BOX_RADIUS, iconBoxBg);
-            int iconFg = isEnabled ? COLOR_ACCENT_CYAN : COLOR_TEXT_OFF_SLATE;
+            int iconFg = isEnabled ? ClientThemeManager.getAccentArgb() : COLOR_TEXT_OFF_SLATE;
             enqueueCategoryIcon(row.categoryPillIndex, iconBoxX + 7, iconBoxY + 7, iconFg);
 
             // Typography: Pure White when ON, Muted Slate (0xFF9CA3AF) when OFF; Description in 0xFF8B94A5
@@ -1518,7 +1603,7 @@ public class GlassClickGuiScreen extends Screen {
             int travel = Math.max(1, listHeight - thumbH);
             int thumbY = listTop + Math.round((scrollOffset / maxScrollOffset) * travel);
             int sbAlpha = Mth.clamp(Math.round(scrollbarFadeAnim * 200.0F), 0, 200);
-            drawRoundedRect(listRight - 4, thumbY, 3, thumbH, 1, (sbAlpha << 24) | 0x00E5FF);
+            drawRoundedRect(listRight - 4, thumbY, 3, thumbH, 1, (sbAlpha << 24) | ClientThemeManager.getAccentRgb());
         }
     }
 
@@ -1895,16 +1980,20 @@ public class GlassClickGuiScreen extends Screen {
             float animProgress
     ) {
         float t = Mth.clamp(animProgress, 0.0F, 1.0F);
-        int trackColor = lerpColor(COLOR_TOGGLE_OFF_BG, COLOR_TOGGLE_ON_BG, t);
-        drawRoundedRect(x, y, w, h, TOGGLE_PILL_RADIUS, trackColor);
+        int liveAccent = ClientThemeManager.getAccentArgb();
+        int trackColor = lerpColor(COLOR_TOGGLE_OFF_BG, liveAccent, t);
+        drawRoundedRect(x, y, w, h, Math.max(4, h / 2), trackColor);
 
-        int knobSize = h - 4; // 8x8 circle inside 24x12 pill
+        // Elastic pill thumb: stretches horizontally mid-slide (sin(t * PI))
+        int knobH = Math.max(6, h - 4);
+        int elasticStretch = Math.round(4.0F * (float) Math.sin(t * Math.PI));
+        int knobW = knobH + elasticStretch;
         int minKnobX = x + 2;
-        int maxKnobX = x + w - knobSize - 2;
+        int maxKnobX = x + w - knobW - 2;
         int knobX = Math.round(Mth.lerp(t, minKnobX, maxKnobX));
-        int knobY = y + 2;
+        int knobY = y + (h - knobH) / 2;
 
-        drawRoundedRect(knobX, knobY, knobSize, knobSize, knobSize / 2, 0xFFFFFFFF);
+        drawRoundedRect(knobX, knobY, knobW, knobH, knobH / 2, 0xFFFFFFFF);
     }
 
     private void enqueueSearchMagnifierIcon(int ix, int iy, int color) {
@@ -2714,6 +2803,20 @@ public class GlassClickGuiScreen extends Screen {
             return false;
         }
 
+        if (listeningForGuiKeybind) {
+            if (key == GLFW.GLFW_KEY_ESCAPE || key == GLFW.GLFW_KEY_BACKSPACE || key == GLFW.GLFW_KEY_DELETE) {
+                ClientThemeManager.setClickGuiKey(GLFW.GLFW_KEY_RIGHT_SHIFT);
+                SoundUtil.playTogglePop(false);
+            } else if (key >= GLFW.GLFW_KEY_SPACE && key <= GLFW.GLFW_KEY_LAST) {
+                ClientThemeManager.setClickGuiKey(key);
+                SoundUtil.playTogglePop(true);
+            }
+            listeningForGuiKeybind = false;
+            waitingForBindRelease = false;
+            saveConfigNow();
+            return true;
+        }
+
         if (listeningForFriendBind) {
             if (key == GLFW.GLFW_KEY_ESCAPE || key == GLFW.GLFW_KEY_BACKSPACE || key == GLFW.GLFW_KEY_DELETE) {
                 FriendManager.setFriendBindKey(-1);
@@ -3145,6 +3248,16 @@ public class GlassClickGuiScreen extends Screen {
                 updateCachedSliderStringIfNeeded(activeDraggingSliderEntry);
                 return;
             }
+            if (draggingPanelOpacitySlider && clientOpacitySliderW > 0) {
+                float r = Mth.clamp((float) (mouseX - clientOpacitySliderX) / (float) clientOpacitySliderW, 0.0F, 1.0F);
+                ClientThemeManager.setPanelOpacity(0.55F + r * 0.40F);
+                return;
+            }
+            if (draggingFloatingSizeSlider && clientFloatSizeSliderW > 0) {
+                float r = Mth.clamp((float) (mouseX - clientFloatSizeSliderX) / (float) clientFloatSizeSliderW, 0.0F, 1.0F);
+                ClientThemeManager.setFloatingButtonSize(20.0F + r * 16.0F);
+                return;
+            }
             if (draggingScrollbar && maxScrollOffset > 0.0F) {
                 float deltaY = mouseY - scrollbarDragStartMouseY;
                 float scrollScale = maxScrollOffset / (float) Math.max(1, listHeight - 30);
@@ -3159,6 +3272,11 @@ public class GlassClickGuiScreen extends Screen {
             activeDraggingSliderEntry = null;
             hudDraggingWidgetIndex = -1;
             hudDraggingSliderType = -1;
+            if (draggingPanelOpacitySlider || draggingFloatingSizeSlider) {
+                saveConfigNow();
+            }
+            draggingPanelOpacitySlider = false;
+            draggingFloatingSizeSlider = false;
             draggingScrollbar = false;
         }
 
@@ -3243,11 +3361,9 @@ public class GlassClickGuiScreen extends Screen {
         }
         if (activeTopTabIndex == 0 && isHovered(mouseX, mouseY, listLeft, listTop, listRight - listLeft, listHeight)) {
             handleModuleListClick(mouseX, mouseY, leftClicked, rightClicked);
-        } else if (activeTopTabIndex == 4 && clientTabUiVolumeEntry != null) {
-            int rowY = listTop + 42;
-            if (isHovered(mouseX, mouseY, listLeft, rowY, rowWidth, SETTING_ROW_HEIGHT)) {
-                handleSettingRowClick(clientTabUiVolumeEntry, listLeft, rowY, rowWidth, mouseX, mouseY, leftClicked);
-            }
+        } else if (activeTopTabIndex == 4) {
+            int bentoTop = navContainerY + navContainerH + 10;
+            handleClientBentoClick(mouseX, mouseY, leftClicked, bentoTop);
         }
     }
 
@@ -3951,6 +4067,18 @@ public class GlassClickGuiScreen extends Screen {
             mObj.add("settings", settingsObj);
             modulesObj.add(row.name, mObj);
         }
+        JsonObject clientObj = new JsonObject();
+        clientObj.addProperty("accentIndex", ClientThemeManager.getAccentIndex());
+        clientObj.addProperty("panelOpacity", ClientThemeManager.getPanelOpacity());
+        clientObj.addProperty("backgroundDim", ClientThemeManager.isBackgroundDimEnabled());
+        clientObj.addProperty("guiScaleIndex", ClientThemeManager.getGuiScaleIndex());
+        clientObj.addProperty("clickGuiKey", ClientThemeManager.getClickGuiKey());
+        clientObj.addProperty("floatingButtonEnabled", ClientThemeManager.isFloatingButtonEnabled());
+        clientObj.addProperty("floatingButtonSize", ClientThemeManager.getFloatingButtonSize());
+        clientObj.addProperty("floatingBtnXRatio", ClientThemeManager.getFloatingBtnXRatio());
+        clientObj.addProperty("floatingBtnYRatio", ClientThemeManager.getFloatingBtnYRatio());
+        clientObj.addProperty("uiSoundsEnabled", ClientThemeManager.isUiSoundsEnabled());
+        root.add("clientTheme", clientObj);
         root.add("modules", modulesObj);
         return root;
     }
@@ -3977,6 +4105,40 @@ public class GlassClickGuiScreen extends Screen {
         if (root.has("uiVolume") && clientTabUiVolumeEntry != null && clientTabUiVolumeEntry.setting instanceof NumberSetting volNs) {
             volNs.setValue(Mth.clamp(root.get("uiVolume").getAsDouble(), volNs.getMin(), volNs.getMax()));
             updateCachedSliderStringIfNeeded(clientTabUiVolumeEntry);
+        }
+        if (root.has("clientTheme") && root.get("clientTheme").isJsonObject()) {
+            JsonObject co = root.getAsJsonObject("clientTheme");
+            if (co.has("accentIndex") && co.get("accentIndex").isJsonPrimitive()) {
+                ClientThemeManager.setAccentIndex(co.get("accentIndex").getAsInt());
+            }
+            if (co.has("panelOpacity") && co.get("panelOpacity").isJsonPrimitive()) {
+                ClientThemeManager.setPanelOpacity(co.get("panelOpacity").getAsFloat());
+            }
+            if (co.has("backgroundDim") && co.get("backgroundDim").isJsonPrimitive()) {
+                ClientThemeManager.setBackgroundDimEnabled(co.get("backgroundDim").getAsBoolean());
+            }
+            if (co.has("guiScaleIndex") && co.get("guiScaleIndex").isJsonPrimitive()) {
+                ClientThemeManager.setGuiScaleIndex(co.get("guiScaleIndex").getAsInt());
+            }
+            if (co.has("clickGuiKey") && co.get("clickGuiKey").isJsonPrimitive()) {
+                ClientThemeManager.setClickGuiKey(co.get("clickGuiKey").getAsInt());
+            }
+            if (co.has("floatingButtonEnabled") && co.get("floatingButtonEnabled").isJsonPrimitive()) {
+                ClientThemeManager.setFloatingButtonEnabled(co.get("floatingButtonEnabled").getAsBoolean());
+            }
+            if (co.has("floatingButtonSize") && co.get("floatingButtonSize").isJsonPrimitive()) {
+                ClientThemeManager.setFloatingButtonSize(co.get("floatingButtonSize").getAsFloat());
+            }
+            if (co.has("floatingBtnXRatio") && co.get("floatingBtnXRatio").isJsonPrimitive()
+                    && co.has("floatingBtnYRatio") && co.get("floatingBtnYRatio").isJsonPrimitive()) {
+                ClientThemeManager.setFloatingBtnPosRatio(
+                        co.get("floatingBtnXRatio").getAsFloat(),
+                        co.get("floatingBtnYRatio").getAsFloat()
+                );
+            }
+            if (co.has("uiSoundsEnabled") && co.get("uiSoundsEnabled").isJsonPrimitive()) {
+                ClientThemeManager.setUiSoundsEnabled(co.get("uiSoundsEnabled").getAsBoolean());
+            }
         }
         if (root.has("modules") && root.get("modules").isJsonObject()) {
             JsonObject modulesObj = root.getAsJsonObject("modules");
@@ -4346,4 +4508,424 @@ public class GlassClickGuiScreen extends Screen {
             cursorY += cardH + cardGap;
         }
     }
+
+    // =========================================================================
+    // Bento-Style 3-Card Client Tab (Appearance & Theme Engine + Controls & Mobile)
+    // =========================================================================
+    private void ensureBentoComponents() {
+        if (bentoBrandComp != null) return;
+        bentoBrandComp = Component.literal("Attrium").withStyle(HudManager.getBoldStyle());
+        bentoVerComp = Component.literal("1.21.11").withStyle(HudManager.getBoldStyle());
+        bentoOpenFolderComp = Component.literal("Open Folder").withStyle(nunitoRegularStyle);
+        bentoResetLayoutComp = Component.literal("Reset Layout").withStyle(nunitoRegularStyle);
+        bentoAppearanceTitleComp = Component.literal("Appearance").withStyle(HudManager.getBoldStyle());
+        bentoAccentLabelComp = Component.literal("Accent Theme").withStyle(nunitoRegularStyle);
+        bentoOpacityLabelComp = Component.literal("Glass Opacity").withStyle(nunitoRegularStyle);
+        bentoBgDimLabelComp = Component.literal("Background Dim").withStyle(nunitoRegularStyle);
+        bentoControlsTitleComp = Component.literal("Controls & Mobile").withStyle(HudManager.getBoldStyle());
+        bentoScaleLabelComp = Component.literal("GUI Scale").withStyle(nunitoRegularStyle);
+        for (int i = 0; i < 4; i++) {
+            bentoScaleOptComps[i] = Component.literal(ClientThemeManager.GUI_SCALE_LABELS[i]).withStyle(nunitoRegularStyle);
+        }
+        bentoKeybindLabelComp = Component.literal("ClickGUI Keybind").withStyle(nunitoRegularStyle);
+        bentoGuiKeyListenComp = Component.literal("[ ... ]").withStyle(HudManager.getBoldStyle());
+        bentoFloatingLabelComp = Component.literal("Floating Touch Button").withStyle(nunitoRegularStyle);
+        bentoSoundsLabelComp = Component.literal("UI Feedback Sounds").withStyle(nunitoRegularStyle);
+    }
+
+    private void stepClientBentoAnimations(float dt) {
+        float rate = 1.0F - (float) Math.exp(-14.0F * dt);
+        int activeAccent = ClientThemeManager.getAccentIndex();
+        for (int i = 0; i < 4; i++) {
+            float target = (i == activeAccent) ? 1.0F : 0.0F;
+            swatchRingAnim[i] += (target - swatchRingAnim[i]) * rate;
+        }
+        bgDimToggleAnim += ((ClientThemeManager.isBackgroundDimEnabled() ? 1.0F : 0.0F) - bgDimToggleAnim) * rate;
+        floatingBtnToggleAnim += ((ClientThemeManager.isFloatingButtonEnabled() ? 1.0F : 0.0F) - floatingBtnToggleAnim) * rate;
+        uiSoundsToggleAnim += ((ClientThemeManager.isUiSoundsEnabled() ? 1.0F : 0.0F) - uiSoundsToggleAnim) * rate;
+    }
+
+    private float computeBentoCardProgress(int cardIndex) {
+        float t = Mth.clamp((clientTabOpenTime - cardIndex * 0.035F) / 0.22F, 0.0F, 1.0F);
+        float inv = 1.0F - t;
+        return 1.0F - inv * inv * inv; // easeOutCubic
+    }
+
+    private void renderClientBentoDashboard(GuiGraphics guiGraphics, float dt, int mouseX, int mouseY, int bentoTop) {
+        ensureBentoComponents();
+        Minecraft mc = Minecraft.getInstance();
+        int accent = ClientThemeManager.getAccentArgb();
+
+        int gap = 10;
+        int fullW = rowWidth;
+        int bannerH = 54;
+        int bottomYBase = bentoTop + bannerH + gap;
+        int bottomH = Math.max(165, listBottom - bottomYBase - 4);
+        int leftCardW = (fullW - gap) / 2;
+        int rightCardW = fullW - gap - leftCardW;
+        int leftCardX = listLeft;
+        int rightCardX = leftCardX + leftCardW + gap;
+
+        // ---------------------------------------------------------------------
+        // Card 0: Top Profile Banner (Full Width, 54px height, 12px radius)
+        // ---------------------------------------------------------------------
+        float p0 = computeBentoCardProgress(0);
+        int y0 = bentoTop + Math.round(12.0F * (1.0F - p0));
+        int bg0 = ClientThemeManager.getBentoCardBgColor(p0);
+        HudManager.drawRoundedRect(guiGraphics, leftCardX, y0, fullW, bannerH, 12, bg0);
+
+        if (p0 > 0.05F) {
+            // Left: 34x34 rounded player avatar + 7px glowing online status dot
+            int avSize = 34;
+            int avX = leftCardX + 12;
+            int avY = y0 + (bannerH - avSize) / 2;
+            HudManager.drawRoundedRect(guiGraphics, avX - 1, avY - 1, avSize + 2, avSize + 2, 8,
+                    ClientThemeManager.getAccentWithAlpha(0.28F * p0));
+            if (mc != null && mc.player != null) {
+                HudManager.drawPlayerAvatar(guiGraphics, mc, mc.player, avX, avY, avSize);
+            } else {
+                HudManager.drawRoundedRect(guiGraphics, avX, avY, avSize, avSize, 7, 0xFF1F2937);
+            }
+            // Live glowing 7px online status dot tucked into bottom-right corner
+            HudManager.drawRoundedRect(guiGraphics, avX + avSize - 6, avY + avSize - 6, 9, 9, 4,
+                    ClientThemeManager.getAccentWithAlpha(0.35F * p0));
+            HudManager.drawRoundedRect(guiGraphics, avX + avSize - 5, avY + avSize - 5, 7, 7, 3,
+                    multiplyAlpha(accent, p0));
+
+            // Center: "Attrium" Bold + "1.21.11" cyan pill + "Active Config: <name>"
+            int tx = avX + avSize + 12;
+            int whiteCol = multiplyAlpha(0xFFFFFFFF, p0);
+            int mutedCol = multiplyAlpha(0xFF9CA3AF, p0);
+            if ((whiteCol >>> 24) > 8) {
+                guiGraphics.drawString(this.font, bentoBrandComp, tx, y0 + 13, whiteCol, false);
+                int brandW = this.font.width(bentoBrandComp);
+                int verW = this.font.width(bentoVerComp) + 10;
+                int verX = tx + brandW + 7;
+                HudManager.drawRoundedRect(guiGraphics, verX, y0 + 11, verW, 13, 5,
+                        ClientThemeManager.getAccentWithAlpha(0.22F * p0));
+                guiGraphics.drawString(this.font, bentoVerComp, verX + 5, y0 + 13, multiplyAlpha(accent, p0), false);
+
+                String cfgLabel = "Active Config: " + (activeConfigName != null ? activeConfigName : "Default");
+                if (!cfgLabel.equals(bentoCachedConfigStr) || bentoActiveCfgComp == null) {
+                    bentoCachedConfigStr = cfgLabel;
+                    bentoActiveCfgComp = Component.literal(cfgLabel).withStyle(nunitoRegularStyle);
+                }
+                guiGraphics.drawString(this.font, bentoActiveCfgComp, tx, y0 + 30, mutedCol, false);
+            }
+
+            // Right: Two 26px-tall, 8px-radius pill buttons ("Open Folder", "Reset Layout")
+            int btnH = 26;
+            int btnY = y0 + (bannerH - btnH) / 2;
+            int resetW = 80;
+            int folderW = 78;
+            int resetX = leftCardX + fullW - resetW - 12;
+            int folderX = resetX - folderW - 8;
+
+            boolean hoverFolder = isHovered(mouseX, mouseY, folderX, btnY, folderW, btnH);
+            boolean hoverReset = isHovered(mouseX, mouseY, resetX, btnY, resetW, btnH);
+
+            HudManager.drawRoundedRect(guiGraphics, folderX, btnY, folderW, btnH, 8,
+                    multiplyAlpha(hoverFolder ? 0x38FFFFFF : 0x20FFFFFF, p0));
+            int fw = this.font.width(bentoOpenFolderComp);
+            if ((whiteCol >>> 24) > 8) {
+                guiGraphics.drawString(this.font, bentoOpenFolderComp, folderX + (folderW - fw) / 2, btnY + 9, whiteCol, false);
+            }
+
+            HudManager.drawRoundedRect(guiGraphics, resetX, btnY, resetW, btnH, 8,
+                    ClientThemeManager.getAccentWithAlpha((hoverReset ? 0.34F : 0.20F) * p0));
+            int rw = this.font.width(bentoResetLayoutComp);
+            if ((whiteCol >>> 24) > 8) {
+                guiGraphics.drawString(this.font, bentoResetLayoutComp, resetX + (resetW - rw) / 2, btnY + 9, multiplyAlpha(accent, p0), false);
+            }
+        }
+
+        // ---------------------------------------------------------------------
+        // Card 1: Bottom-Left — Appearance & Theme Engine (12px radius)
+        // ---------------------------------------------------------------------
+        float p1 = computeBentoCardProgress(1);
+        int y1 = bottomYBase + Math.round(12.0F * (1.0F - p1));
+        HudManager.drawRoundedRect(guiGraphics, leftCardX, y1, leftCardW, bottomH, 12,
+                ClientThemeManager.getBentoCardBgColor(p1));
+
+        if (p1 > 0.05F) {
+            int pad = 14;
+            int cx = leftCardX + pad;
+            int innerW = leftCardW - pad * 2;
+            int whiteCol = multiplyAlpha(0xFFFFFFFF, p1);
+            int mutedCol = multiplyAlpha(0xFF9CA3AF, p1);
+
+            if ((whiteCol >>> 24) > 8) {
+                guiGraphics.drawString(this.font, bentoAppearanceTitleComp, cx, y1 + 13, whiteCol, false);
+                guiGraphics.drawString(this.font, bentoAccentLabelComp, cx, y1 + 34, mutedCol, false);
+            }
+
+            // 4 Circular 22px Accent Swatch Orbs with animated outer selection ring
+            int orbSize = 22;
+            int orbY = y1 + 50;
+            int orbStride = 34;
+            for (int i = 0; i < 4; i++) {
+                int ox = cx + i * orbStride;
+                int swatchCol = ClientThemeManager.ACCENT_SWATCHES[i];
+                float ringA = swatchRingAnim[i];
+                if (ringA > 0.02F) {
+                    int exp = Math.round(3.0F * ringA);
+                    int ringCol = (Mth.clamp(Math.round(ringA * p1 * 180.0F), 0, 180) << 24) | (swatchCol & 0x00FFFFFF);
+                    HudManager.drawRoundedRect(guiGraphics, ox - exp, orbY - exp, orbSize + exp * 2, orbSize + exp * 2, (orbSize + exp * 2) / 2, ringCol);
+                }
+                HudManager.drawRoundedRect(guiGraphics, ox, orbY, orbSize, orbSize, orbSize / 2, multiplyAlpha(swatchCol, p1));
+            }
+
+            // Panel Opacity Slider (55% - 95%, rounded 6px track with glowing accent thumb)
+            int opLabelY = y1 + 88;
+            int opPct = Math.round(ClientThemeManager.getPanelOpacity() * 100.0F);
+            if (opPct != bentoCachedOpacityPct || bentoOpacityValComp == null) {
+                bentoCachedOpacityPct = opPct;
+                bentoOpacityValComp = Component.literal(opPct + "%").withStyle(nunitoRegularStyle);
+            }
+            if ((whiteCol >>> 24) > 8) {
+                guiGraphics.drawString(this.font, bentoOpacityLabelComp, cx, opLabelY, mutedCol, false);
+                int vw = this.font.width(bentoOpacityValComp);
+                guiGraphics.drawString(this.font, bentoOpacityValComp, cx + innerW - vw, opLabelY, multiplyAlpha(accent, p1), false);
+            }
+
+            int trackY = opLabelY + 15;
+            int trackH = 6;
+            clientOpacitySliderX = cx;
+            clientOpacitySliderW = innerW;
+            float opRatio = Mth.clamp((ClientThemeManager.getPanelOpacity() - 0.55F) / 0.40F, 0.0F, 1.0F);
+            HudManager.drawRoundedRect(guiGraphics, cx, trackY, innerW, trackH, 3, multiplyAlpha(0xFF232735, p1));
+            int fillW = Math.max(6, Math.round(innerW * opRatio));
+            HudManager.drawRoundedRect(guiGraphics, cx, trackY, fillW, trackH, 3, multiplyAlpha(accent, p1));
+            int thumbX = cx + fillW - 5;
+            HudManager.drawRoundedRect(guiGraphics, thumbX - 1, trackY - 3, 12, 12, 6, ClientThemeManager.getAccentWithAlpha(0.35F * p1));
+            HudManager.drawRoundedRect(guiGraphics, thumbX, trackY - 2, 10, 10, 5, multiplyAlpha(0xFFFFFFFF, p1));
+
+            // Background Dim Toggle
+            int dimY = y1 + 128;
+            if ((whiteCol >>> 24) > 8) {
+                guiGraphics.drawString(this.font, bentoBgDimLabelComp, cx, dimY + 2, whiteCol, false);
+            }
+            drawElasticPillImmediate(guiGraphics, cx + innerW - 26, dimY, 26, 14, bgDimToggleAnim, p1);
+        }
+
+        // ---------------------------------------------------------------------
+        // Card 2: Bottom-Right — Controls & Mobile Experience (12px radius)
+        // ---------------------------------------------------------------------
+        float p2 = computeBentoCardProgress(2);
+        int y2 = bottomYBase + Math.round(12.0F * (1.0F - p2));
+        HudManager.drawRoundedRect(guiGraphics, rightCardX, y2, rightCardW, bottomH, 12,
+                ClientThemeManager.getBentoCardBgColor(p2));
+
+        if (p2 > 0.05F) {
+            int pad = 14;
+            int cx = rightCardX + pad;
+            int innerW = rightCardW - pad * 2;
+            int whiteCol = multiplyAlpha(0xFFFFFFFF, p2);
+            int mutedCol = multiplyAlpha(0xFF9CA3AF, p2);
+
+            if ((whiteCol >>> 24) > 8) {
+                guiGraphics.drawString(this.font, bentoControlsTitleComp, cx, y2 + 13, whiteCol, false);
+                guiGraphics.drawString(this.font, bentoScaleLabelComp, cx, y2 + 32, mutedCol, false);
+            }
+
+            // Segmented GUI Scale Pill Bar (0.85x | 1.0x | 1.15x | 1.30x) with sliding highlight
+            int segY = y2 + 45;
+            int segH = 20;
+            HudManager.drawRoundedRect(guiGraphics, cx, segY, innerW, segH, 7, multiplyAlpha(0xFF1A1E2A, p2));
+            int segW = innerW / 4;
+            int activeScaleIdx = ClientThemeManager.getGuiScaleIndex();
+            float targetSegX = cx + activeScaleIdx * segW + 2;
+            float targetSegW = segW - 4;
+            float slideFactor = 1.0F - (float) Math.exp(-16.0F * dt);
+            if (guiScalePillX < 0.0F) {
+                guiScalePillX = targetSegX;
+                guiScalePillW = targetSegW;
+            } else {
+                guiScalePillX += (targetSegX - guiScalePillX) * slideFactor;
+                guiScalePillW += (targetSegW - guiScalePillW) * slideFactor;
+            }
+            HudManager.drawRoundedRect(guiGraphics, Math.round(guiScalePillX), segY + 2, Math.round(guiScalePillW), segH - 4, 5,
+                    multiplyAlpha(accent, p2));
+            for (int i = 0; i < 4; i++) {
+                int sx = cx + i * segW;
+                int lw = this.font.width(bentoScaleOptComps[i]);
+                int tc = (i == activeScaleIdx) ? multiplyAlpha(0xFF0B0D10, p2) : mutedCol;
+                if ((tc >>> 24) > 8) {
+                    guiGraphics.drawString(this.font, bentoScaleOptComps[i], sx + (segW - lw) / 2, segY + 6, tc, false);
+                }
+            }
+
+            // ClickGUI Keybind Pill ([ RSHIFT ]) with soft pulsing accent while listening
+            int kbY = y2 + 76;
+            int guiKey = ClientThemeManager.getClickGuiKey();
+            if (guiKey != bentoCachedGuiKey || bentoGuiKeyValComp == null) {
+                bentoCachedGuiKey = guiKey;
+                bentoGuiKeyValComp = Component.literal("[ " + formatBoundKeyDisplayName(guiKey) + " ]").withStyle(HudManager.getBoldStyle());
+            }
+            Component kbComp = listeningForGuiKeybind ? bentoGuiKeyListenComp : bentoGuiKeyValComp;
+            int kbPillW = Math.max(54, this.font.width(kbComp) + 14);
+            int kbPillX = cx + innerW - kbPillW;
+            float pulse = listeningForGuiKeybind ? (0.35F + 0.30F * (float) Math.sin(System.currentTimeMillis() * 0.008D)) : 0.16F;
+            HudManager.drawRoundedRect(guiGraphics, kbPillX, kbY - 3, kbPillW, 18, 6,
+                    ClientThemeManager.getAccentWithAlpha(pulse * p2));
+            if ((whiteCol >>> 24) > 8) {
+                guiGraphics.drawString(this.font, bentoKeybindLabelComp, cx, kbY + 2, whiteCol, false);
+                int kw = this.font.width(kbComp);
+                guiGraphics.drawString(this.font, kbComp, kbPillX + (kbPillW - kw) / 2, kbY + 2,
+                        multiplyAlpha(listeningForGuiKeybind ? accent : 0xFFFFFFFF, p2), false);
+            }
+
+            // Floating Touch Button Toggle + Size Slider (20px - 36px)
+            int flY = y2 + 104;
+            if ((whiteCol >>> 24) > 8) {
+                guiGraphics.drawString(this.font, bentoFloatingLabelComp, cx, flY + 2, whiteCol, false);
+            }
+            drawElasticPillImmediate(guiGraphics, cx + innerW - 26, flY, 26, 14, floatingBtnToggleAnim, p2);
+
+            int flSizeY = y2 + 123;
+            int flSizeInt = Math.round(ClientThemeManager.getFloatingButtonSize());
+            if (flSizeInt != bentoCachedFloatSize || bentoFloatSizeValComp == null) {
+                bentoCachedFloatSize = flSizeInt;
+                bentoFloatSizeValComp = Component.literal(flSizeInt + "px").withStyle(nunitoRegularStyle);
+            }
+            int flValW = this.font.width(bentoFloatSizeValComp);
+            int flTrackW = Math.max(40, innerW - flValW - 10);
+            clientFloatSizeSliderX = cx;
+            clientFloatSizeSliderW = flTrackW;
+            float flRatio = Mth.clamp((ClientThemeManager.getFloatingButtonSize() - 20.0F) / 16.0F, 0.0F, 1.0F);
+            HudManager.drawRoundedRect(guiGraphics, cx, flSizeY + 2, flTrackW, 5, 2, multiplyAlpha(0xFF232735, p2));
+            int flFillW = Math.max(5, Math.round(flTrackW * flRatio));
+            HudManager.drawRoundedRect(guiGraphics, cx, flSizeY + 2, flFillW, 5, 2, multiplyAlpha(accent, p2));
+            HudManager.drawRoundedRect(guiGraphics, cx + flFillW - 4, flSizeY, 9, 9, 4, multiplyAlpha(0xFFFFFFFF, p2));
+            if ((mutedCol >>> 24) > 8) {
+                guiGraphics.drawString(this.font, bentoFloatSizeValComp, cx + innerW - flValW, flSizeY, mutedCol, false);
+            }
+
+            // UI Feedback Sounds Toggle
+            int sndY = y2 + 142;
+            if ((whiteCol >>> 24) > 8) {
+                guiGraphics.drawString(this.font, bentoSoundsLabelComp, cx, sndY + 2, whiteCol, false);
+            }
+            drawElasticPillImmediate(guiGraphics, cx + innerW - 26, sndY, 26, 14, uiSoundsToggleAnim, p2);
+        }
+    }
+
+    private void drawElasticPillImmediate(GuiGraphics guiGraphics, int x, int y, int w, int h, float anim, float alpha) {
+        float t = Mth.clamp(anim, 0.0F, 1.0F);
+        int trackCol = multiplyAlpha(lerpColor(COLOR_TOGGLE_OFF_BG, ClientThemeManager.getAccentArgb(), t), alpha);
+        HudManager.drawRoundedRect(guiGraphics, x, y, w, h, h / 2, trackCol);
+        int knobH = Math.max(6, h - 4);
+        int stretch = Math.round(4.0F * (float) Math.sin(t * Math.PI));
+        int knobW = knobH + stretch;
+        int knobX = Math.round(Mth.lerp(t, x + 2, x + w - knobW - 2));
+        HudManager.drawRoundedRect(guiGraphics, knobX, y + (h - knobH) / 2, knobW, knobH, knobH / 2, multiplyAlpha(0xFFFFFFFF, alpha));
+    }
+
+    private void handleClientBentoClick(int mouseX, int mouseY, boolean leftClicked, int bentoTop) {
+        if (!leftClicked) return;
+
+        int gap = 10;
+        int fullW = rowWidth;
+        int bannerH = 54;
+        int bottomYBase = bentoTop + bannerH + gap;
+        int leftCardW = (fullW - gap) / 2;
+        int rightCardW = fullW - gap - leftCardW;
+        int leftCardX = listLeft;
+        int rightCardX = leftCardX + leftCardW + gap;
+        int pad = 14;
+
+        // Top Banner Buttons: "Open Folder" & "Reset Layout"
+        int btnH = 26;
+        int btnY = bentoTop + (bannerH - btnH) / 2;
+        int resetW = 80;
+        int folderW = 78;
+        int resetX = leftCardX + fullW - resetW - 12;
+        int folderX = resetX - folderW - 8;
+        if (isHovered(mouseX, mouseY, folderX, btnY, folderW, btnH)) {
+            ClientThemeManager.openConfigFolder();
+            SoundUtil.playClick();
+            return;
+        }
+        if (isHovered(mouseX, mouseY, resetX, btnY, resetW, btnH)) {
+            ClientThemeManager.resetLayout();
+            saveConfigNow();
+            SoundUtil.playTogglePop(true);
+            return;
+        }
+
+        // Bottom-Left Card (Appearance)
+        int lcx = leftCardX + pad;
+        int lInnerW = leftCardW - pad * 2;
+        int orbY = bottomYBase + 50;
+        for (int i = 0; i < 4; i++) {
+            int ox = lcx + i * 34;
+            if (isHovered(mouseX, mouseY, ox - 3, orbY - 3, 28, 28)) {
+                ClientThemeManager.setAccentIndex(i);
+                saveConfigNow();
+                SoundUtil.playClick();
+                return;
+            }
+        }
+        int opTrackY = bottomYBase + 103;
+        if (isHovered(mouseX, mouseY, lcx - 4, opTrackY - 6, lInnerW + 8, 18)) {
+            draggingPanelOpacitySlider = true;
+            clientOpacitySliderX = lcx;
+            clientOpacitySliderW = lInnerW;
+            float r = Mth.clamp((float) (mouseX - lcx) / (float) Math.max(1, lInnerW), 0.0F, 1.0F);
+            ClientThemeManager.setPanelOpacity(0.55F + r * 0.40F);
+            SoundUtil.playClick();
+            return;
+        }
+        int dimY = bottomYBase + 128;
+        if (isHovered(mouseX, mouseY, lcx, dimY - 4, lInnerW, 22)) {
+            boolean next = !ClientThemeManager.isBackgroundDimEnabled();
+            ClientThemeManager.setBackgroundDimEnabled(next);
+            saveConfigNow();
+            SoundUtil.playTogglePop(next);
+            return;
+        }
+
+        // Bottom-Right Card (Controls & Mobile)
+        int rcx = rightCardX + pad;
+        int rInnerW = rightCardW - pad * 2;
+        int segY = bottomYBase + 45;
+        if (isHovered(mouseX, mouseY, rcx, segY, rInnerW, 20)) {
+            int idx = Mth.clamp((mouseX - rcx) * 4 / Math.max(1, rInnerW), 0, 3);
+            ClientThemeManager.setGuiScaleIndex(idx);
+            saveConfigNow();
+            SoundUtil.playClick();
+            return;
+        }
+        int kbY = bottomYBase + 76;
+        if (isHovered(mouseX, mouseY, rcx, kbY - 4, rInnerW, 22)) {
+            listeningForGuiKeybind = true;
+            SoundUtil.playClick();
+            return;
+        }
+        int flY = bottomYBase + 104;
+        if (isHovered(mouseX, mouseY, rcx, flY - 4, rInnerW, 20)) {
+            boolean next = !ClientThemeManager.isFloatingButtonEnabled();
+            ClientThemeManager.setFloatingButtonEnabled(next);
+            saveConfigNow();
+            SoundUtil.playTogglePop(next);
+            return;
+        }
+        int flSizeY = bottomYBase + 123;
+        if (isHovered(mouseX, mouseY, clientFloatSizeSliderX - 4, flSizeY - 4, clientFloatSizeSliderW + 8, 16)) {
+            draggingFloatingSizeSlider = true;
+            float r = Mth.clamp((float) (mouseX - clientFloatSizeSliderX) / (float) Math.max(1, clientFloatSizeSliderW), 0.0F, 1.0F);
+            ClientThemeManager.setFloatingButtonSize(20.0F + r * 16.0F);
+            SoundUtil.playClick();
+            return;
+        }
+        int sndY = bottomYBase + 142;
+        if (isHovered(mouseX, mouseY, rcx, sndY - 4, rInnerW, 22)) {
+            boolean next = !ClientThemeManager.isUiSoundsEnabled();
+            ClientThemeManager.setUiSoundsEnabled(next);
+            saveConfigNow();
+            SoundUtil.playTogglePop(next);
+            return;
+        }
+    }
+
 }

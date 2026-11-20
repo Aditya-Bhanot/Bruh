@@ -99,6 +99,14 @@ public final class HudManager {
     private static boolean snapGuideYActive = false;
     private static int snapGuideXPos = 0;
     private static int snapGuideYPos = 0;
+    private static float lastDtSeconds = 0.016F;
+    private static boolean wasCustomGuiKeyDown = false;
+    private static boolean wasFloatingBtnMouseDown = false;
+    private static boolean draggingFloatingBtn = false;
+    private static long floatingBtnDownMs = 0L;
+    private static double floatingBtnDownX = 0.0D;
+    private static double floatingBtnDownY = 0.0D;
+    private static Component floatingBtnLabelComp = null;
 
     private HudManager() {
     }
@@ -201,6 +209,12 @@ public final class HudManager {
         }
         boolean previewMode = (mc.screen instanceof GlassClickGuiScreen gui) && gui.isHudTabActive();
         renderAllWidgets(mc, guiGraphics, previewMode, false);
+        ClientThemeManager.tick(lastDtSeconds, mc.screen instanceof GlassClickGuiScreen);
+        int screenW = guiGraphics.guiWidth();
+        int screenH = guiGraphics.guiHeight();
+        if (screenW > 0 && screenH > 0) {
+            renderFloatingTouchButtonAndPollKeybind(mc, guiGraphics, screenW, screenH);
+        }
     }
 
     public static void renderAllWidgets(Minecraft mc, GuiGraphics guiGraphics, boolean previewMode, boolean editorMode) {
@@ -215,6 +229,7 @@ public final class HudManager {
                 ? 0.016F
                 : AnimationUtil.clampDelta((now - lastFrameNanos) * 1.0e-9F);
         lastFrameNanos = now;
+        lastDtSeconds = dt;
         animClockSeconds += dt;
         if (animClockSeconds > 86400.0F) {
             animClockSeconds -= 86400.0F;
@@ -562,4 +577,87 @@ public final class HudManager {
         layoutDoneComp = Component.literal("Done").withStyle(hudBoldStyle);
         layoutResetComp = Component.literal("Reset").withStyle(hudRegularStyle);
     }
+
+    // =========================================================================
+    // Floating Touch Button ("A" Pill) & Custom ClickGUI Keybind Polling
+    // =========================================================================
+    private static void renderFloatingTouchButtonAndPollKeybind(
+            Minecraft mc, GuiGraphics guiGraphics, int screenW, int screenH) {
+        if (mc == null || mc.getWindow() == null) return;
+        long winHandle = mc.getWindow().handle();
+        if (winHandle == 0L) return;
+
+        // 1. Poll custom ClickGUI keybind when no screen is open
+        int guiKey = ClientThemeManager.getClickGuiKey();
+        if (mc.screen == null && guiKey >= GLFW.GLFW_KEY_SPACE && guiKey <= GLFW.GLFW_KEY_LAST) {
+            boolean down = GLFW.glfwGetKey(winHandle, guiKey) == GLFW.GLFW_PRESS;
+            if (down && !wasCustomGuiKeyDown) {
+                wasCustomGuiKeyDown = true;
+                mc.setScreen(GlassClickGuiScreen.getInstance());
+                return;
+            }
+            wasCustomGuiKeyDown = down;
+        } else {
+            wasCustomGuiKeyDown = false;
+        }
+
+        // 2. Render & interact with draggable Floating Touch Button ("A" pill)
+        if (!ClientThemeManager.isFloatingButtonEnabled() || mc.screen != null) {
+            wasFloatingBtnMouseDown = false;
+            draggingFloatingBtn = false;
+            return;
+        }
+
+        int size = Math.round(ClientThemeManager.getFloatingButtonSize());
+        int bx = Mth.clamp(Math.round(ClientThemeManager.getFloatingBtnXRatio() * screenW), 4, Math.max(4, screenW - size - 4));
+        int by = Mth.clamp(Math.round(ClientThemeManager.getFloatingBtnYRatio() * screenH), 4, Math.max(4, screenH - size - 4));
+        int radius = Math.max(6, size / 2);
+
+        int accent = ClientThemeManager.getAccentArgb();
+        int glowBg = ClientThemeManager.getAccentWithAlpha(0.24F);
+        drawRoundedRect(guiGraphics, bx - 1, by - 1, size + 2, size + 2, radius + 1, glowBg);
+        drawRoundedRect(guiGraphics, bx, by, size, size, radius, 0xCC111318);
+
+        if (floatingBtnLabelComp == null) {
+            floatingBtnLabelComp = Component.literal("A").withStyle(getBoldStyle());
+        }
+        int lw = mc.font.width(floatingBtnLabelComp);
+        guiGraphics.drawString(mc.font, floatingBtnLabelComp, bx + (size - lw) / 2, by + (size - 8) / 2, accent, false);
+
+        // Touch / mouse tap & drag support when cursor is unlocked (FoldCraftLauncher touch mode)
+        double[] mx = new double[1];
+        double[] my = new double[1];
+        GLFW.glfwGetCursorPos(winHandle, mx, my);
+        int fbW = Math.max(1, mc.getWindow().getScreenWidth());
+        int fbH = Math.max(1, mc.getWindow().getScreenHeight());
+        double guiX = mx[0] * screenW / fbW;
+        double guiY = my[0] * screenH / fbH;
+        boolean lDown = GLFW.glfwGetMouseButton(winHandle, GLFW.GLFW_MOUSE_BUTTON_LEFT) == GLFW.GLFW_PRESS;
+        boolean inside = guiX >= bx - 3 && guiX <= bx + size + 3 && guiY >= by - 3 && guiY <= by + size + 3;
+
+        if (lDown && !wasFloatingBtnMouseDown && inside) {
+            draggingFloatingBtn = true;
+            floatingBtnDownMs = System.currentTimeMillis();
+            floatingBtnDownX = guiX;
+            floatingBtnDownY = guiY;
+        } else if (lDown && draggingFloatingBtn) {
+            double distSq = (guiX - floatingBtnDownX) * (guiX - floatingBtnDownX)
+                    + (guiY - floatingBtnDownY) * (guiY - floatingBtnDownY);
+            if (distSq > 25.0D) {
+                ClientThemeManager.setFloatingBtnPosRatio(
+                        (float) ((guiX - size * 0.5D) / Math.max(1, screenW)),
+                        (float) ((guiY - size * 0.5D) / Math.max(1, screenH))
+                );
+            }
+        } else if (!lDown && draggingFloatingBtn) {
+            draggingFloatingBtn = false;
+            double distSq = (guiX - floatingBtnDownX) * (guiX - floatingBtnDownX)
+                    + (guiY - floatingBtnDownY) * (guiY - floatingBtnDownY);
+            if (distSq <= 25.0D && (System.currentTimeMillis() - floatingBtnDownMs) < 450L) {
+                mc.setScreen(GlassClickGuiScreen.getInstance());
+            }
+        }
+        wasFloatingBtnMouseDown = lDown;
+    }
+
 }

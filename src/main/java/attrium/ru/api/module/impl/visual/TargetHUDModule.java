@@ -501,7 +501,7 @@ public class TargetHUDModule extends HudModule {
         if ("Cyber Gradient".equalsIgnoreCase(theme)) {
             return AnimationUtil.resolveAccentColor(3, clockSec, 0.0F);
         }
-        return AnimationUtil.ACCENT_AQUA_CYAN;
+        return attrium.ru.manager.ClientThemeManager.getAccentArgb();
     }
 
     private int resolveBarEndColor(float hpRatio, float clockSec) {

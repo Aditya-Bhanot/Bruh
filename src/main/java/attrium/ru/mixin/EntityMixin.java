@@ -14,7 +14,6 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.ModifyVariable;
 import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
-import attrium.ru.api.module.impl.combat.HitBoxModule;
 import attrium.ru.api.module.impl.combat.aura.AngleConnection;
 import attrium.ru.api.events.impl.PlayerVelocityStrafeEvent;
 import attrium.ru.api.events.impl.PushEvent;
@@ -26,7 +25,7 @@ public abstract class EntityMixin {
     @Inject(method = "getBoundingBox", at = @At("RETURN"), cancellable = true)
     private void attrium$expandCombatHitBox(CallbackInfoReturnable<AABB> cir) {
         if ((Object) this instanceof LivingEntity living) {
-            cir.setReturnValue(HitBoxModule.apply(living, cir.getReturnValue()));
+            // HitBoxModule not present in project: cir.setReturnValue(HitBoxModule.apply(living, cir.getReturnValue()));
         }
     }
 

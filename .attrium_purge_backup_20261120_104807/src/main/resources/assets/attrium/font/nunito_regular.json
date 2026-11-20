@@ -1,0 +1,14 @@
+{
+  "providers": [
+    {
+      "type": "ttf",
+      "file": "attrium:nunito_regular.ttf",
+      "shift": [
+        0.0,
+        0.0
+      ],
+      "size": 10.0,
+      "oversample": 2.0
+    }
+  ]
+}

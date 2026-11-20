@@ -23,14 +23,11 @@ import attrium.ru.api.module.impl.combat.AutoCrystal;
 import attrium.ru.api.module.impl.combat.AutoGApple;
 import attrium.ru.api.module.impl.combat.AutoSwap;
 import attrium.ru.api.module.impl.combat.AutoTotem;
-import attrium.ru.api.module.impl.combat.Criticals;
-import attrium.ru.api.module.impl.combat.HitBoxModule;
 import attrium.ru.api.module.impl.combat.HitSound;
 import attrium.ru.api.module.impl.combat.MaceTarget;
 import attrium.ru.api.module.impl.combat.NoFriendDamage;
 import attrium.ru.api.module.impl.combat.NoInteract;
 import attrium.ru.api.module.impl.combat.TriggerBot;
-import attrium.ru.api.module.impl.combat.Velocity;
 import attrium.ru.api.module.impl.movement.*;
 import attrium.ru.api.module.impl.misc.AutoAuth;
 import attrium.ru.api.module.impl.misc.AutoDuel;
@@ -48,18 +45,12 @@ import attrium.ru.api.module.impl.player.AutoRespawn;
 import attrium.ru.api.module.impl.player.AutoTool;
 import attrium.ru.api.module.impl.player.ChestStealer;
 import attrium.ru.api.module.impl.player.ClickPearl;
-import attrium.ru.api.module.impl.player.FakePing;
-import attrium.ru.api.module.impl.player.FastBreak;
 import attrium.ru.api.module.impl.misc.ServerRPSpoofer;
 import attrium.ru.api.module.impl.player.NoEntityTrace;
-import attrium.ru.api.module.impl.player.NoDelay;
-import attrium.ru.api.module.impl.player.NoPush;
 import attrium.ru.api.module.impl.player.NameProtect;
 import attrium.ru.api.module.impl.player.ItemScroller;
 import attrium.ru.api.module.impl.player.FreeLook;
 import attrium.ru.api.module.impl.player.FreeCam;
-import attrium.ru.api.module.impl.player.OpenWalls;
-import attrium.ru.api.module.impl.player.WindJump;
 import attrium.ru.api.module.impl.visual.Ambience;
 import attrium.ru.api.module.impl.visual.Arrows;
 import attrium.ru.api.module.impl.visual.AspectRatio;
@@ -167,14 +158,6 @@ public final class ModuleManager {
         return getAura();
     }
 
-    public Optional<HitBoxModule> getHitBox() {
-        return getByType(HitBoxModule.class);
-    }
-
-    public boolean isHitBoxEnabled() {
-        return isEnabled(HitBoxModule.class);
-    }
-
     public Optional<NoInteract> getNoInteract() {
         return getByType(NoInteract.class);
     }
@@ -216,8 +199,6 @@ public final class ModuleManager {
         register(new AutoGApple());
         register(new AutoSwap());
         register(new AutoTotem());
-        register(new Criticals());
-        register(new HitBoxModule());
         register(new MaceTarget());
         register(new NameProtectModule());
         register(new KeybindsModule());
@@ -230,18 +211,9 @@ public final class ModuleManager {
         register(new NoFriendDamage());
         register(new NoInteract());
         register(new TriggerBot());
-        register(new Velocity());
 
         register(new AutoSprint());
         register(new ElytraTarget());
-        register(new NoWeb());
-        register(new NoSlow());
-        register(new InventoryMove());
-        register(new Speed());
-        register(new Strafe());
-        register(new SuperFireWork());
-        register(new TargetStrafe());
-        register(new AirStuck());
         register(new Ambience());
         register(new Arrows());
         register(new AspectRatio());
@@ -259,13 +231,7 @@ public final class ModuleManager {
         register(new NoRender());
         register(new TargetESP());
 
-        register(new WindJump());
-        register(new OpenWalls());
-        register(new NoPush());
         register(new NoEntityTrace());
-        register(new NoDelay());
-        register(new FastBreak());
-        register(new FakePing());
         register(new NameProtect());
         register(new ItemScroller());
         register(new FreeLook());
