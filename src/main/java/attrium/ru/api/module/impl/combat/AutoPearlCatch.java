@@ -22,11 +22,13 @@ import net.minecraft.world.phys.Vec3;
 /**
  * Exact 3D Kinematic AutoPearlCatch for Attrium (Minecraft 1.21.11 Official Mojang Mappings).
  *
- * Physics:
- * - ThrownEnderpearl: speed 1.5, drag 0.99/tick, gravity -0.03/tick, spawns at eyeY - 0.1.
- * - WindCharge:       speed 1.5, inertia 1.0 (zero drag), gravity 0.0, spawns at eyeY - 0.1.
- * - Snowball / Egg:   speed 1.5, drag 0.99/tick, gravity -0.03/tick, spawns at eyeY - 0.1.
- * - Solves for the exact intercept time t* where |L(t*)| == 1.5 (zero heap allocations).
+ * Vanilla 1.21.11 Projectile Physics:
+ * - ThrownEnderpearl: speed 1.5, drag 0.99/tick, gravity -0.03/tick, INHERITS playerVel.
+ * - WindCharge:       speed 1.5, inertia 1.0 (no drag), gravity 0.0, does NOT inherit playerVel.
+ * - Snowball / Egg:   speed 1.5, drag 0.99/tick, gravity -0.03/tick, INHERITS playerVel.
+ *
+ * Searches t in [0.5, maxInterceptTicks] (default 40 ticks, 0.25-tick steps, zero heap allocations)
+ * to find the exact chord time t* where required launch speed |L(t*)| == 1.5.
  */
 public class AutoPearlCatch extends Module {
 
@@ -47,18 +49,18 @@ public class AutoPearlCatch extends Module {
     ));
     private final ModeSetting catchItem = register(new ModeSetting(
             "Catch Item",
-            "Projectile used to intercept the thrown Ender Pearl",
-            "Wind Charge", "Wind Charge", "Snowball / Egg", "Auto"
+            "Projectile used to intercept the thrown Ender Pearl (Auto picks best for speed)",
+            "Auto", "Wind Charge", "Snowball / Egg", "Auto"
     ));
     private final NumberSetting fireDelay = register(new NumberSetting(
             "Fire Delay",
-            "Ticks between pearl release and catch projectile release (min 1 prevents self-collision)",
+            "Ticks between pearl release and catch projectile release (1 recommended)",
             1.0D, 1.0D, 3.0D, 1.0D
     ));
     private final NumberSetting maxInterceptTicks = register(new NumberSetting(
             "Max Intercept Ticks",
-            "Maximum ticks ahead the 3D solver searches for an exact speed-matched intercept",
-            6.0D, 2.0D, 12.0D, 1.0D
+            "Maximum ticks ahead the 3D solver searches for an exact diagonal/Elytra intercept",
+            40.0D, 6.0D, 60.0D, 2.0D
     ));
     private final BooleanSetting elytraCompensation = register(new BooleanSetting(
             "Elytra Compensation",
@@ -88,7 +90,7 @@ public class AutoPearlCatch extends Module {
     private boolean keybindSequencePending = false;
     private boolean holdingSilentRotation = false;
 
-    // Fallback simulated pearl kinematics (primitive doubles, zero heap allocations)
+    // Fallback simulated pearl kinematics
     private double simPearlX = 0.0D;
     private double simPearlY = 0.0D;
     private double simPearlZ = 0.0D;
@@ -96,9 +98,10 @@ public class AutoPearlCatch extends Module {
     private double simPearlVy = 0.0D;
     private double simPearlVz = 0.0D;
 
-    // Solved aim angles
+    // Solved aim angles + error metric
     private float solvedYaw = 0.0F;
     private float solvedPitch = 0.0F;
+    private double lastSolvedSpeedErr = Double.MAX_VALUE;
     private boolean solvedValid = false;
 
     public AutoPearlCatch() {
@@ -134,6 +137,7 @@ public class AutoPearlCatch extends Module {
         this.trackedPearlEntityId = -1;
         this.keybindSequencePending = false;
         this.solvedValid = false;
+        this.lastSolvedSpeedErr = Double.MAX_VALUE;
     }
 
     @SubscribeEvent
@@ -175,7 +179,7 @@ public class AutoPearlCatch extends Module {
     }
 
     private void handleIdle(Minecraft mc) {
-        int catchSlot = findCatchItemSlot(mc);
+        int catchSlot = findPreferredCatchSlot(mc);
         if (catchSlot < 0) {
             if ("Keybind".equalsIgnoreCase(triggerMode.getValue()) && keybindSequencePending) {
                 keybindSequencePending = false;
@@ -255,23 +259,25 @@ public class AutoPearlCatch extends Module {
             captureLivePearlState(livePearl);
         }
 
-        int catchSlot = findCatchItemSlot(mc);
-        if (catchSlot < 0) {
-            finishOrAbort(mc);
-            return;
-        }
-        activeCatchSlot = catchSlot;
-        activeCatchIsWindCharge = mc.player.getInventory().getItem(catchSlot).is(Items.WIND_CHARGE);
-
-        // Predict 1 tick forward because FIRE_CATCH executes on the NEXT tick (so server receives exact Silent rotation first)
-        if (!solveExact3DIntercept(mc, true, activeCatchIsWindCharge)) {
+        boolean isSilent = "Silent".equalsIgnoreCase(rotationMode.getValue());
+        if (!chooseBestCatchSlotAndSolve(mc, isSilent)) {
             finishOrAbort(mc);
             return;
         }
 
         selectSlotSynced(mc, activeCatchSlot);
         applySolvedRotation(mc);
-        state = STATE_FIRE_CATCH;
+
+        if (isSilent) {
+            // Silent mode: let RotationManager send the spoofed rotation packet this tick, then fire next tick
+            state = STATE_FIRE_CATCH;
+        } else {
+            // Legit mode: camera is already rotated right now -> fire immediately on Tick 1 (halves head start!)
+            mc.gameMode.useItem(mc.player, InteractionHand.MAIN_HAND);
+            mc.player.swing(InteractionHand.MAIN_HAND);
+            revertTicks = 2;
+            state = STATE_REVERT;
+        }
     }
 
     private void handleFireCatch(Minecraft mc) {
@@ -280,7 +286,6 @@ public class AutoPearlCatch extends Module {
             captureLivePearlState(livePearl);
         }
 
-        // Solve for CURRENT tick launch (predictOneTickAhead = false -> exact current eye position!)
         if (solveExact3DIntercept(mc, false, activeCatchIsWindCharge)) {
             applySolvedRotation(mc);
         }
@@ -318,9 +323,60 @@ public class AutoPearlCatch extends Module {
     }
 
     /**
+     * In "Auto" mode, compares Wind Charge vs Snowball/Egg intercept accuracy (crucial during
+     * fast Elytra flight where Snowball/Egg inherits Elytra speed while Wind Charge does not).
+     */
+    private boolean chooseBestCatchSlotAndSolve(Minecraft mc, boolean predictOneTickAhead) {
+        String mode = catchItem.getValue();
+        int wcSlot = findHotbarItem(mc, Items.WIND_CHARGE);
+        int sbSlot = findHotbarItem(mc, Items.SNOWBALL);
+        if (sbSlot < 0) {
+            sbSlot = findHotbarItem(mc, Items.EGG);
+        }
+
+        if ("Wind Charge".equalsIgnoreCase(mode)) {
+            if (wcSlot < 0) return false;
+            activeCatchSlot = wcSlot;
+            activeCatchIsWindCharge = true;
+            return solveExact3DIntercept(mc, predictOneTickAhead, true);
+        }
+        if ("Snowball / Egg".equalsIgnoreCase(mode)) {
+            if (sbSlot < 0) return false;
+            activeCatchSlot = sbSlot;
+            activeCatchIsWindCharge = false;
+            return solveExact3DIntercept(mc, predictOneTickAhead, false);
+        }
+
+        // Auto: try Wind Charge first; if Snowball/Egg is also available and gives a much better intercept, pick it
+        boolean wcOk = wcSlot >= 0 && solveExact3DIntercept(mc, predictOneTickAhead, true);
+        double wcErr = wcOk ? lastSolvedSpeedErr : Double.MAX_VALUE;
+        float wcYaw = solvedYaw;
+        float wcPitch = solvedPitch;
+
+        if (sbSlot >= 0 && (!wcOk || wcErr > 0.12D)) {
+            boolean sbOk = solveExact3DIntercept(mc, predictOneTickAhead, false);
+            if (sbOk && lastSolvedSpeedErr < wcErr) {
+                activeCatchSlot = sbSlot;
+                activeCatchIsWindCharge = false;
+                return true;
+            }
+        }
+
+        if (wcOk) {
+            activeCatchSlot = wcSlot;
+            activeCatchIsWindCharge = true;
+            solvedYaw = wcYaw;
+            solvedPitch = wcPitch;
+            solvedValid = true;
+            return true;
+        }
+        return false;
+    }
+
+    /**
      * Exact Continuous-Time 3D Interception Solver (zero heap allocations):
-     * Sweeps intercept time t in [0.5, maxT] (0.25-tick steps) to find t* where
-     * the required projectile launch speed |L(t*)| matches vanilla PROJECTILE_SPEED (1.5).
+     * - WindCharge: inertia = 1.0, gravity = 0.0, NO playerVel inheritance.
+     * - Snowball/Egg: drag = 0.99, gravity = 0.03, INHERITS playerVel.
      */
     private boolean solveExact3DIntercept(Minecraft mc, boolean predictOneTickAhead, boolean isWindCharge) {
         Vec3 vel = mc.player.getDeltaMovement();
@@ -329,12 +385,10 @@ public class AutoPearlCatch extends Module {
         double playerVy = (!mc.player.onGround() && (comp3D || mc.player.isFallFlying())) ? vel.y : 0.0D;
         double playerVz = vel.z;
 
-        // Launch origin at fire tick
         double eyeX = mc.player.getX() + (predictOneTickAhead ? playerVx : 0.0D);
         double eyeY = (mc.player.getEyeY() - 0.1D) + (predictOneTickAhead ? playerVy : 0.0D);
         double eyeZ = mc.player.getZ() + (predictOneTickAhead ? playerVz : 0.0D);
 
-        // Pearl state at fire tick
         double startPx = simPearlX;
         double startPy = simPearlY;
         double startPz = simPearlZ;
@@ -350,14 +404,13 @@ public class AutoPearlCatch extends Module {
             startPvz *= PEARL_DRAG;
         }
 
-        int maxT = Mth.clamp(maxInterceptTicks.getValue().intValue(), 2, 12);
+        int maxT = Mth.clamp(maxInterceptTicks.getValue().intValue(), 6, 60);
         double bestSpeedErr = Double.MAX_VALUE;
         double bestReqVx = 0.0D;
         double bestReqVy = 0.0D;
         double bestReqVz = 0.0D;
         boolean found = false;
 
-        // Step pearl tick-by-tick and evaluate 4 sub-steps per tick (0.25-tick resolution)
         double prevPx = startPx;
         double prevPy = startPy;
         double prevPz = startPz;
@@ -393,12 +446,12 @@ public class AutoPearlCatch extends Module {
                 double reqVy;
                 double reqVz;
                 if (isWindCharge) {
-                    // Vanilla 1.21.11 WindCharge: inertia = 1.0 (no air drag), gravity = 0.0
-                    reqVx = ((px - eyeX) / t) - playerVx;
-                    reqVy = ((py - eyeY) / t) - playerVy;
-                    reqVz = ((pz - eyeZ) / t) - playerVz;
+                    // WindCharge: constant speed 1.5, zero drag, zero gravity, NO player velocity inheritance
+                    reqVx = (px - eyeX) / t;
+                    reqVy = (py - eyeY) / t;
+                    reqVz = (pz - eyeZ) / t;
                 } else {
-                    // Vanilla Snowball / Egg: drag = 0.99/tick, gravity = 0.03/tick
+                    // Snowball / Egg: drag 0.99, gravity 0.03, INHERITS player velocity
                     double dragIntegral = (1.0D - Math.pow(0.99D, t)) / 0.01D;
                     if (dragIntegral < 1.0E-4D) {
                         continue;
@@ -417,10 +470,18 @@ public class AutoPearlCatch extends Module {
                     bestReqVy = reqVy;
                     bestReqVz = reqVz;
                     found = true;
+                    // Early exit once we hit an exact earliest speed-matched intercept
+                    if (err < 0.015D) {
+                        break;
+                    }
                 }
+            }
+            if (found && bestSpeedErr < 0.015D) {
+                break;
             }
         }
 
+        lastSolvedSpeedErr = bestSpeedErr;
         if (!found) {
             solvedValid = false;
             return false;
@@ -439,7 +500,6 @@ public class AutoPearlCatch extends Module {
             return false;
         }
 
-        // Apply GCD mouse-sensitivity rounding
         double sens = mc.options.sensitivity().get() * 0.6D + 0.2D;
         float gcd = (float) (sens * sens * sens * 1.2D);
         float curYaw = mc.player.getYRot();
@@ -535,7 +595,7 @@ public class AutoPearlCatch extends Module {
         return best;
     }
 
-    private int findCatchItemSlot(Minecraft mc) {
+    private int findPreferredCatchSlot(Minecraft mc) {
         String mode = catchItem.getValue();
         if ("Wind Charge".equalsIgnoreCase(mode)) {
             return findHotbarItem(mc, Items.WIND_CHARGE);
@@ -545,9 +605,7 @@ public class AutoPearlCatch extends Module {
             return s >= 0 ? s : findHotbarItem(mc, Items.EGG);
         }
         int wc = findHotbarItem(mc, Items.WIND_CHARGE);
-        if (wc >= 0) {
-            return wc;
-        }
+        if (wc >= 0) return wc;
         int sb = findHotbarItem(mc, Items.SNOWBALL);
         return sb >= 0 ? sb : findHotbarItem(mc, Items.EGG);
     }
