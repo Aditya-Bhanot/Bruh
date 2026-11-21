@@ -85,12 +85,6 @@ public class TargetHUDModule extends HudModule {
             true
     ));
 
-    private final BooleanSetting showStatusTag = register(new BooleanSetting(
-            "Show Status Tag",
-            "Displays WIN (cyan) or LOSE (coral) based on combined HP and armor.",
-            true
-    ));
-
     private final NumberSetting holdDuration = register(new NumberSetting(
             "Hold Duration",
             "Seconds TargetHUD stays visible after combat ends (0.5 - 3.0s).",
@@ -113,8 +107,6 @@ public class TargetHUDModule extends HudModule {
     private Component cachedDistComp = null;
     private int cachedPopCount = -1;
     private Component cachedPopComp = null;
-    private Component winningComp = null;
-    private Component losingComp = null;
 
     public TargetHUDModule() {
         super("TargetHUD", "Displays target health, armor durability, and totem pops",
@@ -292,7 +284,7 @@ public class TargetHUDModule extends HudModule {
 
         // =====================================================================
         // Modern Glass (165 x 54px)
-        // Row 1 (y=7): Target Username (left) + HP Readout & optional WIN/LOSE tag (right)
+        // Row 1 (y=7): Target Username (left) + HP Readout (right)
         // Row 2 (y=20): Armor Row (0.75f icons + Mini Bar/Percentage durability) + Totem Pop Pill (right)
         // Row 3 (y=42): Dual-layer rounded Health Bar
         // =====================================================================
@@ -300,15 +292,6 @@ public class TargetHUDModule extends HudModule {
             guiGraphics.drawString(font, cachedNameComp, infoX, 7, textCol, false);
 
             int rightCursor = infoRight;
-            if (Boolean.TRUE.equals(showStatusTag.getValue())) {
-                boolean winning = isPlayerWinning(mc.player, target);
-                Component statusComp = winning ? winningComp : losingComp;
-                int statusCol = AnimationUtil.withAlpha(winning ? 0xFF00E5FF : 0xFFFF5C77, alpha);
-                int sw = font.width(statusComp);
-                rightCursor -= sw;
-                guiGraphics.drawString(font, statusComp, rightCursor, 7, statusCol, false);
-                rightCursor -= 5;
-            }
             int hpW = font.width(cachedHpComp);
             if (rightCursor - hpW > infoX + 40) {
                 guiGraphics.drawString(font, cachedHpComp, rightCursor - hpW, 7, barLeftCol, false);
@@ -452,11 +435,6 @@ public class TargetHUDModule extends HudModule {
     }
 
     private void updateCachedTextComponents(Minecraft mc, Player target, float hp, int displayPops) {
-        if (winningComp == null) {
-            winningComp = Component.literal("WIN").withStyle(HudManager.getBoldStyle());
-            losingComp = Component.literal("LOSE").withStyle(HudManager.getBoldStyle());
-        }
-
         String rawName = target.getName().getString();
         String safeName = NameProtectModule.isActive() ? NameProtectModule.protect(rawName) : rawName;
         if (!safeName.equals(cachedName) || cachedNameComp == null) {
@@ -513,13 +491,6 @@ public class TargetHUDModule extends HudModule {
             return AnimationUtil.resolveAccentSecondary(3, clockSec, 0.0F);
         }
         return AnimationUtil.ACCENT_CYBER_BLUE;
-    }
-
-    private static boolean isPlayerWinning(Player self, Player target) {
-        if (self == null || target == null || self == target) return true;
-        float selfScore = self.getHealth() + self.getAbsorptionAmount() + self.getArmorValue() * 0.5F;
-        float targetScore = target.getHealth() + target.getAbsorptionAmount() + target.getArmorValue() * 0.5F;
-        return selfScore >= targetScore;
     }
 
     private static Player resolveTarget(Minecraft mc, boolean previewMode) {
