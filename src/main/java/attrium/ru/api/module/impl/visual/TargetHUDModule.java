@@ -98,6 +98,7 @@ public class TargetHUDModule extends HudModule {
     private float popAnim = 0.0F;
     private float animatedHealth = 1.0F;
     private float easingHealth = 1.0F;
+    private float animatedAbsorption = 0.0F;
 
     private String cachedName = "";
     private Component cachedNameComp = null;
@@ -190,13 +191,16 @@ public class TargetHUDModule extends HudModule {
 
         Player target = trackedTarget;
         float maxHp = Math.max(1.0F, target.getMaxHealth());
-        float hp = Mth.clamp(target.getHealth() + target.getAbsorptionAmount(), 0.0F, maxHp + 20.0F);
-        float hpRatio = Mth.clamp(hp / maxHp, 0.0F, 1.0F);
+        float absHp = Math.max(0.0F, target.getAbsorptionAmount());
+        float hp = Mth.clamp(target.getHealth() + absHp, 0.0F, maxHp + 20.0F);
+        float hpRatio = Mth.clamp(target.getHealth() / maxHp, 0.0F, 1.0F);
+        float absRatio = Mth.clamp(absHp / maxHp, 0.0F, 1.0F);
 
         if (target.getId() != lastTargetId) {
             lastTargetId = target.getId();
             animatedHealth = hpRatio;
             easingHealth = hpRatio;
+            animatedAbsorption = absRatio;
             cachedName = "";
             cachedHpTenths = -1;
             cachedDistTenths = -1;
@@ -216,6 +220,9 @@ public class TargetHUDModule extends HudModule {
             easingHealth = AnimationUtil.lerp(easingHealth, hpRatio, 3.6F, dt);
             if (easingHealth < animatedHealth) easingHealth = animatedHealth;
         }
+        animatedAbsorption = "Instant".equalsIgnoreCase(barMode)
+                ? absRatio
+                : AnimationUtil.lerp(animatedAbsorption, absRatio, 12.0F, dt);
 
         int displayPops = isPreview ? 2 : TotemPopManager.getPopCount(target.getUUID());
         updateCachedTextComponents(mc, target, hp, displayPops);
@@ -235,7 +242,7 @@ public class TargetHUDModule extends HudModule {
         guiGraphics.pose().scale(popScale, popScale);
         guiGraphics.pose().translate(-cardW * 0.5F, -cardH * 0.5F);
 
-        HudManager.drawRoundedRect(guiGraphics, 0, 0, cardW, cardH, compact ? 9 : 10, cardBg);
+        HudManager.drawGlassCard(guiGraphics, 0, 0, cardW, cardH, compact ? 9 : 10, cardBg, alpha);
 
         int textCol = AnimationUtil.withAlpha(0xFFFFFFFF, alpha);
         int mutedCol = AnimationUtil.withAlpha(0xFF9CA3AF, alpha);
@@ -256,12 +263,16 @@ public class TargetHUDModule extends HudModule {
         int avatarX = compact ? 6 : 9;
         int avatarY = (cardH - avatarSize) / 2;
 
-        HudManager.drawRoundedRect(guiGraphics, avatarX - 1, avatarY - 1, avatarSize + 2, avatarSize + 2, 6,
+        int shakeX = target.hurtTime > 0
+                ? Math.round((float) Math.sin(target.hurtTime * 1.9F) * (target.hurtTime / 10.0F) * 1.6F)
+                : 0;
+        int drawAvX = avatarX + shakeX;
+        HudManager.drawRoundedRect(guiGraphics, drawAvX - 1, avatarY - 1, avatarSize + 2, avatarSize + 2, 6,
                 AnimationUtil.withAlpha(0x33FFFFFF, alpha));
-        HudManager.drawPlayerAvatar(guiGraphics, mc, target, avatarX, avatarY, avatarSize);
+        HudManager.drawPlayerAvatar(guiGraphics, mc, target, drawAvX, avatarY, avatarSize);
         if (target.hurtTime > 0) {
             float hurtAlpha = Mth.clamp((target.hurtTime / 10.0F) * 0.55F * alpha, 0.0F, 0.6F);
-            HudManager.drawRoundedRect(guiGraphics, avatarX, avatarY, avatarSize, avatarSize, 4,
+            HudManager.drawRoundedRect(guiGraphics, drawAvX, avatarY, avatarSize, avatarSize, 4,
                     AnimationUtil.withAlpha(0xFFFF2E4C, hurtAlpha));
         }
 
@@ -432,6 +443,14 @@ public class TargetHUDModule extends HudModule {
         if (fillW > 2) {
             HudManager.drawHorizontalGradientBar(guiGraphics, x, y, fillW, h, radius, leftCol, rightCol);
         }
+
+        if (animatedAbsorption > 0.01F) {
+            int absW = Math.max(3, Math.round(w * animatedAbsorption));
+            int absH = Math.max(2, h / 2);
+            int absLeft = AnimationUtil.withAlpha(0xFFFACC15, alpha);
+            int absRight = AnimationUtil.withAlpha(0xFFF59E0B, alpha);
+            HudManager.drawHorizontalGradientBar(guiGraphics, x, y, Math.min(w, absW), absH, Math.min(radius, 2), absLeft, absRight);
+        }
     }
 
     private void updateCachedTextComponents(Minecraft mc, Player target, float hp, int displayPops) {
@@ -439,7 +458,7 @@ public class TargetHUDModule extends HudModule {
         String safeName = NameProtectModule.isActive() ? NameProtectModule.protect(rawName) : rawName;
         if (!safeName.equals(cachedName) || cachedNameComp == null) {
             cachedName = safeName;
-            String clipped = safeName.length() > 11 ? safeName.substring(0, 11) : safeName;
+            String clipped = safeName.length() > 12 ? safeName.substring(0, 11) + "\u2026" : safeName;
             cachedNameComp = Component.literal(clipped).withStyle(HudManager.getBoldStyle());
         }
 

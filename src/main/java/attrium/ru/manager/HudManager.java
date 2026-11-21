@@ -472,6 +472,22 @@ public final class HudManager {
         guiGraphics.fill(x + 9, y + size - 8, x + size - 9, y + size - 6, 0xCCFFFFFF);
     }
 
+
+    public static void drawGlassCard(GuiGraphics guiGraphics, int x, int y, int w, int h,
+                                     int radius, int bgColor, float alpha) {
+        float clamped = Math.max(0.0F, Math.min(1.0F, alpha));
+        int rimAlpha = Math.max(0, Math.min(255, Math.round(0x22 * clamped)));
+        if (rimAlpha > 2) {
+            drawRoundedRect(guiGraphics, x - 1, y - 1, w + 2, h + 2, radius + 1, (rimAlpha << 24) | 0xFFFFFF);
+        }
+        drawRoundedRect(guiGraphics, x, y, w, h, radius, bgColor);
+        int hiAlpha = Math.max(0, Math.min(255, Math.round(0x2A * clamped)));
+        int inset = Math.max(2, radius);
+        if (hiAlpha > 2 && w > inset * 2) {
+            guiGraphics.fill(x + inset, y, x + w - inset, y + 1, (hiAlpha << 24) | 0xFFFFFF);
+        }
+    }
+
     public static void drawRoundedRect(GuiGraphics guiGraphics, int x, int y, int w, int h, int radius, int color) {
         if (w <= 0 || h <= 0 || (color >>> 24) == 0) return;
         int r = Mth.clamp(Math.min(radius, Math.min(w / 2, h / 2)), 0, MAX_RADIUS);
