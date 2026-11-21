@@ -74,6 +74,11 @@ public final class TickPipelineManager {
         }
 
         try {
+            attrium.ru.api.module.impl.visual.PlayerRadarModule.tickProximity(mc);
+        } catch (Throwable ignored) {
+        }
+
+        try {
             attrium.ru.api.module.impl.misc.ChatUtilsModule.onClientTick(mc);
         } catch (Throwable ignored) {
         }

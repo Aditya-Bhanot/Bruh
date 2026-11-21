@@ -17,6 +17,7 @@ import attrium.ru.api.module.impl.visual.ArrayListModule;
 import attrium.ru.api.module.impl.visual.HudModule;
 import attrium.ru.api.module.impl.visual.KeybindsModule;
 import attrium.ru.api.module.impl.visual.NotificationsModule;
+import attrium.ru.api.module.impl.visual.PlayerRadarModule;
 import attrium.ru.api.module.impl.visual.TargetHUDModule;
 import attrium.ru.screens.GlassClickGuiScreen;
 import attrium.ru.utils.render.AnimationUtil;
@@ -569,6 +570,7 @@ public final class HudManager {
             if (NotificationsModule.getInstance() != null) CACHED_HUD_MODULES.add(NotificationsModule.getInstance());
             if (TargetHUDModule.getInstance() != null) CACHED_HUD_MODULES.add(TargetHUDModule.getInstance());
             if (KeybindsModule.getInstance() != null) CACHED_HUD_MODULES.add(KeybindsModule.getInstance());
+            if (PlayerRadarModule.getInstance() != null) CACHED_HUD_MODULES.add(PlayerRadarModule.getInstance());
         }
         hudModuleCacheReady = !CACHED_HUD_MODULES.isEmpty();
     }
