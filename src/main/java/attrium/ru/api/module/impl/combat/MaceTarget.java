@@ -3,6 +3,8 @@ package attrium.ru.api.module.impl.combat;
 
 
 
+
+import attrium.ru.mixin.accessor.CarriedItemSyncInvoker;
 import attrium.ru.api.module.impl.misc.ElytraHelper;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.core.BlockPos;

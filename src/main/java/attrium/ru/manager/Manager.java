@@ -1,6 +1,8 @@
 package attrium.ru.manager;
 
 
+
+import attrium.ru.api.module.impl.misc.ElytraHelper;
 import attrium.ru.api.module.impl.movement.LungeHelper;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.minecraft.client.Minecraft;
@@ -60,6 +62,7 @@ public class Manager {
             WorldAnimation.tick();
             ClickGui.tickMovementKeys();
             postEvent(new TickEvent.Pre(client));
+            ElytraHelper.tickMacroGlobal(client, ElytraHelper.getMacroBoundKey());
             LungeHelper.tickMacroGlobal(client, LungeHelper.getMacroBoundKey());
         });
         ClientTickEvents.END_CLIENT_TICK.register(client -> postEvent(new TickEvent.Post(client)));
