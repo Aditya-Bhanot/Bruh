@@ -259,25 +259,15 @@ public class AutoPearlCatch extends Module {
             captureLivePearlState(livePearl);
         }
 
-        boolean isSilent = "Silent".equalsIgnoreCase(rotationMode.getValue());
-        if (!chooseBestCatchSlotAndSolve(mc, isSilent)) {
+        if (!chooseBestCatchSlotAndSolve(mc, false)) {
             finishOrAbort(mc);
             return;
         }
-
         selectSlotSynced(mc, activeCatchSlot);
         applySolvedRotation(mc);
-
-        if (isSilent) {
-            // Silent mode: let RotationManager send the spoofed rotation packet this tick, then fire next tick
-            state = STATE_FIRE_CATCH;
-        } else {
-            // Legit mode: camera is already rotated right now -> fire immediately on Tick 1 (halves head start!)
-            mc.gameMode.useItem(mc.player, InteractionHand.MAIN_HAND);
-            mc.player.swing(InteractionHand.MAIN_HAND);
-            revertTicks = 2;
-            state = STATE_REVERT;
-        }
+        fireWithSolvedAngle(mc);
+        revertTicks = 2;
+        state = STATE_REVERT;
     }
 
     private void handleFireCatch(Minecraft mc) {
@@ -295,9 +285,7 @@ public class AutoPearlCatch extends Module {
             selectSlotSynced(mc, activeCatchSlot);
         }
 
-        mc.gameMode.useItem(mc.player, InteractionHand.MAIN_HAND);
-        mc.player.swing(InteractionHand.MAIN_HAND);
-
+        fireWithSolvedAngle(mc);
         revertTicks = 2;
         state = STATE_REVERT;
     }
@@ -629,4 +617,33 @@ public class AutoPearlCatch extends Module {
             ((CarriedItemSyncInvoker) mc.gameMode).attrium$ensureHasSentCarriedItem();
         }
     }
+
+    /**
+     * In Minecraft 1.21.11, MultiPlayerGameMode.useItem() builds ServerboundUseItemPacket
+     * directly from mc.player.getYRot()/getXRot(). Temporarily applying the solved angle around
+     * useItem() ensures the catch projectile actually launches along the solved 3D intercept vector
+     * while keeping the visual camera untouched in Silent mode.
+     */
+    private void fireWithSolvedAngle(Minecraft mc) {
+        if (!solvedValid) {
+            mc.gameMode.useItem(mc.player, InteractionHand.MAIN_HAND);
+            mc.player.swing(InteractionHand.MAIN_HAND);
+            return;
+        }
+        boolean silent = "Silent".equalsIgnoreCase(rotationMode.getValue());
+        float prevYaw = mc.player.getYRot();
+        float prevPitch = mc.player.getXRot();
+        mc.player.setYRot(solvedYaw);
+        mc.player.setXRot(solvedPitch);
+        try {
+            mc.gameMode.useItem(mc.player, InteractionHand.MAIN_HAND);
+            mc.player.swing(InteractionHand.MAIN_HAND);
+        } finally {
+            if (silent) {
+                mc.player.setYRot(prevYaw);
+                mc.player.setXRot(prevPitch);
+            }
+        }
+    }
+
 }

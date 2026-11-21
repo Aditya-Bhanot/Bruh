@@ -1,5 +1,7 @@
 package attrium.ru.manager;
 
+
+import attrium.ru.api.module.impl.movement.LungeHelper;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.minecraft.client.Minecraft;
 import attrium.ru.api.command.CommandManager;
@@ -58,6 +60,7 @@ public class Manager {
             WorldAnimation.tick();
             ClickGui.tickMovementKeys();
             postEvent(new TickEvent.Pre(client));
+            LungeHelper.tickMacroGlobal(client, LungeHelper.getMacroBoundKey());
         });
         ClientTickEvents.END_CLIENT_TICK.register(client -> postEvent(new TickEvent.Post(client)));
     }
@@ -101,7 +104,7 @@ public class Manager {
         if (WorldAnimation.isActive()) {
             return;
         }
-        client.setScreen(new ClickGuiScreen());
+        /* disabled legacy ClickGUI open: client.setScreen(new ClickGuiScreen()); */
     }
 
     private void warmClickGuiText() {
