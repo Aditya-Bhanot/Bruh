@@ -20,10 +20,13 @@ import net.minecraft.world.item.Items;
 import net.minecraft.world.phys.Vec3;
 
 /**
- * AutoPearlCatch for Attrium (Minecraft 1.21.11 Official Mojang Mappings).
- * Catches and deflects thrown Ender Pearls mid-air while gliding or moving diagonally
- * using zero-allocation 3D kinematic interception math, GCD rotation rounding, and
- * CarriedItemSyncInvoker hotbar synchronization.
+ * Exact 3D Kinematic AutoPearlCatch for Attrium (Minecraft 1.21.11 Official Mojang Mappings).
+ *
+ * Physics:
+ * - ThrownEnderpearl: speed 1.5, drag 0.99/tick, gravity -0.03/tick, spawns at eyeY - 0.1.
+ * - WindCharge:       speed 1.5, inertia 1.0 (zero drag), gravity 0.0, spawns at eyeY - 0.1.
+ * - Snowball / Egg:   speed 1.5, drag 0.99/tick, gravity -0.03/tick, spawns at eyeY - 0.1.
+ * - Solves for the exact intercept time t* where |L(t*)| == 1.5 (zero heap allocations).
  */
 public class AutoPearlCatch extends Module {
 
@@ -32,6 +35,10 @@ public class AutoPearlCatch extends Module {
     private static final int STATE_AIM_AND_SWAP = 2;
     private static final int STATE_FIRE_CATCH = 3;
     private static final int STATE_REVERT = 4;
+
+    private static final double PROJECTILE_SPEED = 1.5D;
+    private static final double PEARL_DRAG = 0.99D;
+    private static final double PEARL_GRAVITY = 0.03D;
 
     private final ModeSetting triggerMode = register(new ModeSetting(
             "Trigger Mode",
@@ -48,10 +55,10 @@ public class AutoPearlCatch extends Module {
             "Ticks between pearl release and catch projectile release (min 1 prevents self-collision)",
             1.0D, 1.0D, 3.0D, 1.0D
     ));
-    private final NumberSetting predictionTicks = register(new NumberSetting(
-            "Prediction Ticks",
-            "Ticks ahead to solve 3D projectile intersection",
-            2.0D, 1.0D, 4.0D, 1.0D
+    private final NumberSetting maxInterceptTicks = register(new NumberSetting(
+            "Max Intercept Ticks",
+            "Maximum ticks ahead the 3D solver searches for an exact speed-matched intercept",
+            6.0D, 2.0D, 12.0D, 1.0D
     ));
     private final BooleanSetting elytraCompensation = register(new BooleanSetting(
             "Elytra Compensation",
@@ -88,15 +95,14 @@ public class AutoPearlCatch extends Module {
     private double simPearlVx = 0.0D;
     private double simPearlVy = 0.0D;
     private double simPearlVz = 0.0D;
-    private int simAgeTicks = 0;
 
-    // Solved aim angles (primitive floats)
+    // Solved aim angles
     private float solvedYaw = 0.0F;
     private float solvedPitch = 0.0F;
     private boolean solvedValid = false;
 
     public AutoPearlCatch() {
-        super("AutoPearlCatch", "Catches and deflects thrown Ender Pearls mid-air while gliding or moving diagonally", ModuleCategory.COMBAT);
+        super("AutoPearlCatch", "Exact 3D kinematic Ender Pearl interception (diagonal & Elytra-safe)", ModuleCategory.COMBAT);
     }
 
     @Override
@@ -127,7 +133,6 @@ public class AutoPearlCatch extends Module {
         this.activeCatchIsWindCharge = true;
         this.trackedPearlEntityId = -1;
         this.keybindSequencePending = false;
-        this.simAgeTicks = 0;
         this.solvedValid = false;
     }
 
@@ -146,15 +151,14 @@ public class AutoPearlCatch extends Module {
             return;
         }
 
-        // Advance fallback simulated pearl 1 tick while waiting for live entity lock
+        // Advance fallback simulated pearl 1 tick
         if (state == STATE_AIM_AND_SWAP || state == STATE_FIRE_CATCH) {
             simPearlX += simPearlVx;
             simPearlY += simPearlVy;
             simPearlZ += simPearlVz;
-            simPearlVx *= 0.99D;
-            simPearlVy = (simPearlVy * 0.99D) - 0.03D;
-            simPearlVz *= 0.99D;
-            simAgeTicks++;
+            simPearlVx *= PEARL_DRAG;
+            simPearlVy = (simPearlVy * PEARL_DRAG) - PEARL_GRAVITY;
+            simPearlVz *= PEARL_DRAG;
         }
 
         switch (state) {
@@ -199,8 +203,7 @@ public class AutoPearlCatch extends Module {
             return;
         }
 
-        // On Manual Throw mode: detect newly spawned ThrownEnderpearl owned by player within 3.0 blocks
-        ThrownEnderpearl pearl = findOwnedRecentPearl(mc, 3.0D, 4);
+        ThrownEnderpearl pearl = findOwnedRecentPearl(mc, 3.5D, 4);
         if (pearl != null && pearl.getId() != lastCaughtPearlEntityId) {
             previousSlot = mc.player.getInventory().getSelectedSlot();
             activeCatchSlot = catchSlot;
@@ -217,9 +220,8 @@ public class AutoPearlCatch extends Module {
         mc.gameMode.useItem(mc.player, InteractionHand.MAIN_HAND);
         mc.player.swing(InteractionHand.MAIN_HAND);
 
-        // Deterministic initial pearl spawn state (eyeY - 0.1, speed 1.5 + inherited player velocity)
-        float yawRad = mc.player.getYRot() * ((float) Math.PI / 180.0F);
-        float pitchRad = mc.player.getXRot() * ((float) Math.PI / 180.0F);
+        float yawRad = mc.player.getYRot() * Mth.DEG_TO_RAD;
+        float pitchRad = mc.player.getXRot() * Mth.DEG_TO_RAD;
         double dirX = -Math.sin(yawRad) * Math.cos(pitchRad);
         double dirY = -Math.sin(pitchRad);
         double dirZ = Math.cos(yawRad) * Math.cos(pitchRad);
@@ -232,12 +234,10 @@ public class AutoPearlCatch extends Module {
         simPearlX = mc.player.getX();
         simPearlY = mc.player.getEyeY() - 0.1D;
         simPearlZ = mc.player.getZ();
-        simPearlVx = dirX * 1.5D + pVx;
-        simPearlVy = dirY * 1.5D + pVy;
-        simPearlVz = dirZ * 1.5D + pVz;
-        simAgeTicks = 0;
+        simPearlVx = dirX * PROJECTILE_SPEED + pVx;
+        simPearlVy = dirY * PROJECTILE_SPEED + pVy;
+        simPearlVz = dirZ * PROJECTILE_SPEED + pVz;
 
-        // Enforce minimum 1-tick gap so pearl clears player hitbox before Wind Charge fires
         delayTicks = Math.max(1, fireDelay.getValue().intValue());
         state = STATE_AIM_AND_SWAP;
     }
@@ -248,7 +248,6 @@ public class AutoPearlCatch extends Module {
             return;
         }
 
-        // Lock onto live spawned ThrownEnderpearl if present
         ThrownEnderpearl livePearl = findTrackedOrRecentPearl(mc);
         if (livePearl != null) {
             trackedPearlEntityId = livePearl.getId();
@@ -264,7 +263,8 @@ public class AutoPearlCatch extends Module {
         activeCatchSlot = catchSlot;
         activeCatchIsWindCharge = mc.player.getInventory().getItem(catchSlot).is(Items.WIND_CHARGE);
 
-        if (!solve3DInterception(mc, simPearlX, simPearlY, simPearlZ, simPearlVx, simPearlVy, simPearlVz, activeCatchIsWindCharge)) {
+        // Predict 1 tick forward because FIRE_CATCH executes on the NEXT tick (so server receives exact Silent rotation first)
+        if (!solveExact3DIntercept(mc, true, activeCatchIsWindCharge)) {
             finishOrAbort(mc);
             return;
         }
@@ -275,13 +275,13 @@ public class AutoPearlCatch extends Module {
     }
 
     private void handleFireCatch(Minecraft mc) {
-        // Re-verify live pearl kinematics on the exact fire tick
         ThrownEnderpearl livePearl = findTrackedOrRecentPearl(mc);
         if (livePearl != null) {
             captureLivePearlState(livePearl);
         }
 
-        if (solve3DInterception(mc, simPearlX, simPearlY, simPearlZ, simPearlVx, simPearlVy, simPearlVz, activeCatchIsWindCharge)) {
+        // Solve for CURRENT tick launch (predictOneTickAhead = false -> exact current eye position!)
+        if (solveExact3DIntercept(mc, false, activeCatchIsWindCharge)) {
             applySolvedRotation(mc);
         }
 
@@ -318,54 +318,122 @@ public class AutoPearlCatch extends Module {
     }
 
     /**
-     * Zero-allocation 3D Kinematic Interception Solver (handles diagonal movement & Elytra gliding vy).
+     * Exact Continuous-Time 3D Interception Solver (zero heap allocations):
+     * Sweeps intercept time t in [0.5, maxT] (0.25-tick steps) to find t* where
+     * the required projectile launch speed |L(t*)| matches vanilla PROJECTILE_SPEED (1.5).
      */
-    private boolean solve3DInterception(
-            Minecraft mc,
-            double pearlX, double pearlY, double pearlZ,
-            double pearlVx, double pearlVy, double pearlVz,
-            boolean isWindCharge
-    ) {
-        int predTicks = Mth.clamp(predictionTicks.getValue().intValue(), 1, 4);
-
-        double pX = pearlX;
-        double pY = pearlY;
-        double pZ = pearlZ;
-        double pVx = pearlVx;
-        double pVy = pearlVy;
-        double pVz = pearlVz;
-
-        for (int t = 1; t <= predTicks; t++) {
-            pX += pVx;
-            pY += pVy;
-            pZ += pVz;
-            pVx *= 0.99D;
-            pVy = (pVy * 0.99D) - 0.03D;
-            pVz *= 0.99D;
-        }
-
+    private boolean solveExact3DIntercept(Minecraft mc, boolean predictOneTickAhead, boolean isWindCharge) {
         Vec3 vel = mc.player.getDeltaMovement();
-        boolean compensate3D = Boolean.TRUE.equals(elytraCompensation.getValue());
+        boolean comp3D = Boolean.TRUE.equals(elytraCompensation.getValue());
         double playerVx = vel.x;
-        double playerVy = (!mc.player.onGround() && (compensate3D || mc.player.isFallFlying())) ? vel.y : 0.0D;
+        double playerVy = (!mc.player.onGround() && (comp3D || mc.player.isFallFlying())) ? vel.y : 0.0D;
         double playerVz = vel.z;
 
-        double eyeX = mc.player.getX() + playerVx;
-        double eyeY = (mc.player.getEyeY() - 0.1D) + playerVy;
-        double eyeZ = mc.player.getZ() + playerVz;
+        // Launch origin at fire tick
+        double eyeX = mc.player.getX() + (predictOneTickAhead ? playerVx : 0.0D);
+        double eyeY = (mc.player.getEyeY() - 0.1D) + (predictOneTickAhead ? playerVy : 0.0D);
+        double eyeZ = mc.player.getZ() + (predictOneTickAhead ? playerVz : 0.0D);
 
-        double reqVx = ((pX - eyeX) / (double) predTicks) - playerVx;
-        double reqVy = ((pY - eyeY) / (double) predTicks) - playerVy + (isWindCharge ? 0.0D : 0.03D * predTicks * 0.5D);
-        double reqVz = ((pZ - eyeZ) / (double) predTicks) - playerVz;
+        // Pearl state at fire tick
+        double startPx = simPearlX;
+        double startPy = simPearlY;
+        double startPz = simPearlZ;
+        double startPvx = simPearlVx;
+        double startPvy = simPearlVy;
+        double startPvz = simPearlVz;
+        if (predictOneTickAhead) {
+            startPx += startPvx;
+            startPy += startPvy;
+            startPz += startPvz;
+            startPvx *= PEARL_DRAG;
+            startPvy = (startPvy * PEARL_DRAG) - PEARL_GRAVITY;
+            startPvz *= PEARL_DRAG;
+        }
 
-        double horizDist = Math.sqrt(reqVx * reqVx + reqVz * reqVz);
+        int maxT = Mth.clamp(maxInterceptTicks.getValue().intValue(), 2, 12);
+        double bestSpeedErr = Double.MAX_VALUE;
+        double bestReqVx = 0.0D;
+        double bestReqVy = 0.0D;
+        double bestReqVz = 0.0D;
+        boolean found = false;
+
+        // Step pearl tick-by-tick and evaluate 4 sub-steps per tick (0.25-tick resolution)
+        double prevPx = startPx;
+        double prevPy = startPy;
+        double prevPz = startPz;
+        double curPx = startPx;
+        double curPy = startPy;
+        double curPz = startPz;
+        double curPvx = startPvx;
+        double curPvy = startPvy;
+        double curPvz = startPvz;
+
+        for (int tick = 1; tick <= maxT; tick++) {
+            prevPx = curPx;
+            prevPy = curPy;
+            prevPz = curPz;
+            curPx += curPvx;
+            curPy += curPvy;
+            curPz += curPvz;
+            curPvx *= PEARL_DRAG;
+            curPvy = (curPvy * PEARL_DRAG) - PEARL_GRAVITY;
+            curPvz *= PEARL_DRAG;
+
+            for (int sub = 1; sub <= 4; sub++) {
+                double frac = sub * 0.25D;
+                double t = (tick - 1) + frac;
+                if (t < 0.5D) {
+                    continue;
+                }
+                double px = prevPx + (curPx - prevPx) * frac;
+                double py = prevPy + (curPy - prevPy) * frac;
+                double pz = prevPz + (curPz - prevPz) * frac;
+
+                double reqVx;
+                double reqVy;
+                double reqVz;
+                if (isWindCharge) {
+                    // Vanilla 1.21.11 WindCharge: inertia = 1.0 (no air drag), gravity = 0.0
+                    reqVx = ((px - eyeX) / t) - playerVx;
+                    reqVy = ((py - eyeY) / t) - playerVy;
+                    reqVz = ((pz - eyeZ) / t) - playerVz;
+                } else {
+                    // Vanilla Snowball / Egg: drag = 0.99/tick, gravity = 0.03/tick
+                    double dragIntegral = (1.0D - Math.pow(0.99D, t)) / 0.01D;
+                    if (dragIntegral < 1.0E-4D) {
+                        continue;
+                    }
+                    double gravDrop = 0.03D * (t - dragIntegral) / 0.01D;
+                    reqVx = ((px - eyeX) / dragIntegral) - playerVx;
+                    reqVy = ((py - eyeY + gravDrop) / dragIntegral) - playerVy;
+                    reqVz = ((pz - eyeZ) / dragIntegral) - playerVz;
+                }
+
+                double speed = Math.sqrt(reqVx * reqVx + reqVy * reqVy + reqVz * reqVz);
+                double err = Math.abs(speed - PROJECTILE_SPEED);
+                if (err < bestSpeedErr) {
+                    bestSpeedErr = err;
+                    bestReqVx = reqVx;
+                    bestReqVy = reqVy;
+                    bestReqVz = reqVz;
+                    found = true;
+                }
+            }
+        }
+
+        if (!found) {
+            solvedValid = false;
+            return false;
+        }
+
+        double horizDist = Math.sqrt(bestReqVx * bestReqVx + bestReqVz * bestReqVz);
         if (horizDist < 1.0E-5D) {
             solvedValid = false;
             return false;
         }
 
-        float rawYaw = (float) Math.toDegrees(Math.atan2(reqVz, reqVx)) - 90.0F;
-        float rawPitch = Mth.clamp((float) -Math.toDegrees(Math.atan2(reqVy, horizDist)), -89.0F, 89.0F);
+        float rawYaw = (float) Math.toDegrees(Math.atan2(bestReqVz, bestReqVx)) - 90.0F;
+        float rawPitch = Mth.clamp((float) -Math.toDegrees(Math.atan2(bestReqVy, horizDist)), -89.0F, 89.0F);
         if (Float.isNaN(rawYaw) || Float.isNaN(rawPitch) || Float.isInfinite(rawYaw) || Float.isInfinite(rawPitch)) {
             solvedValid = false;
             return false;
@@ -440,7 +508,7 @@ public class AutoPearlCatch extends Module {
                 return p;
             }
         }
-        return findOwnedRecentPearl(mc, 12.0D, 6);
+        return findOwnedRecentPearl(mc, 14.0D, 8);
     }
 
     private ThrownEnderpearl findOwnedRecentPearl(Minecraft mc, double maxDist, int maxAgeTicks) {
@@ -476,7 +544,6 @@ public class AutoPearlCatch extends Module {
             int s = findHotbarItem(mc, Items.SNOWBALL);
             return s >= 0 ? s : findHotbarItem(mc, Items.EGG);
         }
-        // Auto: prefer Wind Charge, fallback to Snowball / Egg
         int wc = findHotbarItem(mc, Items.WIND_CHARGE);
         if (wc >= 0) {
             return wc;
