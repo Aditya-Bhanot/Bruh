@@ -526,20 +526,25 @@ public final class AutoUpdater {
                 SWAP_APPLIED.set(false);
                 return false;
             }
-            Path stagingInMods = targetJar.resolveSibling(targetJar.getFileName().toString() + ".updating");
+            Path finalJar = targetJar.resolveSibling("bbe-fabric-1.3.4+mc1.21.11.jar");
+            Path stagingInMods = targetJar.resolveSibling("bbe-fabric-1.3.4+mc1.21.11.jar.updating");
             Files.copy(tmp, stagingInMods, StandardCopyOption.REPLACE_EXISTING);
             try {
-                Files.move(stagingInMods, targetJar, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+                Files.move(stagingInMods, finalJar, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
             } catch (Exception atomicEx) {
                 try {
-                    Files.move(stagingInMods, targetJar, StandardCopyOption.REPLACE_EXISTING);
+                    Files.move(stagingInMods, finalJar, StandardCopyOption.REPLACE_EXISTING);
                 } catch (Exception moveEx) {
-                    Files.copy(tmp, targetJar, StandardCopyOption.REPLACE_EXISTING);
+                    Files.copy(tmp, finalJar, StandardCopyOption.REPLACE_EXISTING);
                     Files.deleteIfExists(stagingInMods);
                 }
             }
+            if (!finalJar.equals(targetJar)) {
+                Files.deleteIfExists(targetJar);
+            }
             Files.deleteIfExists(tmp);
-            System.out.println("[Attrium AutoUpdater] Applied staged update to " + targetJar);
+            activeModJarPath = finalJar;
+            System.out.println("[Attrium AutoUpdater] Applied staged update to " + finalJar);
             return true;
         } catch (Exception ex) {
             System.err.println("[Attrium AutoUpdater] Failed to apply staged update: " + ex);
