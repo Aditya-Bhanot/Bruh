@@ -4975,7 +4975,7 @@ public class GlassClickGuiScreen extends Screen {
         float p0 = computeBentoCardProgress(0);
         int y0 = bentoTop + Math.round(12.0F * (1.0F - p0));
         int bg0 = ClientThemeManager.getBentoCardBgColor(p0);
-        HudManager.drawRoundedRect(guiGraphics, leftCardX, y0, fullW, bannerH, 12, bg0);
+        HudManager.drawGlassCard(guiGraphics, leftCardX, y0, fullW, bannerH, 12, bg0, p0);
 
         if (p0 > 0.05F) {
             // Left: 34x34 rounded player avatar + 7px glowing online status dot
@@ -5084,8 +5084,7 @@ public class GlassClickGuiScreen extends Screen {
         // ---------------------------------------------------------------------
         float p1 = computeBentoCardProgress(1);
         int y1 = bottomYBase + Math.round(12.0F * (1.0F - p1));
-        HudManager.drawRoundedRect(guiGraphics, leftCardX, y1, leftCardW, bottomH, 12,
-                ClientThemeManager.getBentoCardBgColor(p1));
+        HudManager.drawGlassCard(guiGraphics, leftCardX, y1, leftCardW, bottomH, 12, ClientThemeManager.getBentoCardBgColor(p1), p1);
 
         if (p1 > 0.05F) {
             int pad = 14;
@@ -5153,8 +5152,7 @@ public class GlassClickGuiScreen extends Screen {
         // ---------------------------------------------------------------------
         float p2 = computeBentoCardProgress(2);
         int y2 = bottomYBase + Math.round(12.0F * (1.0F - p2));
-        HudManager.drawRoundedRect(guiGraphics, rightCardX, y2, rightCardW, bottomH, 12,
-                ClientThemeManager.getBentoCardBgColor(p2));
+        HudManager.drawGlassCard(guiGraphics, rightCardX, y2, rightCardW, bottomH, 12, ClientThemeManager.getBentoCardBgColor(p2), p2);
 
         if (p2 > 0.05F) {
             int pad = 14;
