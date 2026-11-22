@@ -164,6 +164,10 @@ public class MaceTarget extends Module {
         private int lastPreTickHandled = -100;
         private int lastObservedPlayerId = -1;
         private int lastSlotMutationTick = -100;
+        private boolean insideStartClientTick = false;
+        private boolean hasQueuedExternalSwap = false;
+        private int queuedExternalPreferredSlot = -1;
+        private boolean queuedExternalUseCurrentSlot = false;
 
         public boolean canMutateHotbarSlotThisTick() {
             return clientTickCounter > lastSlotMutationTick;
@@ -228,6 +232,24 @@ public class MaceTarget extends Module {
                 if (newTick) {
                     advanceSwapBeforeKeybinds(client);
                 }
+            }
+            insideStartClientTick = true;
+            try {
+                if (hasQueuedExternalSwap && !isSwapInProgress() && client.screen == null) {
+                    boolean useCurrent = queuedExternalUseCurrentSlot;
+                    int prefSlot = queuedExternalPreferredSlot;
+                    hasQueuedExternalSwap = false;
+                    queuedExternalUseCurrentSlot = false;
+                    queuedExternalPreferredSlot = -1;
+                    if (useCurrent) {
+                        int cur = client.player.getInventory().getSelectedSlot();
+                        submitFastTwoTickArmorSwap(client, ActionPriority.AUTO_ELYTRA_UNEQUIP, "ElytraHelper_USE", cur, cur, true);
+                    } else {
+                        executeLegitArmorSwapFromSlot(prefSlot);
+                    }
+                }
+            } finally {
+                insideStartClientTick = false;
             }
         }
 
@@ -435,7 +457,6 @@ public class MaceTarget extends Module {
 
             if (client.gameMode != null) {
                 client.gameMode.useItem(client.player, InteractionHand.MAIN_HAND);
-                recordInteractionDispatched(client);
             }
 
             this.stageStartTick = clientTickCounter;
@@ -535,6 +556,12 @@ public class MaceTarget extends Module {
             if (mgr.isSwapInProgress()) {
                 return true;
             }
+            if (!mgr.insideStartClientTick) {
+                mgr.hasQueuedExternalSwap = true;
+                mgr.queuedExternalUseCurrentSlot = false;
+                mgr.queuedExternalPreferredSlot = preferredSlot;
+                return true;
+            }
 
             int hotbarSlot = -1;
             if (preferredSlot >= 0 && preferredSlot <= 8) {
@@ -598,6 +625,12 @@ public class MaceTarget extends Module {
             }
             ActionManager mgr = getInstance();
             if (mgr.isSwapInProgress()) {
+                return true;
+            }
+            if (!mgr.insideStartClientTick) {
+                mgr.hasQueuedExternalSwap = true;
+                mgr.queuedExternalUseCurrentSlot = true;
+                mgr.queuedExternalPreferredSlot = -1;
                 return true;
             }
             int currentSlot = mc.player.getInventory().getSelectedSlot();
@@ -761,7 +794,7 @@ public class MaceTarget extends Module {
             Vec3 lookVec = customLookVec != null ? customLookVec.normalize() : client.player.getViewVector(1.0F);
             Vec3 rayEnd = eyePos.add(lookVec.scale(legalReach));
 
-            AABB targetBox = target.getBoundingBox().deflate(0.05D);
+            AABB targetBox = target.getBoundingBox();
             if (targetBox.contains(eyePos)) {
                 return true;
             }
@@ -1102,7 +1135,11 @@ public class MaceTarget extends Module {
                 return;
             }
 
-            if (!"Silent".equalsIgnoreCase(aimMode.getValue()) && distToTarget <= swingRange.getValue() + 0.75D) {
+            if ("Silent".equalsIgnoreCase(aimMode.getValue())) {
+                if (!isRightClickUseOrSwapActive(client) && shouldAimAtTarget(client) && canSafelyAimForMace(client)) {
+                    queueSilentServerRotation(computeExactCenterAimAngle(client, target));
+                }
+            } else if (distToTarget <= swingRange.getValue() + 0.75D) {
                 if (!ActionManager.verifyStrict3mAttackRaycast(client, target, swingRange.getValue(), client.player.getViewVector(1.0F))) {
                     alignCameraOntoHitboxForStrike(client, target);
                 }
@@ -1654,7 +1691,7 @@ public class MaceTarget extends Module {
             return;
         }
 
-        double maxSnapDeg = 24.0D;
+        double maxSnapDeg = 45.0D;
         double scale = angularDist > maxSnapDeg ? (maxSnapDeg / angularDist) : 0.95D;
         float nextYaw = currentYaw + (float) (yawDelta * scale);
         float nextPitch = Mth.clamp(currentPitch + (float) (pitchDelta * scale), -89.5F, 89.5F);
@@ -2793,6 +2830,10 @@ public class MaceTarget extends Module {
     private boolean canSafelyAimForMace(Minecraft client) {
         if (isPlayerBlockedByLiquidOrCobweb(client)) {
             return false;
+        }
+        // Never cut off aim during the final 1.5m of an active dive/smash onto a standing target
+        if (isInMidOrPostUnequipSmash(client) || isFallingForSmash(client)) {
+            return true;
         }
         return hasNoBlocksUnderFeet(client, 1.5D);
     }

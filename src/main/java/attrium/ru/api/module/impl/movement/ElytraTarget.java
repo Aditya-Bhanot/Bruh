@@ -302,7 +302,7 @@ public final class ElytraTarget extends Module {
     }
 
     private void runAutoElytraCycle() {
-        if (ElytraHelper.isManualSwapLockActive() || (System.currentTimeMillis() - lastAutoArmorSwapMs) < 450L) {
+        if (ElytraHelper.isManualSwapLockActive()) {
             return;
         }
         if (mc.player == null || mc.level == null) {
