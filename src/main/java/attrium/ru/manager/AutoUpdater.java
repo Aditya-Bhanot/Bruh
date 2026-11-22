@@ -101,6 +101,7 @@ public final class AutoUpdater {
     }
 
     public static void restartToApply() {
+        applyStagedUpdateNow();
         if (!updateReady) {
             return;
         }
@@ -233,25 +234,13 @@ public final class AutoUpdater {
         Path tmpFile = updateDir.resolve("update.jar.tmp");
         Files.deleteIfExists(tmpFile);
 
-        HttpRequest dlRequest = HttpRequest.newBuilder()
-                .uri(URI.create(downloadUrl))
-                .timeout(DOWNLOAD_TIMEOUT)
-                .header("Accept", "application/octet-stream")
-                .header("User-Agent", USER_AGENT)
-                .GET()
-                .build();
-
-        HttpResponse<InputStream> dlResponse = client.send(dlRequest, HttpResponse.BodyHandlers.ofInputStream());
-        if (dlResponse.statusCode() < 200 || dlResponse.statusCode() >= 300) {
-            try (InputStream ignored = dlResponse.body()) {
+        long expectedBytes = jarAsset.has("size") ? jarAsset.get("size").getAsLong() : -1L;
+            int dlCode = downloadAssetResilient(downloadUrl, tmpFile, expectedBytes);
+            if (dlCode < 200 || dlCode >= 300) {
+                Files.deleteIfExists(tmpFile);
+                statusText = dlCode > 0 ? ("HTTP " + dlCode) : "DL Error";
+                return;
             }
-            statusText = "HTTP " + dlResponse.statusCode();
-            return;
-        }
-
-        try (InputStream in = dlResponse.body()) {
-            Files.copy(in, tmpFile, StandardCopyOption.REPLACE_EXISTING);
-        }
 
         if (!Files.exists(tmpFile) || Files.size(tmpFile) < 10_000L || !isValidFabricJar(tmpFile)) {
             Files.deleteIfExists(tmpFile);
@@ -448,4 +437,121 @@ public final class AutoUpdater {
 
     private record LocalState(String version, long id, String updatedAt) {
     }
+
+    private static final java.util.concurrent.atomic.AtomicBoolean SWAP_APPLIED =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    private static int downloadAssetResilient(String startUrl, Path destFile, long expectedBytes) {
+        int lastCode = -1;
+        for (int attempt = 1; attempt <= 2; attempt++) {
+            try {
+                Files.deleteIfExists(destFile);
+                String currentUrl = startUrl;
+                int code = -1;
+                for (int hop = 0; hop < 8; hop++) {
+                    java.net.HttpURLConnection conn = (java.net.HttpURLConnection) new java.net.URL(currentUrl).openConnection();
+                    conn.setInstanceFollowRedirects(false);
+                    conn.setConnectTimeout(15_000);
+                    conn.setReadTimeout(120_000);
+                    conn.setRequestMethod("GET");
+                    conn.setRequestProperty("User-Agent", USER_AGENT);
+                    if (hop == 0) {
+                        conn.setRequestProperty("Accept", "application/octet-stream");
+                    }
+                    code = conn.getResponseCode();
+                    if (code == 301 || code == 302 || code == 303 || code == 307 || code == 308) {
+                        String loc = conn.getHeaderField("Location");
+                        conn.disconnect();
+                        if (loc == null || loc.isEmpty()) {
+                            return code;
+                        }
+                        currentUrl = new java.net.URL(new java.net.URL(currentUrl), loc).toString();
+                        continue;
+                    }
+                    lastCode = code;
+                    if (code < 200 || code >= 300) {
+                        conn.disconnect();
+                        break;
+                    }
+                    try (java.io.InputStream in = conn.getInputStream();
+                         java.io.OutputStream out = Files.newOutputStream(destFile)) {
+                        byte[] buf = new byte[16384];
+                        int r;
+                        while ((r = in.read(buf)) != -1) {
+                            out.write(buf, 0, r);
+                        }
+                        out.flush();
+                    } finally {
+                        conn.disconnect();
+                    }
+                    long actual = Files.exists(destFile) ? Files.size(destFile) : 0L;
+                    if (expectedBytes > 0L && actual != expectedBytes) {
+                        System.err.println("[Attrium AutoUpdater] Size mismatch on attempt " + attempt
+                                + ": got " + actual + ", expected " + expectedBytes);
+                        lastCode = -2;
+                        break;
+                    }
+                    return 200;
+                }
+            } catch (Exception ex) {
+                System.err.println("[Attrium AutoUpdater] Download attempt " + attempt + " failed: " + ex);
+                lastCode = -1;
+            }
+        }
+        return lastCode;
+    }
+
+    public static boolean applyStagedUpdateNow() {
+        if (!updateReady || !SWAP_APPLIED.compareAndSet(false, true)) {
+            return SWAP_APPLIED.get();
+        }
+        try {
+            Path tmp = stagedTmpPath != null ? stagedTmpPath : getStateDir().resolve("update").resolve("update.jar.tmp");
+            if (!Files.isRegularFile(tmp) || !isValidFabricJar(tmp)) {
+                SWAP_APPLIED.set(false);
+                return false;
+            }
+            Path targetJar = activeModJarPath != null ? activeModJarPath : resolveActiveModJar();
+            if (targetJar == null || !Files.isRegularFile(targetJar)) {
+                Path modsDir = net.fabricmc.loader.api.FabricLoader.getInstance().getGameDir().resolve("mods");
+                if (Files.isDirectory(modsDir)) {
+                    try (java.util.stream.Stream<Path> stream = Files.list(modsDir)) {
+                        targetJar = stream
+                                .filter(Files::isRegularFile)
+                                .filter(p -> {
+                                    String n = p.getFileName().toString().toLowerCase(java.util.Locale.ROOT);
+                                    return n.endsWith(".jar") && n.contains("attrium");
+                                })
+                                .findFirst()
+                                .orElse(null);
+                    }
+                }
+            }
+            if (targetJar == null || !Files.isRegularFile(targetJar)) {
+                System.err.println("[Attrium AutoUpdater] Could not locate active mod JAR to replace.");
+                SWAP_APPLIED.set(false);
+                return false;
+            }
+            Path stagingInMods = targetJar.resolveSibling(targetJar.getFileName().toString() + ".updating");
+            Files.copy(tmp, stagingInMods, StandardCopyOption.REPLACE_EXISTING);
+            try {
+                Files.move(stagingInMods, targetJar, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } catch (Exception atomicEx) {
+                try {
+                    Files.move(stagingInMods, targetJar, StandardCopyOption.REPLACE_EXISTING);
+                } catch (Exception moveEx) {
+                    Files.copy(tmp, targetJar, StandardCopyOption.REPLACE_EXISTING);
+                    Files.deleteIfExists(stagingInMods);
+                }
+            }
+            Files.deleteIfExists(tmp);
+            System.out.println("[Attrium AutoUpdater] Applied staged update to " + targetJar);
+            return true;
+        } catch (Exception ex) {
+            System.err.println("[Attrium AutoUpdater] Failed to apply staged update: " + ex);
+            SWAP_APPLIED.set(false);
+            return false;
+        }
+    }
+
 }

@@ -12,7 +12,10 @@ import net.minecraft.world.item.Items;
 import org.lwjgl.glfw.GLFW;
 import attrium.ru.api.events.annotation.SubscribeEvent;
 import attrium.ru.api.events.impl.DrawEvent;
+import attrium.ru.api.events.impl.InputEvent;
 import attrium.ru.api.events.impl.TickEvent;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.minecraft.world.effect.MobEffects;
 import attrium.ru.api.module.Module;
 import attrium.ru.api.module.ModuleCategory;
 import attrium.ru.api.settings.impl.BooleanSetting;
@@ -104,6 +107,9 @@ public class ElytraHelper extends Module {
     private long lastTickProcessedGameTime = -1L;
     private int clientTickCounter = 0;
     private int nextAllowedSwapTick = 0;
+    private int pendingAutoGlideUntilTick = -100;
+    private int earliestGlidePulseTick = -100;
+    private int nextGlidePulseTick = 0;
 
     public ElytraHelper() {
         super("ElytraHelper", "Keybind-driven legit Chestplate <-> Elytra swap macro with tick randomization", ModuleCategory.MOVEMENT);
@@ -111,6 +117,8 @@ public class ElytraHelper extends Module {
         this.savedElytraKeyCode.visibleWhen(() -> false);
         this.minRandomTicks.visibleWhen(this.randomization::getValue);
         this.maxRandomTicks.visibleWhen(this.randomization::getValue);
+        // Run strictly before handleKeybinds() & aiStep() to eliminate Post flags
+        ClientTickEvents.START_CLIENT_TICK.register(this::processClientTick);
     }
 
     public static ElytraHelper getInstance() {
@@ -152,10 +160,8 @@ public class ElytraHelper extends Module {
         if (guiBoundKey != -1 && guiBoundKey != 0 && guiBoundKey != GLFW.GLFW_KEY_UNKNOWN) {
             syncedGuiBoundKey = guiBoundKey;
         }
-        ElytraHelper mod = getInstance();
-        if (mod != null) {
-            mod.processClientTick(client);
-        }
+        // Ensure instance & START_CLIENT_TICK listener are initialized without post-tick execution
+        getInstance();
     }
 
     @Override
@@ -175,6 +181,8 @@ public class ElytraHelper extends Module {
         phaseTicksElapsed = 0;
         wasBindPressedLastTick = false;
         callbackPressLatched = false;
+        pendingAutoGlideUntilTick = -100;
+        earliestGlidePulseTick = -100;
     }
 
     @SubscribeEvent
@@ -186,10 +194,7 @@ public class ElytraHelper extends Module {
 
     @SubscribeEvent
     public void onTick(TickEvent.Pre event) {
-        Minecraft mc = event != null ? event.getClient() : Minecraft.getInstance();
-        if (mc != null) {
-            processClientTick(mc);
-        }
+        // Handled exclusively in ClientTickEvents.START_CLIENT_TICK to prevent Post flags
     }
 
     public void processClientTick(Minecraft client) {
@@ -269,7 +274,10 @@ public class ElytraHelper extends Module {
                     // Right-click equip the held Elytra / Chestplate legitimately
                     client.gameMode.useItem(client.player, InteractionHand.MAIN_HAND);
                     client.player.swing(InteractionHand.MAIN_HAND);
-                    tryStartAirGlide(client);
+                    if (equippingElytra && Boolean.TRUE.equals(autoStartGlide.getValue())) {
+                        earliestGlidePulseTick = clientTickCounter + 2;
+                        pendingAutoGlideUntilTick = clientTickCounter + 16;
+                    }
                 }
                 phaseTicksElapsed = 0;
                 requiredPhaseTicks = computeStageDelayTicks();
@@ -295,16 +303,41 @@ public class ElytraHelper extends Module {
         }
     }
 
-    private void tryStartAirGlide(Minecraft client) {
-        if (equippingElytra && Boolean.TRUE.equals(autoStartGlide.getValue())
-                && !client.player.onGround()
-                && !client.player.isFallFlying()
-                && !client.player.isInWater()
-                && client.player.connection != null) {
-            client.player.connection.send(new ServerboundPlayerCommandPacket(
-                    client.player,
-                    ServerboundPlayerCommandPacket.Action.START_FALL_FLYING
-            ));
+    @SubscribeEvent
+    public void onInput(InputEvent event) {
+        Minecraft client = Minecraft.getInstance();
+        if (client == null || client.player == null || client.screen != null) {
+            return;
+        }
+        if (clientTickCounter > pendingAutoGlideUntilTick) {
+            return;
+        }
+        if (client.player.isFallFlying() || client.player.onGround()) {
+            pendingAutoGlideUntilTick = -100;
+            return;
+        }
+        if (clientTickCounter < earliestGlidePulseTick || clientTickCounter < nextGlidePulseTick) {
+            return;
+        }
+
+        ItemStack chest = client.player.getItemBySlot(EquipmentSlot.CHEST);
+        if (chest.isEmpty() || !chest.is(Items.ELYTRA) || chest.getDamageValue() >= chest.getMaxDamage() - 1) {
+            return;
+        }
+        if (client.player.isInWater()
+                || client.player.isInLava()
+                || client.player.isPassenger()
+                || client.player.onClimbable()
+                || client.player.getAbilities().flying
+                || client.player.hasEffect(MobEffects.LEVITATION)
+                || client.player.hurtTime > 0) {
+            return;
+        }
+
+        // Strict vanilla fall preconditions to prevent Elytra A / B flags
+        if (client.player.getDeltaMovement().y < -0.08D && client.player.fallDistance >= 0.25F) {
+            event.setJumping(true);
+            nextGlidePulseTick = clientTickCounter + 5;
         }
     }
 
@@ -325,10 +358,8 @@ public class ElytraHelper extends Module {
             return;
         }
         if (client.player.getInventory().getSelectedSlot() != targetSlot) {
+            // Let MultiPlayerGameMode.ensureHasSentCarriedItem() send the single C09 packet
             client.player.getInventory().setSelectedSlot(targetSlot);
-            if (client.player.connection != null) {
-                client.player.connection.send(new ServerboundSetCarriedItemPacket(targetSlot));
-            }
         }
     }
 

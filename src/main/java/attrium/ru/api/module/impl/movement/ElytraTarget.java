@@ -84,7 +84,7 @@ public final class ElytraTarget extends Module {
     private final NumberSetting maxRandomMs = register(new NumberSetting(
             "Max Random (ms)", "Maximum random delay in milliseconds.", 0.0D, 0.0D, 500.0D, 1.0D));
     private final NumberSetting reequipDelayMs = register(new NumberSetting(
-            "Reequip Delay (ms)", "Dynamic delay in milliseconds before re-equipping the elytra (200ms default).", 200.0D, 0.0D, 1000.0D, 1.0D));
+            "Reequip Delay (ms)", "Dynamic delay in milliseconds before re-equipping the elytra (250ms default).", 250.0D, 0.0D, 1000.0D, 1.0D));
     private final BooleanSetting automaceSync = register(new BooleanSetting(
             "Automace Sync", "Synchronize elytra unequip/equip priorities with AutoMace via ActionManager.", true));
     private final BooleanSetting disableOnGround = register(new BooleanSetting(
@@ -274,27 +274,12 @@ public final class ElytraTarget extends Module {
 
     @SubscribeEvent
     private void onTick(TickEvent.Pre event) {
-        if (!isEnabled() || mc.player == null || mc.level == null) {
-            return;
-        }
-        ActionManager.getInstance().onPreTickRender(mc);
-        int currentTick = ActionManager.getInstance().getClientTick();
-        if (lastProcessedMovementTick != currentTick) {
-            lastProcessedMovementTick = currentTick;
-            runAutoElytraCycle();
-        }
+        // Handled exclusively in ClientTickEvents.START_CLIENT_TICK
     }
 
     @SubscribeEvent
     public void onPlayerTravel(PlayerTravelEvent event) {
-        if (!isEnabled() || mc.player == null || mc.level == null) {
-            return;
-        }
-        int currentTick = ActionManager.getInstance().getClientTick();
-        if (lastProcessedMovementTick != currentTick) {
-            lastProcessedMovementTick = currentTick;
-            runAutoElytraCycle();
-        }
+        // Handled exclusively in ClientTickEvents.START_CLIENT_TICK to prevent BadPackets/Post flags
     }
 
     private void checkWorldOrRespawnChange() {
@@ -317,7 +302,7 @@ public final class ElytraTarget extends Module {
     }
 
     private void runAutoElytraCycle() {
-        if (ElytraHelper.isManualSwapLockActive() || (System.currentTimeMillis() - lastAutoArmorSwapMs) < 350L) {
+        if (ElytraHelper.isManualSwapLockActive() || (System.currentTimeMillis() - lastAutoArmorSwapMs) < 450L) {
             return;
         }
         if (mc.player == null || mc.level == null) {
@@ -346,7 +331,8 @@ public final class ElytraTarget extends Module {
             // Detected Elytra equip (via AutoElytra or manual ElytraHelper swap):
             // Start 220ms post-equip grace window and arm instant legal glide pulse!
             lastElytraEquippedTimeMs = System.currentTimeMillis();
-            lastElytraEquipCompletedTick = actionManager.getClientTick();
+            // Wait 2 full ticks after equip confirmation before pulsing jump (prevents Elytra A)
+            lastElytraEquipCompletedTick = actionManager.getClientTick() + 2;
             glideWindowTimer.reset();
             forceCancelFlightInput = false;
             if (flightState != CombatFlightState.STATE_1_FLIGHT) {
@@ -555,7 +541,8 @@ public final class ElytraTarget extends Module {
     }
 
     private boolean requestPriority1ChestplateUnequip() {
-        if (mc.player == null || mc.screen != null || mc.player.isUsingItem()) {
+        if (mc.player == null || mc.screen != null || mc.player.isUsingItem()
+                || !ActionManager.getInstance().canMutateHotbarSlotThisTick()) {
             return false;
         }
         int chestplateSlot = getValidChestplateSlot();
@@ -589,7 +576,9 @@ public final class ElytraTarget extends Module {
     }
 
     private boolean requestPriority3ElytraEquip() {
-        if (ElytraHelper.isManualSwapLockActive() || (System.currentTimeMillis() - lastAutoArmorSwapMs) < 350L) {
+        if (ElytraHelper.isManualSwapLockActive()
+                || (System.currentTimeMillis() - lastAutoArmorSwapMs) < 450L
+                || !ActionManager.getInstance().canMutateHotbarSlotThisTick()) {
             return false;
         }
         lastAutoArmorSwapMs = System.currentTimeMillis();
@@ -618,7 +607,7 @@ public final class ElytraTarget extends Module {
             forceCancelFlightInput = false;
             swapCommitmentTimer.reset();
             lastElytraEquippedTimeMs = System.currentTimeMillis();
-            lastElytraEquipCompletedTick = ActionManager.getInstance().getClientTick() + 1;
+            lastElytraEquipCompletedTick = ActionManager.getInstance().getClientTick() + 3;
             glideWindowTimer.reset();
             jumpPulseToggle = false;
             equipAfterWindChargeApexPending = false;
@@ -683,13 +672,13 @@ public final class ElytraTarget extends Module {
             return false;
         }
 
-        if (ActionManager.getInstance().getClientTick() <= lastElytraEquipCompletedTick) {
+        if (ActionManager.getInstance().getClientTick() < lastElytraEquipCompletedTick) {
             return false;
         }
 
-        // Vanilla LocalPlayer.tryToStartFallFlying() requires only !onGround && !isFallFlying && vel.y < 0.0D!
+        // Strict vanilla fall preconditions: never pulse jump before genuine descent
         double velY = mc.player.getDeltaMovement().y;
-        if (velY >= -0.02D) {
+        if (velY >= MAX_LEGAL_GLIDE_VELOCITY_Y || mc.player.fallDistance < MIN_LEGAL_FALL_DISTANCE) {
             return false;
         }
 
@@ -797,7 +786,8 @@ public final class ElytraTarget extends Module {
 
     private boolean canStartNewArmorSwap() {
         if (ActionManager.getInstance().isBlockedByHigherPriority(ActionPriority.AUTO_ELYTRA_EQUIP)
-                || ActionManager.getInstance().isSwapInProgress()) {
+                || ActionManager.getInstance().isSwapInProgress()
+                || !ActionManager.getInstance().canMutateHotbarSlotThisTick()) {
             return false;
         }
         return swapCommitmentTimer.finished(computeDynamicReequipDelayMs());

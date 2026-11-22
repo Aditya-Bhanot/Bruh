@@ -163,6 +163,15 @@ public class MaceTarget extends Module {
         private int cachedTargetMask = -1;
         private int lastPreTickHandled = -100;
         private int lastObservedPlayerId = -1;
+        private int lastSlotMutationTick = -100;
+
+        public boolean canMutateHotbarSlotThisTick() {
+            return clientTickCounter > lastSlotMutationTick;
+        }
+
+        public void markHotbarSlotMutated() {
+            lastSlotMutationTick = clientTickCounter;
+        }
         private final List<LivingEntity> validTargetsMutable = new ArrayList<>(32);
         private List<LivingEntity> validTargetsView = Collections.emptyList();
 
@@ -395,7 +404,7 @@ public class MaceTarget extends Module {
             if (armorHotbarSlot < 0 || armorHotbarSlot > 8) {
                 return false;
             }
-            if (client.player.isUsingItem()) {
+            if (client.player.isUsingItem() || !canMutateHotbarSlotThisTick()) {
                 return false;
             }
             if (isBlockedByHigherPriority(priority)) {
@@ -418,15 +427,15 @@ public class MaceTarget extends Module {
 
             clearSilentRotationForUseItem();
 
+            // Let gameMode.useItem() sync carried slot once via ensureHasSentCarriedItem() (fixes BadPackets)
             if (client.player.getInventory().getSelectedSlot() != armorHotbarSlot) {
                 client.player.getInventory().setSelectedSlot(armorHotbarSlot);
-                if (client.player.connection != null) {
-                    client.player.connection.send(new net.minecraft.network.protocol.game.ServerboundSetCarriedItemPacket(armorHotbarSlot));
-                }
             }
+            markHotbarSlotMutated();
 
             if (client.gameMode != null) {
                 client.gameMode.useItem(client.player, InteractionHand.MAIN_HAND);
+                recordInteractionDispatched(client);
             }
 
             this.stageStartTick = clientTickCounter;
@@ -489,6 +498,7 @@ public class MaceTarget extends Module {
                         && restoreHotbarSlot != targetHotbarSlot
                         && client.player.getInventory().getSelectedSlot() != restoreHotbarSlot) {
                     client.player.getInventory().setSelectedSlot(restoreHotbarSlot);
+                    markHotbarSlotMutated();
                 }
                 completeConsolidatedSwap();
             }
@@ -786,6 +796,7 @@ public class MaceTarget extends Module {
             restoreHotbarSlot = -1;
             stageStartTick = -100;
             lastInteractionTick = -100;
+            lastSlotMutationTick = -100;
             cachedTargetsTick = -100;
             lastPreTickHandled = -100;
             validTargetsMutable.clear();
@@ -974,48 +985,135 @@ public class MaceTarget extends Module {
         });
         refreshToggleBindLabel();
 
-        // Pre-Keybind & Pre-Movement Execution at HEAD of Minecraft.tick()
+        // Consolidated pre-keybind & pre-motion execution at HEAD of Minecraft.tick() (prevents BadPackets/Post)
         ClientTickEvents.START_CLIENT_TICK.register(client -> {
             pollToggleBindCapture();
             pollModuleToggleBind(client);
-            if (isEnabled() && client != null && client.player != null && client.level != null && client.screen == null) {
-                ActionManager.getInstance().onPreTickRender(client);
-                if (isRightClickUseOrSwapActive(client)) {
-                    suspendSilentRotation();
+            if (!isEnabled() || client == null || client.player == null || client.level == null) {
+                return;
+            }
+
+            checkWorldOrRespawnChange(client);
+            ActionManager.getInstance().onPreTickRender(client);
+            CombatStateManager.checkStaleMaceLock();
+
+            if (!client.player.isAlive() || client.player.getHealth() <= 0.0F || client.screen != null) {
+                if (smashState != SmashSequenceState.IDLE) {
+                    executeSafeLegitSwapBack(client);
+                    smashState = SmashSequenceState.IDLE;
                 }
-                // 1-Tick (+50ms) Post-Hit Hotbar Restore (Slot 1 Mace -> Slot 4 Firework Rocket), even when ascending from Wind Burst!
-                if (smashState == SmashSequenceState.STEP_2_SWAPBACK_RESTORE
-                        && ActionManager.getInstance().getClientTick() > stateCommittedTick) {
+                CombatStateManager.releaseMaceSmashLock();
+                releaseCameraAndClearTargetLock();
+                return;
+            }
+
+            if (isRightClickUseOrSwapActive(client)) {
+                suspendSilentRotation();
+            }
+
+            trackGlideAndDiveWindow(client);
+            updateAirbornePeak(client);
+            updateDynamicMaceCacheAt4Hz(client, false);
+
+            if (smashState == SmashSequenceState.STEP_2_SWAPBACK_RESTORE) {
+                if (ActionManager.getInstance().getClientTick() > stateCommittedTick) {
                     executeSafeLegitSwapBack(client);
                     smashState = SmashSequenceState.IDLE;
                     CombatStateManager.releaseMaceSmashLock();
                 }
-                trackGlideAndDiveWindow(client);
-                updateAirbornePeak(client);
-                if (canEngageModule(client)) {
-                    if (target == null || !isEntityAllowedByTargetSelection(client, target) || !ActionManager.hasLineOfSight(client, target)) {
+                return;
+            }
+
+            if (client.player.onGround()) {
+                groundedAfterDiveTicks++;
+                if (isInMidOrPostUnequipSmash(client) && groundedAfterDiveTicks <= 3) {
+                    if (smashState != SmashSequenceState.IDLE) {
+                        processSmashSequenceStateMachine(client);
+                        return;
+                    }
+                    if (target == null || !isEntityAllowedByTargetSelection(client, target)) {
                         findTargetFromPreFilteredCache(client);
                     }
-                    // Pre-impact hitbox alignment & pre-keybind strike at HEAD of tick (before handleKeybinds & LocalPlayer.aiStep)
                     if (target != null && isEntityAllowedByTargetSelection(client, target) && !isWearingElytra(client)
-                            && (isFallingForSmash(client) || isInMidOrPostUnequipSmash(client))) {
-                        double dist = getPrecisionDistanceToTarget(client, target);
-                        if (!"Silent".equalsIgnoreCase(aimMode.getValue()) && dist <= swingRange.getValue() + 0.75D) {
-                            if (!ActionManager.verifyStrict3mAttackRaycast(client, target, swingRange.getValue(), client.player.getViewVector(1.0F))) {
-                                alignCameraOntoHitboxForStrike(client, target);
-                            }
-                        }
-                        if (!ActionManager.getInstance().isBlockedByHigherPriority(ActionManager.ActionPriority.AUTO_MACE_STRIKE)
-                                && !ActionManager.getInstance().isSwapInProgress()
-                                && !isManualInputBlockingSwap(client)) {
-                            if (smashState != SmashSequenceState.IDLE) {
-                                processSmashSequenceStateMachine(client);
-                            } else if (dist <= swingRange.getValue() && cooldownTimer.finished(cooldownMs.getValue())) {
-                                initiateSmashSequence(client, target);
-                            }
-                        }
+                            && !ActionManager.getInstance().isSwapInProgress()
+                            && getPrecisionDistanceToTarget(client, target) <= swingRange.getValue()
+                            && cooldownTimer.finished(cooldownMs.getValue())) {
+                        initiateSmashSequence(client, target);
+                        return;
+                    }
+                    if (groundedAfterDiveTicks <= 2) {
+                        return;
                     }
                 }
+                if (smashState != SmashSequenceState.IDLE && ActionManager.getInstance().getClientTick() > stateCommittedTick) {
+                    executeSafeLegitSwapBack(client);
+                    smashState = SmashSequenceState.IDLE;
+                }
+                postUnequipSmashEndTick = -100;
+                lastActiveGlideDiveTick = -100;
+                CombatStateManager.releaseMaceSmashLock();
+                releaseCameraAndClearTargetLock();
+                return;
+            } else {
+                groundedAfterDiveTicks = 0;
+            }
+
+            if (ActionManager.getInstance().isBlockedByHigherPriority(ActionManager.ActionPriority.AUTO_MACE_STRIKE)) {
+                return;
+            }
+
+            if (smashState != SmashSequenceState.IDLE) {
+                processSmashSequenceStateMachine(client);
+                return;
+            }
+
+            if (!canEngageModule(client)) {
+                CombatStateManager.releaseMaceSmashLock();
+                releaseCameraAndClearTargetLock();
+                return;
+            }
+
+            if (lastTargetScanTick != client.player.tickCount) {
+                lastTargetScanTick = client.player.tickCount;
+                findTargetFromPreFilteredCache(client);
+            }
+
+            if (target == null || !isEntityAllowedByTargetSelection(client, target) || !ActionManager.hasLineOfSight(client, target)) {
+                CombatStateManager.releaseMaceSmashLock();
+                releaseCameraAndClearTargetLock();
+                return;
+            }
+
+            double distToTarget = getPrecisionDistanceToTarget(client, target);
+            if (isWearingElytra(client)) {
+                ElytraTarget autoElytra = ElytraTarget.getInstance();
+                if (autoElytra != null && autoElytra.isEnabled()) {
+                    if (autoElytra.shouldTriggerPriority1Unequip(target)) {
+                        yieldToPriority1AutoElytraUnequip(client);
+                    }
+                } else {
+                    boolean genuineDive = isInElytraOrRocketDive(client)
+                            || (client.player.getDeltaMovement().y < -0.12D
+                            && getEffectiveFallDistance(client) >= minFallDist.getValue());
+                    if (genuineDive && distToTarget <= 2.7D) {
+                        yieldToPriority1AutoElytraUnequip(client);
+                    }
+                }
+                return;
+            }
+
+            if (!"Silent".equalsIgnoreCase(aimMode.getValue()) && distToTarget <= swingRange.getValue() + 0.75D) {
+                if (!ActionManager.verifyStrict3mAttackRaycast(client, target, swingRange.getValue(), client.player.getViewVector(1.0F))) {
+                    alignCameraOntoHitboxForStrike(client, target);
+                }
+            }
+
+            if (!ActionManager.getInstance().isSwapInProgress()
+                    && !isManualInputBlockingSwap(client)
+                    && isFallingForSmash(client)
+                    && distToTarget <= swingRange.getValue()
+                    && cooldownTimer.finished(cooldownMs.getValue())) {
+                initiateSmashSequence(client, target);
             }
         });
     }
@@ -1256,74 +1354,24 @@ public class MaceTarget extends Module {
             resetAllStates();
             return;
         }
-
-        checkWorldOrRespawnChange(client);
-        ActionManager.getInstance().ensureTickSynchronized(client);
-
         if (!client.player.isAlive() || client.player.getHealth() <= 0.0F || client.screen != null) {
-            if (smashState != SmashSequenceState.IDLE) {
-                executeSafeLegitSwapBack(client);
-                smashState = SmashSequenceState.IDLE;
-            }
-            CombatStateManager.releaseMaceSmashLock();
             releaseCameraAndClearTargetLock();
             return;
         }
-
-        trackGlideAndDiveWindow(client);
-        updateAirbornePeak(client);
-        updateDynamicMaceCacheAt4Hz(client, false);
-
         if (client.player.onGround()) {
-            // NEVER swap back on the same tick an attack was committed (prevents 0-tick swap-attack-swap kick!)
-            if (smashState == SmashSequenceState.STEP_2_SWAPBACK_RESTORE) {
-                if (ActionManager.getInstance().getClientTick() > stateCommittedTick) {
-                    executeSafeLegitSwapBack(client);
-                    smashState = SmashSequenceState.IDLE;
-                    CombatStateManager.releaseMaceSmashLock();
-                }
-                return;
+            if (!isInMidOrPostUnequipSmash(client) || groundedAfterDiveTicks > 3) {
+                releaseCameraAndClearTargetLock();
             }
-            // Allow up to 3 grounded ticks right after an Elytra/Rocket unequip to finish hitting a standing enemy!
-            if (isInMidOrPostUnequipSmash(client) && groundedAfterDiveTicks <= 3) {
-                return;
-            }
-            if (smashState != SmashSequenceState.IDLE && ActionManager.getInstance().getClientTick() > stateCommittedTick) {
-                executeSafeLegitSwapBack(client);
-                smashState = SmashSequenceState.IDLE;
-            }
-            postUnequipSmashEndTick = -100;
-            lastActiveGlideDiveTick = -100;
-            CombatStateManager.releaseMaceSmashLock();
+            return;
+        }
+        if (!canEngageModule(client)
+                || target == null
+                || !isEntityAllowedByTargetSelection(client, target)
+                || !ActionManager.hasLineOfSight(client, target)) {
             releaseCameraAndClearTargetLock();
             return;
         }
-
-        if (!canEngageModule(client)) {
-            if (smashState != SmashSequenceState.IDLE && ActionManager.getInstance().getClientTick() > stateCommittedTick) {
-                executeSafeLegitSwapBack(client);
-                smashState = SmashSequenceState.IDLE;
-            }
-            CombatStateManager.releaseMaceSmashLock();
-            releaseCameraAndClearTargetLock();
-            return;
-        }
-
-        if (lastTargetScanTick != client.player.tickCount) {
-            lastTargetScanTick = client.player.tickCount;
-            findTargetFromPreFilteredCache(client);
-        }
-
-        if (target == null || !isEntityAllowedByTargetSelection(client, target) || !ActionManager.hasLineOfSight(client, target)) {
-            if (smashState != SmashSequenceState.IDLE) {
-                transitionToSwapBackRestore(client);
-            } else {
-                CombatStateManager.releaseMaceSmashLock();
-            }
-            releaseCameraAndClearTargetLock();
-            return;
-        }
-
+        // Strictly silent rotation updates only (zero mid-tick slot mutations)
         if ("Silent".equalsIgnoreCase(aimMode.getValue()) && shouldAimAtTarget(client) && canSafelyAimForMace(client)) {
             if (isRightClickUseOrSwapActive(client)) {
                 suspendSilentRotation();
@@ -1338,141 +1386,7 @@ public class MaceTarget extends Module {
 
     @SubscribeEvent
     public void onPlayerTravel(PlayerTravelEvent event) {
-        if (!isEnabled()) {
-            return;
-        }
-
-        Minecraft client = Minecraft.getInstance();
-        if (client.player == null || client.level == null) {
-            CombatStateManager.releaseMaceSmashLock();
-            resetAllStates();
-            return;
-        }
-
-        checkWorldOrRespawnChange(client);
-        ActionManager.getInstance().ensureTickSynchronized(client);
-        CombatStateManager.checkStaleMaceLock();
-
-        if (!client.player.isAlive() || client.player.getHealth() <= 0.0F || client.screen != null) {
-            if (smashState != SmashSequenceState.IDLE) {
-                executeSafeLegitSwapBack(client);
-                smashState = SmashSequenceState.IDLE;
-            }
-            CombatStateManager.releaseMaceSmashLock();
-            releaseCameraAndClearTargetLock();
-            return;
-        }
-
-        trackGlideAndDiveWindow(client);
-        updateAirbornePeak(client);
-        updateDynamicMaceCacheAt4Hz(client, false);
-
-        if (client.player.onGround()) {
-            groundedAfterDiveTicks++;
-            // 1. If waiting to restore slot after a strike, NEVER restore on the same tick as the attack!
-            if (smashState == SmashSequenceState.STEP_2_SWAPBACK_RESTORE) {
-                if (ActionManager.getInstance().getClientTick() > stateCommittedTick) {
-                    executeSafeLegitSwapBack(client);
-                    smashState = SmashSequenceState.IDLE;
-                    postUnequipSmashEndTick = -100;
-                    lastActiveGlideDiveTick = -100;
-                    CombatStateManager.releaseMaceSmashLock();
-                    releaseCameraAndClearTargetLock();
-                }
-                return;
-            }
-            // 2. If we just unequipped Elytra for a Rocket/Elytra Mace and touched the ground right next to a
-            //    standing enemy (groundedAfterDiveTicks <= 3), complete the Mace strike before resetting!
-            if (isInMidOrPostUnequipSmash(client) && groundedAfterDiveTicks <= 3) {
-                if (smashState != SmashSequenceState.IDLE) {
-                    processSmashSequenceStateMachine(client);
-                    return;
-                }
-                if (target == null || !isEntityAllowedByTargetSelection(client, target)) {
-                    findTargetFromPreFilteredCache(client);
-                }
-                if (target != null && isEntityAllowedByTargetSelection(client, target) && !isWearingElytra(client)
-                        && !ActionManager.getInstance().isSwapInProgress()
-                        && getPrecisionDistanceToTarget(client, target) <= swingRange.getValue()
-                        && cooldownTimer.finished(cooldownMs.getValue())) {
-                    initiateSmashSequence(client, target);
-                    return;
-                }
-                if (groundedAfterDiveTicks <= 2) {
-                    return;
-                }
-            }
-            if (smashState != SmashSequenceState.IDLE && ActionManager.getInstance().getClientTick() > stateCommittedTick) {
-                executeSafeLegitSwapBack(client);
-                smashState = SmashSequenceState.IDLE;
-            }
-            postUnequipSmashEndTick = -100;
-            lastActiveGlideDiveTick = -100;
-            CombatStateManager.releaseMaceSmashLock();
-            releaseCameraAndClearTargetLock();
-            return;
-        } else {
-            groundedAfterDiveTicks = 0;
-        }
-
-        if (ActionManager.getInstance().isBlockedByHigherPriority(ActionManager.ActionPriority.AUTO_MACE_STRIKE)) {
-            return;
-        }
-
-        if (smashState != SmashSequenceState.IDLE) {
-            processSmashSequenceStateMachine(client);
-            return;
-        }
-
-        if (!canEngageModule(client)) {
-            CombatStateManager.releaseMaceSmashLock();
-            releaseCameraAndClearTargetLock();
-            return;
-        }
-
-        if (lastTargetScanTick != client.player.tickCount) {
-            lastTargetScanTick = client.player.tickCount;
-            findTargetFromPreFilteredCache(client);
-        }
-
-        if (target == null || !isEntityAllowedByTargetSelection(client, target) || !ActionManager.hasLineOfSight(client, target)) {
-            CombatStateManager.releaseMaceSmashLock();
-            releaseCameraAndClearTargetLock();
-            return;
-        }
-
-        // Priority 1 Check: Respect AutoElytra's exact Mace Pre-Hit Range (2.7m) and Height Range (6.0m) / Height Diff (7.0m)
-        double distToTarget = getPrecisionDistanceToTarget(client, target);
-        double predictedDist = getPredictedDistanceToTarget(client, target, 1.2D);
-        if (isWearingElytra(client)) {
-            ElytraTarget autoElytra = ElytraTarget.getInstance();
-            if (autoElytra != null && autoElytra.isEnabled()) {
-                if (autoElytra.shouldTriggerPriority1Unequip(target)) {
-                    yieldToPriority1AutoElytraUnequip(client);
-                }
-            } else {
-                boolean genuineDive = isInElytraOrRocketDive(client)
-                        || (client.player.getDeltaMovement().y < -0.12D
-                        && getEffectiveFallDistance(client) >= minFallDist.getValue());
-                if (genuineDive && distToTarget <= 2.7D) {
-                    yieldToPriority1AutoElytraUnequip(client);
-                }
-            }
-            return;
-        }
-
-        if (ActionManager.getInstance().isSwapInProgress() || isManualInputBlockingSwap(client)) {
-            return;
-        }
-
-        // Mace Cooldown Swap for Maximum Damage:
-        // Do NOT switch to the Mace early in mid-air! Keep the player's current slot (Sword / Hand / Wind Charge)
-        // until the exact tick the target is within swingRange (3.0m), then swap to Mace and attack immediately!
-        if (isFallingForSmash(client) && cooldownTimer.finished(cooldownMs.getValue())) {
-            if (distToTarget <= swingRange.getValue()) {
-                initiateSmashSequence(client, target);
-            }
-        }
+        // All swaps and attacks run strictly in START_CLIENT_TICK to prevent BadPackets/Post flags
     }
 
     /**
@@ -2103,6 +2017,7 @@ public class MaceTarget extends Module {
         }
         if (client.player.getInventory().getSelectedSlot() != slot) {
             client.player.getInventory().setSelectedSlot(slot);
+            ActionManager.getInstance().markHotbarSlotMutated();
         }
     }
 
