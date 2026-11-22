@@ -447,7 +447,9 @@ public class MaceTarget extends Module {
                     : client.player.getInventory().getSelectedSlot();
             this.wasWearingElytraAtStart = isWearingElytra(client);
 
-            clearSilentRotationForUseItem();
+            if (priority != ActionPriority.AUTO_ELYTRA_UNEQUIP) {
+                clearSilentRotationForUseItem();
+            }
 
             // Let gameMode.useItem() sync carried slot once via ensureHasSentCarriedItem() (fixes BadPackets)
             if (client.player.getInventory().getSelectedSlot() != armorHotbarSlot) {

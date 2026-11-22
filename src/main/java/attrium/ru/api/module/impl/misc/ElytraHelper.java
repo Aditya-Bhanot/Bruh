@@ -14,6 +14,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.network.protocol.game.ServerboundPlayerCommandPacket;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
+import net.minecraft.world.effect.MobEffects;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
@@ -33,7 +34,7 @@ import java.util.concurrent.ThreadLocalRandom;
 public class ElytraHelper extends Module {
 
     private static final int BASE_SWAP_COOLDOWN_TICKS = 2;
-    private static final long MANUAL_OVERRIDE_LOCK_MS = 1200L;
+    private static final long MANUAL_OVERRIDE_LOCK_MS = 350L;
 
     private enum SwapPhase {
         IDLE,
@@ -96,6 +97,10 @@ public class ElytraHelper extends Module {
     private long clientTickCounter = 0L;
     private long nextAllowedSwapTick = 0L;
     private boolean wasBindPressedLastTick = false;
+    private long lastPacketActionNanoTime = 0L;
+    private boolean forcedJumpDown = false;
+    private boolean releaseJumpBeforePulse = false;
+    private int glideWaitTicks = 0;
 
     public ElytraHelper() {
         super("ElytraHelper", "Advanced hotbar Chestplate <-> Elytra + Glide/Rocket macro", ModuleCategory.MISC);
@@ -163,10 +168,8 @@ public class ElytraHelper extends Module {
 
     @Override
     protected void onDisable() {
-        Minecraft client = Minecraft.getInstance();
-        if (client != null && client.player != null && previousHotbarSlot >= 0 && previousHotbarSlot < 9) {
-            selectSlotSynced(client, previousHotbarSlot);
-        }
+        // Never send hotbar slot packets directly from GUI/onDisable (prevents Post flags)
+        releaseForcedJump(Minecraft.getInstance());
         resetState();
     }
 
@@ -178,6 +181,8 @@ public class ElytraHelper extends Module {
         this.queuedSwapPending = false;
         this.phaseTicksElapsed = 0;
         this.requiredPhaseTicks = 1;
+        this.glideWaitTicks = 0;
+        this.releaseJumpBeforePulse = false;
         callbackPressLatched = false;
     }
 
@@ -194,6 +199,7 @@ public class ElytraHelper extends Module {
 
     private void processClientTick(Minecraft client) {
         if (client == null || client.player == null || client.level == null || client.gameMode == null) {
+            releaseForcedJump(client);
             resetState();
             return;
         }
@@ -208,8 +214,13 @@ public class ElytraHelper extends Module {
             nextAllowedSwapTick = clientTickCounter;
         }
 
+        // Release our 1-tick synthetic jump press cleanly on the next tick
+        if (forcedJumpDown) {
+            releaseForcedJump(client);
+        }
+
         if (client.screen != null) {
-            if (phase != SwapPhase.IDLE && previousHotbarSlot >= 0 && previousHotbarSlot < 9) {
+            if (phase != SwapPhase.IDLE && previousHotbarSlot >= 0 && previousHotbarSlot < 9 && canSendPacketThisTick()) {
                 selectSlotSynced(client, previousHotbarSlot);
             }
             resetState();
@@ -229,12 +240,20 @@ public class ElytraHelper extends Module {
         }
 
         if (phase != SwapPhase.IDLE) {
+            // Skip packet stages during back-to-back FCL lag catch-up ticks (<20ms apart) to prevent Post
+            if (!canSendPacketThisTick()) {
+                return;
+            }
             advanceMacro(client);
             return;
         }
 
-        if (queuedSwapPending && clientTickCounter >= nextAllowedSwapTick && !client.player.isUsingItem()) {
-            if (MaceTarget.ActionManager.getInstance().isSwapInProgress()) {
+        if (queuedSwapPending
+                && clientTickCounter >= nextAllowedSwapTick
+                && !client.player.isUsingItem()
+                && canSendPacketThisTick()) {
+            if (MaceTarget.ActionManager.getInstance().isSwapInProgress()
+                    || !MaceTarget.ActionManager.getInstance().canMutateHotbarSlotThisTick()) {
                 return;
             }
             queuedSwapPending = false;
@@ -253,31 +272,48 @@ public class ElytraHelper extends Module {
         this.targetArmorSlot = slot;
         this.previousHotbarSlot = client.player.getInventory().getSelectedSlot();
         this.phaseTicksElapsed = 0;
+        this.requiredPhaseTicks = 1;
         manualSwapLockUntilMs = System.currentTimeMillis() + MANUAL_OVERRIDE_LOCK_MS;
 
+        // Tick 0: switch visible hotbar slot only; Tick 1 (WAIT_BEFORE_EQUIP) fires useItem() cleanly
         selectSlotSynced(client, slot);
-
-        // Equip immediately on Tick 0 (fast & synced via CarriedItemSyncInvoker)
-        InteractionResult res = client.gameMode.useItem(client.player, InteractionHand.MAIN_HAND);
-        boolean flipped = client.player.getItemBySlot(EquipmentSlot.CHEST).is(Items.ELYTRA) == equippingElytra;
-        if (flipped || res.consumesAction()) {
-            this.requiredPhaseTicks = computeReturnDelayTicks();
-            this.phase = SwapPhase.WAIT_BEFORE_RETURN;
-        } else {
-            this.phase = SwapPhase.RETRY_EQUIP;
-        }
+        this.phase = SwapPhase.WAIT_BEFORE_EQUIP;
     }
 
     private void advanceMacro(Minecraft client) {
         phaseTicksElapsed++;
 
         switch (phase) {
+            case WAIT_BEFORE_EQUIP -> {
+                if (phaseTicksElapsed < requiredPhaseTicks) {
+                    return;
+                }
+                if (targetArmorSlot >= 0 && targetArmorSlot < 9) {
+                    if (client.player.getInventory().getSelectedSlot() != targetArmorSlot) {
+                        selectSlotSynced(client, targetArmorSlot);
+                    }
+                    InteractionResult res = client.gameMode.useItem(client.player, InteractionHand.MAIN_HAND);
+                    markPacketActionSent();
+                    boolean flipped = client.player.getItemBySlot(EquipmentSlot.CHEST).is(Items.ELYTRA) == equippingElytra;
+                    if (flipped || res.consumesAction()) {
+                        phaseTicksElapsed = 0;
+                        requiredPhaseTicks = computeReturnDelayTicks();
+                        phase = SwapPhase.WAIT_BEFORE_RETURN;
+                    } else {
+                        phaseTicksElapsed = 0;
+                        phase = SwapPhase.RETRY_EQUIP;
+                    }
+                } else {
+                    finishMacroCooldown();
+                }
+            }
             case RETRY_EQUIP -> {
                 if (targetArmorSlot >= 0 && targetArmorSlot < 9) {
                     boolean flipped = client.player.getItemBySlot(EquipmentSlot.CHEST).is(Items.ELYTRA) == equippingElytra;
                     if (!flipped) {
                         selectSlotSynced(client, targetArmorSlot);
                         client.gameMode.useItem(client.player, InteractionHand.MAIN_HAND);
+                        markPacketActionSent();
                     }
                 }
                 phaseTicksElapsed = 0;
@@ -294,31 +330,45 @@ public class ElytraHelper extends Module {
                 manualSwapLockUntilMs = System.currentTimeMillis() + MANUAL_OVERRIDE_LOCK_MS;
                 if (equippingElytra && Boolean.TRUE.equals(autoStartGlide.getValue()) && !client.player.onGround()) {
                     phaseTicksElapsed = 0;
+                    glideWaitTicks = 0;
+                    releaseJumpBeforePulse = client.options != null && client.options.keyJump.isDown();
                     phase = SwapPhase.WAIT_BEFORE_GLIDE;
                 } else {
                     finishMacroCooldown();
                 }
             }
             case WAIT_BEFORE_GLIDE -> {
-                if (phaseTicksElapsed < 1) {
+                glideWaitTicks++;
+                if (client.player.onGround() || glideWaitTicks > 16) {
+                    finishMacroCooldown();
                     return;
                 }
-                boolean sentGlide = tryStartAirGlide(client);
-                if (sentGlide && Boolean.TRUE.equals(autoFirework.getValue()) && findHotbarItem(client, Items.FIREWORK_ROCKET) >= 0) {
-                    phaseTicksElapsed = 0;
-                    phase = SwapPhase.WAIT_BEFORE_FIREWORK;
-                } else {
-                    finishMacroCooldown();
+                if (client.player.isFallFlying()) {
+                    if (Boolean.TRUE.equals(autoFirework.getValue()) && findHotbarItem(client, Items.FIREWORK_ROCKET) >= 0) {
+                        phaseTicksElapsed = 0;
+                        phase = SwapPhase.WAIT_BEFORE_FIREWORK;
+                    } else {
+                        finishMacroCooldown();
+                    }
+                    return;
                 }
+                // Wait at least 2 ticks after equip so server & client confirm Elytra in chest slot
+                if (glideWaitTicks < 2) {
+                    return;
+                }
+                tryStartAirGlide(client);
             }
             case WAIT_BEFORE_FIREWORK -> {
                 if (phaseTicksElapsed < 1) {
                     return;
                 }
                 int fwSlot = findHotbarItem(client, Items.FIREWORK_ROCKET);
-                if (fwSlot >= 0 && fwSlot < 9 && client.player.getItemBySlot(EquipmentSlot.CHEST).is(Items.ELYTRA)) {
+                if (fwSlot >= 0 && fwSlot < 9
+                        && client.player.isFallFlying()
+                        && client.player.getItemBySlot(EquipmentSlot.CHEST).is(Items.ELYTRA)) {
                     selectSlotSynced(client, fwSlot);
                     client.gameMode.useItem(client.player, InteractionHand.MAIN_HAND);
+                    markPacketActionSent();
                     phaseTicksElapsed = 0;
                     phase = SwapPhase.RETURN_AFTER_FIREWORK;
                 } else {
@@ -345,23 +395,53 @@ public class ElytraHelper extends Module {
         if (!equippingElytra || !Boolean.TRUE.equals(autoStartGlide.getValue())) {
             return false;
         }
-        if (client.getConnection() == null || client.player == null) {
+        if (client.player == null || client.options == null) {
             return false;
         }
-        if (!client.player.getItemBySlot(EquipmentSlot.CHEST).is(Items.ELYTRA)) {
+        ItemStack chest = client.player.getItemBySlot(EquipmentSlot.CHEST);
+        if (chest.isEmpty() || !chest.is(Items.ELYTRA) || chest.getDamageValue() >= chest.getMaxDamage() - 1) {
             return false;
         }
         if (client.player.onGround()
                 || client.player.isFallFlying()
                 || client.player.isInWater()
-                || client.player.getDeltaMovement().y >= -0.04D) {
+                || client.player.isInLava()
+                || client.player.isPassenger()
+                || client.player.onClimbable()
+                || client.player.getAbilities().flying
+                || client.player.hasEffect(MobEffects.LEVITATION)
+                || client.player.hurtTime > 0) {
             return false;
         }
-        client.getConnection().send(new ServerboundPlayerCommandPacket(
-                client.player,
-                ServerboundPlayerCommandPacket.Action.START_FALL_FLYING
-        ));
+        // Strict vanilla fall preconditions (prevents Elytra A / B)
+        if (client.player.getDeltaMovement().y >= -0.08D || client.player.fallDistance < 0.25F) {
+            return false;
+        }
+        // If player was already holding Space, release for 1 tick so vanilla sees a clean jump rising edge
+        if (releaseJumpBeforePulse) {
+            client.options.keyJump.setDown(false);
+            releaseJumpBeforePulse = false;
+            return false;
+        }
+        // Pulse vanilla jump key so LocalPlayer.aiStep() sends START_FALL_FLYING in exact vanilla packet order
+        client.options.keyJump.setDown(true);
+        forcedJumpDown = true;
         return true;
+    }
+
+    private void releaseForcedJump(Minecraft client) {
+        if (forcedJumpDown && client != null && client.options != null) {
+            client.options.keyJump.setDown(false);
+        }
+        forcedJumpDown = false;
+    }
+
+    private boolean canSendPacketThisTick() {
+        return (System.nanoTime() - lastPacketActionNanoTime) >= 20_000_000L;
+    }
+
+    private void markPacketActionSent() {
+        lastPacketActionNanoTime = System.nanoTime();
     }
 
     /**
@@ -375,6 +455,8 @@ public class ElytraHelper extends Module {
         if (client.player.getInventory().getSelectedSlot() != targetSlot) {
             client.player.getInventory().setSelectedSlot(targetSlot);
             ((CarriedItemSyncInvoker) client.gameMode).attrium$ensureHasSentCarriedItem();
+            MaceTarget.ActionManager.getInstance().markHotbarSlotMutated();
+            markPacketActionSent();
         }
     }
 
