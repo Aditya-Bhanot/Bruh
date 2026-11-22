@@ -303,7 +303,7 @@ public final class HudManager {
         int barH = 26;
         int barX = (screenW - barW) / 2;
         int barY = 10;
-        drawRoundedRect(guiGraphics, barX, barY, barW, barH, 10, 0xE6111318);
+        drawGlassCard(guiGraphics, barX, barY, barW, barH, 10, 0xE6111318, 1.0F);
         guiGraphics.drawString(font, layoutBannerComp, barX + 12, barY + 9, 0xFFFFFFFF, false);
 
         int doneW = 42;
@@ -406,6 +406,66 @@ public final class HudManager {
             rawY = screenH - 8.0F - bh;
             snapGuideYActive = true;
             snapGuideYPos = screenH - 8;
+        }
+
+        // Sibling HUD magnetic snapping (edges, 6px spacing, and centers)
+        for (int i = 0; i < CACHED_HUD_MODULES.size(); i++) {
+            HudModule other = CACHED_HUD_MODULES.get(i);
+            if (other == null || other == m || !other.isEnabled() || other.lastBoxW <= 0 || other.lastBoxH <= 0) {
+                continue;
+            }
+            float oL = other.lastBoxX;
+            float oR = other.lastBoxX + other.lastBoxW;
+            float oCX = oL + other.lastBoxW * 0.5F;
+            float oT = other.lastBoxY;
+            float oB = other.lastBoxY + other.lastBoxH;
+            float oCY = oT + other.lastBoxH * 0.5F;
+            if (!snapGuideXActive) {
+                if (Math.abs(rawX - oL) <= snapDist) {
+                    rawX = oL;
+                    snapGuideXActive = true;
+                    snapGuideXPos = Math.round(oL);
+                } else if (Math.abs((rawX + bw) - oR) <= snapDist) {
+                    rawX = oR - bw;
+                    snapGuideXActive = true;
+                    snapGuideXPos = Math.round(oR);
+                } else if (Math.abs(rawX - (oR + 6.0F)) <= snapDist) {
+                    rawX = oR + 6.0F;
+                    snapGuideXActive = true;
+                    snapGuideXPos = Math.round(oR);
+                } else if (Math.abs((rawX + bw) - (oL - 6.0F)) <= snapDist) {
+                    rawX = oL - 6.0F - bw;
+                    snapGuideXActive = true;
+                    snapGuideXPos = Math.round(oL);
+                } else if (Math.abs((rawX + bw * 0.5F) - oCX) <= snapDist) {
+                    rawX = oCX - bw * 0.5F;
+                    snapGuideXActive = true;
+                    snapGuideXPos = Math.round(oCX);
+                }
+            }
+            if (!snapGuideYActive) {
+                if (Math.abs(rawY - oT) <= snapDist) {
+                    rawY = oT;
+                    snapGuideYActive = true;
+                    snapGuideYPos = Math.round(oT);
+                } else if (Math.abs((rawY + bh) - oB) <= snapDist) {
+                    rawY = oB - bh;
+                    snapGuideYActive = true;
+                    snapGuideYPos = Math.round(oB);
+                } else if (Math.abs(rawY - (oB + 6.0F)) <= snapDist) {
+                    rawY = oB + 6.0F;
+                    snapGuideYActive = true;
+                    snapGuideYPos = Math.round(oB);
+                } else if (Math.abs((rawY + bh) - (oT - 6.0F)) <= snapDist) {
+                    rawY = oT - 6.0F - bh;
+                    snapGuideYActive = true;
+                    snapGuideYPos = Math.round(oT);
+                } else if (Math.abs((rawY + bh * 0.5F) - oCY) <= snapDist) {
+                    rawY = oCY - bh * 0.5F;
+                    snapGuideYActive = true;
+                    snapGuideYPos = Math.round(oCY);
+                }
+            }
         }
 
         boolean rightAnchor = m.usesRightAnchorWhenOnRightHalf() && (rawX + bw * 0.5F >= screenW * 0.5F);

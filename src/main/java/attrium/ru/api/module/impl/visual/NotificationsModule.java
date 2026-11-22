@@ -289,8 +289,7 @@ public class NotificationsModule extends HudModule {
             // Soft 1px outer rim tint + frosted dark glass card (10px radius)
             HudManager.drawRoundedRect(guiGraphics, drawX - 1, drawY - 1, cardW + 2, cardH + 2, 10,
                     AnimationUtil.withAlpha(AnimationUtil.withAlphaByte(accentCol, 0x26), alphaEase));
-            HudManager.drawRoundedRect(guiGraphics, drawX, drawY, cardW, cardH, 9,
-                    AnimationUtil.withAlpha(cardBgBase, alphaEase));
+            HudManager.drawGlassCard(guiGraphics, drawX, drawY, cardW, cardH, 9, AnimationUtil.withAlpha(cardBgBase, alphaEase), alphaEase);
 
             // Sleek 3px rounded left vertical status accent bar
             HudManager.drawRoundedRect(guiGraphics, drawX + 6, drawY + 6, 3, cardH - 12, 1,
@@ -332,7 +331,7 @@ public class NotificationsModule extends HudModule {
             guiGraphics.pose().scale(sc, sc);
             HudManager.drawRoundedRect(guiGraphics, -1, -1, defaultCardW + 2, cardH + 2, 10,
                     AnimationUtil.withAlphaByte(accent, 0x28));
-            HudManager.drawRoundedRect(guiGraphics, 0, 0, defaultCardW, cardH, 9, cardBgBase);
+            HudManager.drawGlassCard(guiGraphics, 0, 0, defaultCardW, cardH, 9, cardBgBase, 1.0F);
             HudManager.drawRoundedRect(guiGraphics, 6, 6, 3, cardH - 12, 1, accent);
             guiGraphics.drawString(font, previewTitleComp, 16, 6, 0xFFF8FAFC, false);
             guiGraphics.drawString(font, previewMsgComp, 16, 17, 0xFF94A3B8, false);

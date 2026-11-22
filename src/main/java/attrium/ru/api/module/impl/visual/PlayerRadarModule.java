@@ -322,7 +322,7 @@ public class PlayerRadarModule extends HudModule {
         // Soft accent rim + dark glassmorphic card (10px radius)
         HudManager.drawRoundedRect(guiGraphics, -1, -1, cardW + 2, cardH + 2, 11,
                 ClientThemeManager.getAccentWithAlpha(0.18F));
-        HudManager.drawRoundedRect(guiGraphics, 0, 0, cardW, cardH, 10, cardBg);
+        HudManager.drawGlassCard(guiGraphics, 0, 0, cardW, cardH, 10, cardBg, 1.0F);
 
         // Header Row: "Radar" Bold + Aqua-Cyan count pill
         guiGraphics.drawString(font, headerTitleComp, 9, 7, 0xFFFFFFFF, false);

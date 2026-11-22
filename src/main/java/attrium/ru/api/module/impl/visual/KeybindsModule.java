@@ -152,7 +152,7 @@ public class KeybindsModule extends HudModule {
         guiGraphics.pose().translate(baseX, baseY);
         guiGraphics.pose().scale(sc, sc);
 
-        HudManager.drawRoundedRect(guiGraphics, 0, 0, cardW, cardH, 8, cardBg);
+        HudManager.drawGlassCard(guiGraphics, 0, 0, cardW, cardH, 8, cardBg, 1.0F);
 
         if (headerOn) {
             guiGraphics.drawString(font, headerComp, 9, 7, 0xFFFFFFFF, false);
@@ -190,7 +190,7 @@ public class KeybindsModule extends HudModule {
                     // Glowing Pill
                     int pillBg = AnimationUtil.lerpColor(0x2AFFFFFF, AnimationUtil.ACCENT_AQUA_CYAN, e.activeAnim);
                     int txtCol = AnimationUtil.lerpColor(0xFFE5E7EB, 0xFF0B0D10, e.activeAnim);
-                    HudManager.drawRoundedRect(guiGraphics, pillX, pillY, pillW, pillH, 4, pillBg);
+                    HudManager.drawGlassCard(guiGraphics, pillX, pillY, pillW, pillH, 4, pillBg, 1.0F);
                     guiGraphics.drawString(font, e.keyComp, pillX + (pillW - kw) / 2, pillY + 3, txtCol, false);
                 }
 
