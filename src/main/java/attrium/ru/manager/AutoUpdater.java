@@ -122,6 +122,7 @@ public final class AutoUpdater {
         registerShutdownHookOnce();
 
         statusText = "Checking...";
+        lastCheckTimestampMs = System.currentTimeMillis();
         CompletableFuture.runAsync(() -> {
             try {
                 runUpdateCheck(manual);
@@ -205,7 +206,7 @@ public final class AutoUpdater {
         // First-run initialization if version matches
         if (saved == null && compareVersions(remoteVerClean, localVer) <= 0) {
             saveLocalState(stateFile, remoteVerClean, remoteId, remoteUpdatedAt);
-            changelogLines = parsedChanges;
+            changelogLines = fetchCumulativeChangelog(client, localVer, remoteVerClean, parsedChanges);
             statusText = "Up to date";
             if (manual) {
                 notifyClient("Attrium Updater", "Up to date (v" + localVer + ")", 0);
@@ -228,6 +229,16 @@ public final class AutoUpdater {
         }
 
         // Stream download to staging file
+        if (!manual && !autoDownloadEnabled) {
+            changelogLines = fetchCumulativeChangelog(client, localVer, remoteVerClean, parsedChanges);
+            statusText = "Update v" + remoteVerClean;
+            if (notifyOnUpdateEnabled && !remoteVerClean.equals(lastNotifiedVersion)) {
+                lastNotifiedVersion = remoteVerClean;
+                notifyClient("Update v" + remoteVerClean + " Available", "Open ClickGUI to download & restart.", 1);
+            }
+            return;
+        }
+
         statusText = "Downloading...";
         Path updateDir = stateDir.resolve("update");
         Files.createDirectories(updateDir);
@@ -254,7 +265,13 @@ public final class AutoUpdater {
         updateReady = true;
         statusText = "Restart Ready";
         String summary = parsedChanges.isEmpty() ? "Restart client to apply v" + remoteVerClean : parsedChanges.get(0);
-        notifyClient("Update v" + remoteVerClean + " Ready", summary, 0);
+        if (manual || (notifyOnUpdateEnabled && !remoteVerClean.equals(lastNotifiedVersion))) {
+            lastNotifiedVersion = remoteVerClean;
+            if (manual || (notifyOnUpdateEnabled && !remoteVerClean.equals(lastNotifiedVersion))) {
+                lastNotifiedVersion = remoteVerClean;
+                notifyClient("Update v" + remoteVerClean + " Ready", summary, 0);
+            }
+        }
     }
 
     private static List<String> parseChangelog(String body) {
@@ -378,27 +395,7 @@ public final class AutoUpdater {
         if (!SHUTDOWN_HOOK_REGISTERED.compareAndSet(false, true)) {
             return;
         }
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            if (!updateReady) {
-                return;
-            }
-            Path tmp = stagedTmpPath != null
-                    ? stagedTmpPath
-                    : getStateDir().resolve("update").resolve("update.jar.tmp");
-            Path targetJar = activeModJarPath != null ? activeModJarPath : resolveActiveModJar();
-            if (tmp == null || targetJar == null || !Files.isRegularFile(tmp) || !Files.isRegularFile(targetJar)) {
-                return;
-            }
-            try {
-                Files.move(tmp, targetJar, StandardCopyOption.REPLACE_EXISTING);
-            } catch (IOException moveErr) {
-                try {
-                    Files.copy(tmp, targetJar, StandardCopyOption.REPLACE_EXISTING);
-                    Files.deleteIfExists(tmp);
-                } catch (IOException ignored) {
-                }
-            }
-        }, "Attrium-AutoUpdater-ShutdownSwap"));
+        Runtime.getRuntime().addShutdownHook(new Thread(AutoUpdater::applyStagedUpdateNow, "Attrium-AutoUpdater-ShutdownSwap"));
     }
 
     private static void notifyClient(String title, String message, int type) {
@@ -449,7 +446,7 @@ public final class AutoUpdater {
                 String currentUrl = startUrl;
                 int code = -1;
                 for (int hop = 0; hop < 8; hop++) {
-                    java.net.HttpURLConnection conn = (java.net.HttpURLConnection) new java.net.URL(currentUrl).openConnection();
+                    java.net.HttpURLConnection conn = (java.net.HttpURLConnection) URI.create(currentUrl).toURL().openConnection();
                     conn.setInstanceFollowRedirects(false);
                     conn.setConnectTimeout(15_000);
                     conn.setReadTimeout(120_000);
@@ -465,7 +462,7 @@ public final class AutoUpdater {
                         if (loc == null || loc.isEmpty()) {
                             return code;
                         }
-                        currentUrl = new java.net.URL(new java.net.URL(currentUrl), loc).toString();
+                        currentUrl = URI.create(currentUrl).resolve(loc).toString();
                         continue;
                     }
                     lastCode = code;
@@ -518,10 +515,7 @@ public final class AutoUpdater {
                     try (java.util.stream.Stream<Path> stream = Files.list(modsDir)) {
                         targetJar = stream
                                 .filter(Files::isRegularFile)
-                                .filter(p -> {
-                                    String n = p.getFileName().toString().toLowerCase(java.util.Locale.ROOT);
-                                    return n.endsWith(".jar") && n.contains("attrium");
-                                })
+                                .filter(AutoUpdater::isAttriumModJar)
                                 .findFirst()
                                 .orElse(null);
                     }
@@ -551,6 +545,121 @@ public final class AutoUpdater {
             System.err.println("[Attrium AutoUpdater] Failed to apply staged update: " + ex);
             SWAP_APPLIED.set(false);
             return false;
+        }
+    }
+
+
+    private static java.util.List<String> fetchCumulativeChangelog(
+            java.net.http.HttpClient client,
+            String localVer,
+            String remoteVer,
+            java.util.List<String> fallbackLines) {
+        try {
+            java.net.http.HttpRequest req = java.net.http.HttpRequest.newBuilder()
+                    .uri(URI.create("https://api.github.com/repos/Aditya-Bhanot/Bruh/releases?per_page=15"))
+                    .timeout(java.time.Duration.ofSeconds(15))
+                    .header("Accept", "application/vnd.github+json")
+                    .header("User-Agent", USER_AGENT)
+                    .GET()
+                    .build();
+            java.net.http.HttpResponse<String> resp = client.send(req, java.net.http.HttpResponse.BodyHandlers.ofString());
+            if (resp.statusCode() < 200 || resp.statusCode() >= 300 || resp.body() == null) {
+                return fallbackLines;
+            }
+            com.google.gson.JsonArray releases = com.google.gson.JsonParser.parseString(resp.body()).getAsJsonArray();
+            java.util.List<String> merged = new java.util.ArrayList<>();
+            int matchedVersions = 0;
+            for (com.google.gson.JsonElement el : releases) {
+                if (!el.isJsonObject()) continue;
+                com.google.gson.JsonObject rel = el.getAsJsonObject();
+                if (rel.has("draft") && rel.get("draft").getAsBoolean()) continue;
+                if (rel.has("prerelease") && rel.get("prerelease").getAsBoolean()) continue;
+                String tag = rel.has("tag_name") && !rel.get("tag_name").isJsonNull()
+                        ? rel.get("tag_name").getAsString() : "";
+                String relVer = normalizeVersion(tag);
+                if (relVer.isEmpty()) continue;
+                if (compareVersions(relVer, localVer) <= 0) continue;
+                if (compareVersions(relVer, remoteVer) > 0) continue;
+
+                matchedVersions++;
+                String body = rel.has("body") && !rel.get("body").isJsonNull()
+                        ? rel.get("body").getAsString() : "";
+                int addedForVer = 0;
+                for (String rawLine : body.split("\r?\n")) {
+                    String line = rawLine.trim();
+                    if (line.isEmpty() || line.startsWith("#") || line.startsWith("```") || line.startsWith("---")) {
+                        continue;
+                    }
+                    line = line.replaceFirst("^[-*\u2022]+\s*", "").trim();
+                    if (line.isEmpty()) continue;
+                    merged.add("[v" + relVer + "] " + line);
+                    addedForVer++;
+                }
+                if (addedForVer == 0) {
+                    merged.add("[v" + relVer + "] Update released");
+                }
+            }
+            if (matchedVersions > 1 && !merged.isEmpty()) {
+                return java.util.Collections.unmodifiableList(merged);
+            }
+            if (matchedVersions == 1 && !merged.isEmpty()) {
+                return java.util.Collections.unmodifiableList(merged);
+            }
+        } catch (Exception ex) {
+            System.err.println("[Attrium AutoUpdater] Cumulative changelog fetch skipped: " + ex);
+        }
+        return fallbackLines;
+    }
+
+    private static boolean isAttriumModJar(Path jarPath) {
+        if (jarPath == null || !Files.isRegularFile(jarPath)) {
+            return false;
+        }
+        String lower = jarPath.getFileName().toString().toLowerCase(java.util.Locale.ROOT);
+        if (!lower.endsWith(".jar")) {
+            return false;
+        }
+        try (java.util.zip.ZipFile zip = new java.util.zip.ZipFile(jarPath.toFile())) {
+            java.util.zip.ZipEntry entry = zip.getEntry("fabric.mod.json");
+            if (entry == null) {
+                return false;
+            }
+            try (java.io.InputStream in = zip.getInputStream(entry);
+                 java.io.InputStreamReader reader = new java.io.InputStreamReader(in, java.nio.charset.StandardCharsets.UTF_8)) {
+                com.google.gson.JsonObject modJson = com.google.gson.JsonParser.parseReader(reader).getAsJsonObject();
+                if (modJson != null && modJson.has("id") && !modJson.get("id").isJsonNull()) {
+                    return MOD_ID.equalsIgnoreCase(modJson.get("id").getAsString().trim());
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return false;
+    }
+
+
+    private static volatile boolean autoCheckEnabled = true;
+    private static volatile int checkIntervalMinutes = 15;
+    private static volatile boolean autoDownloadEnabled = true;
+    private static volatile boolean notifyOnUpdateEnabled = true;
+    private static volatile long lastCheckTimestampMs = System.currentTimeMillis();
+    private static volatile String lastNotifiedVersion = "";
+
+    public static void syncSettings(boolean autoCheck, int intervalMin, boolean autoDownload, boolean notifyOnUpdate) {
+        autoCheckEnabled = autoCheck;
+        checkIntervalMinutes = Math.max(1, Math.min(120, intervalMin));
+        autoDownloadEnabled = autoDownload;
+        notifyOnUpdateEnabled = notifyOnUpdate;
+    }
+
+    public static void tickPeriodicCheck() {
+        if (!autoCheckEnabled || updateReady || isChecking()) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        long intervalMs = checkIntervalMinutes * 60_000L;
+        if (now - lastCheckTimestampMs >= intervalMs) {
+            lastCheckTimestampMs = now;
+            checkForUpdatesAsync(false);
         }
     }
 

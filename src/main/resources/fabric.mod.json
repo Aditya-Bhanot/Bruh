@@ -2,16 +2,17 @@
   "schemaVersion": 1,
   "id": "attrium",
   "version": "${version}",
-  "name": "Attrium",
-  "description": "In alpha version rightnow dont try on good anticheat server",
+  "name": "BBE",
+  "description": "Optimise and customize block entity rendering with a more modern approch",
   "authors": [
-    "Me!"
+    "Attitude-Wings"
   ],
   "contact": {
-    "homepage": "https://fabricmc.net/",
-    "sources": "https://github.com/FabricMC/fabric-example-mod"
+    "homepage": "https://discord.gg/zRmrRKffP4",
+    "sources": "https://discord.gg/zRmrRKffP4"
   },
-  "license": "CC0-1.0",
+  "license": "LPGPLv3",
+  "icon": "assets/attrium/icon.png",
   "environment": "client",
   "entrypoints": {
     "main": [

@@ -7,6 +7,7 @@ package attrium.ru.api.module;
 
 
 import attrium.ru.api.module.impl.misc.NameProtectModule;
+import attrium.ru.api.module.impl.misc.AutoUpdaterModule;
 import attrium.ru.api.module.impl.misc.ChatUtilsModule;
 import attrium.ru.api.module.impl.visual.ArrayListModule;
 import attrium.ru.api.module.impl.visual.NotificationsModule;
@@ -252,6 +253,7 @@ public final class ModuleManager {
         register(new AutoAuth());
         register(new AutoDuel());
         register(new AutoLeave());
+        register(new AutoUpdaterModule());
         register(new AutoTpAccept());
         register(new AutoLes());
         register(new ClientSounds());
