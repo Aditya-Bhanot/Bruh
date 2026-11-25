@@ -958,6 +958,10 @@ public class MaceTarget extends Module {
             "Ignore Friends", "Ignore players registered in the friend list.", true));
     private final BooleanSetting targetEsp = register(new BooleanSetting(
             "Target ESP", "Render a minimal single-pass wireframe outline on the active target.", true));
+    private final BooleanSetting betaAimMace = register(new BooleanSetting(
+            "Beta Aim & Mace",
+            "Angle-based chest/head elastic aim, Breach (<3m) vs Density+WindBurst (>=3m) switching, <40 deg Elytra cancel, and 1s pre-hit aim lock.",
+            false));
 
     private final NumberSetting savedToggleKeyCode = register(new NumberSetting(
             "_amToggleKeyCode",
@@ -994,9 +998,25 @@ public class MaceTarget extends Module {
     private String lastActiveAimMode = "Legit";
 
     private int cachedMaceSlot = -1;
+    private int cachedBreachMaceSlot = -1;
+    private int cachedDensityWindMaceSlot = -1;
     private int cachedAxeSlot = -1;
     private int cachedSwordSlot = -1;
     private int lastInventoryScanTick = -100;
+
+    private static volatile boolean betaManualAimLocked = false;
+    private long betaManualAimLockUntilMs = 0L;
+    private boolean hasLastBetaAppliedRot = false;
+    private float lastBetaAppliedYaw = 0.0F;
+    private float lastBetaAppliedPitch = 0.0F;
+    private int betaTrackedTargetId = -1;
+    private double betaEnemyVx = 0.0D;
+    private double betaEnemyVy = 0.0D;
+    private double betaEnemyVz = 0.0D;
+    private double betaLastEnemyX = Double.NaN;
+    private double betaLastEnemyY = Double.NaN;
+    private double betaLastEnemyZ = Double.NaN;
+    private int betaEnemyVelTick = -100;
 
     private double prevYawError = 0.0D;
     private double prevPitchError = 0.0D;
@@ -1161,6 +1181,14 @@ public class MaceTarget extends Module {
         return instance;
     }
 
+    public static boolean isManualAimLocked() {
+        return instance != null
+                && instance.isEnabled()
+                && instance.betaAimMace.getValue()
+                && betaManualAimLocked
+                && System.currentTimeMillis() <= instance.betaManualAimLockUntilMs;
+    }
+
     public static boolean isAutoMaceEnabled() {
         return instance != null && instance.isEnabled();
     }
@@ -1278,6 +1306,10 @@ public class MaceTarget extends Module {
 
         int bestMaceSlot = -1;
         int bestMaceScore = -1;
+        int bestBreachSlot = -1;
+        int bestBreachScore = -1;
+        int bestDensityWindSlot = -1;
+        int bestDensityWindScore = -1;
         int firstAxeSlot = -1;
         int firstSwordSlot = -1;
 
@@ -1287,10 +1319,20 @@ public class MaceTarget extends Module {
                 continue;
             }
             if (isMaceStack(stack)) {
-                int score = scoreMaceEnchantments(stack);
-                if (score > bestMaceScore) {
-                    bestMaceScore = score;
+                int generalScore = scoreMaceEnchantments(stack);
+                if (generalScore > bestMaceScore) {
+                    bestMaceScore = generalScore;
                     bestMaceSlot = slot;
+                }
+                int breachScore = scoreBreachMace(stack);
+                if (breachScore > bestBreachScore) {
+                    bestBreachScore = breachScore;
+                    bestBreachSlot = slot;
+                }
+                int densityWindScore = scoreDensityWindMace(stack);
+                if (densityWindScore > bestDensityWindScore) {
+                    bestDensityWindScore = densityWindScore;
+                    bestDensityWindSlot = slot;
                 }
             } else if (firstAxeSlot == -1 && (stack.getItem() instanceof AxeItem || stack.is(ItemTags.AXES))) {
                 firstAxeSlot = slot;
@@ -1300,8 +1342,51 @@ public class MaceTarget extends Module {
         }
 
         cachedMaceSlot = bestMaceSlot;
+        cachedBreachMaceSlot = bestBreachSlot;
+        cachedDensityWindMaceSlot = bestDensityWindSlot;
         cachedAxeSlot = firstAxeSlot;
         cachedSwordSlot = firstSwordSlot;
+    }
+
+    private int scoreBreachMace(ItemStack stack) {
+        int breach = 0;
+        int windBurst = 0;
+        int density = 0;
+        ItemEnchantments enchantments = stack.getOrDefault(DataComponents.ENCHANTMENTS, ItemEnchantments.EMPTY);
+        for (Object2IntMap.Entry<Holder<Enchantment>> entry : enchantments.entrySet()) {
+            String id = entry.getKey().getRegisteredName().toLowerCase();
+            int level = entry.getIntValue();
+            if (id.contains("breach")) {
+                breach = level;
+            } else if (id.contains("wind_burst")) {
+                windBurst = level;
+            } else if (id.contains("density")) {
+                density = level;
+            }
+        }
+        // Strictly prioritize Breach for < 3 block fall hits
+        return 100 + (breach * 120) + (windBurst * 20) + (density * 5);
+    }
+
+    private int scoreDensityWindMace(ItemStack stack) {
+        int density = 0;
+        int windBurst = 0;
+        int breach = 0;
+        ItemEnchantments enchantments = stack.getOrDefault(DataComponents.ENCHANTMENTS, ItemEnchantments.EMPTY);
+        for (Object2IntMap.Entry<Holder<Enchantment>> entry : enchantments.entrySet()) {
+            String id = entry.getKey().getRegisteredName().toLowerCase();
+            int level = entry.getIntValue();
+            if (id.contains("density")) {
+                density = level;
+            } else if (id.contains("wind_burst")) {
+                windBurst = level;
+            } else if (id.contains("breach")) {
+                breach = level;
+            }
+        }
+        // Prioritize Density + Wind Burst synergy for >= 3 block hits, then plain Density
+        int synergyBonus = (density > 0 && windBurst > 0) ? 500 : 0;
+        return 100 + synergyBonus + (density * 60) + (windBurst * 45) + (breach * 10);
     }
 
     private int scoreMaceEnchantments(ItemStack stack) {
@@ -1337,11 +1422,7 @@ public class MaceTarget extends Module {
         Minecraft client = Minecraft.getInstance();
         if (client.player == null || client.level == null || client.screen != null) {
             lastSmoothFrameNs = 0L;
-            return;
-        }
-
-        if ("Silent".equalsIgnoreCase(aimMode.getValue())) {
-            lastSmoothFrameNs = 0L;
+            releaseBetaManualAimLock();
             return;
         }
 
@@ -1363,6 +1444,18 @@ public class MaceTarget extends Module {
             return;
         }
 
+        if (betaAimMace.getValue()) {
+            updateBetaEnemyVelocityOncePerTick(client, target);
+            updateBetaOneSecondAimLock(client, target);
+        } else {
+            releaseBetaManualAimLock();
+        }
+
+        if ("Silent".equalsIgnoreCase(aimMode.getValue())) {
+            lastSmoothFrameNs = 0L;
+            return;
+        }
+
         long nowNs = System.nanoTime();
         double frameTicks = lastSmoothFrameNs == 0L
                 ? (1.0D / 3.0D)
@@ -1371,9 +1464,25 @@ public class MaceTarget extends Module {
 
         if (!canSafelyAimForMace(client)) {
             suspendSilentRotation();
+            releaseBetaManualAimLock();
             lastSmoothFrameNs = 0L;
             return;
         }
+
+        if (betaAimMace.getValue()) {
+            suspendSilentRotation();
+            // Enforce 1s pre-impact manual aim lockout by rejecting manual player mouse drift
+            if (isManualAimLocked() && hasLastBetaAppliedRot) {
+                client.player.setYRot(lastBetaAppliedYaw);
+                client.player.setXRot(lastBetaAppliedPitch);
+            }
+            applyBetaElasticAim(client, target, frameTicks);
+            lastBetaAppliedYaw = client.player.getYRot();
+            lastBetaAppliedPitch = client.player.getXRot();
+            hasLastBetaAppliedRot = true;
+            return;
+        }
+
         if ("Strict".equalsIgnoreCase(aimMode.getValue())) {
             suspendSilentRotation();
             applyStrictCenterLock(client, target);
@@ -1616,18 +1725,21 @@ public class MaceTarget extends Module {
 
         int maceSlot = resolveMaceSlot(client);
         int currentSlot = client.player.getInventory().getSelectedSlot();
-        boolean holdingMace = isMaceStack(client.player.getMainHandItem());
+        boolean holdingAnyMace = isMaceStack(client.player.getMainHandItem());
+        boolean holdingDesiredMace = betaAimMace.getValue()
+                ? (holdingAnyMace && (maceSlot == -1 || currentSlot == maceSlot))
+                : holdingAnyMace;
 
-        if (!holdingMace && (!autoSwitch.getValue() || maceSlot == -1)) {
-            return;
+        if (!holdingDesiredMace && (!autoSwitch.getValue() || maceSlot == -1)) {
+            if (!holdingAnyMace) {
+                return;
+            }
         }
 
         Vec3 activeLookVec = "Silent".equalsIgnoreCase(aimMode.getValue()) && AngleConnection.INSTANCE.getCurrentAngle() != null
                 ? AngleConnection.INSTANCE.getCurrentAngle().toVector()
                 : client.player.getViewVector(1.0F);
 
-        // Wait to swap until the crosshair raycast is confirmed on the target hitbox so we never waste
-        // weapon cooldown holding the Mace in mid-air before the hit!
         if (!ActionManager.verifyStrict3mAttackRaycast(client, targetEntity, swingRange.getValue(), activeLookVec)) {
             return;
         }
@@ -1639,7 +1751,7 @@ public class MaceTarget extends Module {
         if (savedHotbarSlot == -1) {
             savedHotbarSlot = currentSlot;
         }
-        targetMaceSlot = holdingMace ? currentSlot : maceSlot;
+        targetMaceSlot = (maceSlot != -1 && autoSwitch.getValue()) ? maceSlot : (holdingAnyMace ? currentSlot : maceSlot);
 
         boolean useAxeStunFirst = shouldTriggerStunSlam(client, targetEntity);
         if (useAxeStunFirst && cachedAxeSlot != -1) {
@@ -1656,12 +1768,11 @@ public class MaceTarget extends Module {
             return;
         }
 
-        // Swap to Mace on the exact hit tick for maximum Mace Cooldown Swap damage!
-        if (!holdingMace && targetMaceSlot != -1) {
+        if (targetMaceSlot != -1 && currentSlot != targetMaceSlot && autoSwitch.getValue()) {
             selectHotbarSlotLegit(client, targetMaceSlot);
         }
 
-        if (maceSwapDelayMs.getValue() <= 0.0D || holdingMace || isInElytraOrRocketDive(client)) {
+        if (maceSwapDelayMs.getValue() <= 0.0D || holdingDesiredMace || isInElytraOrRocketDive(client)) {
             if (performThrottledAttack(client, targetEntity)) {
                 cooldownTimer.reset();
                 transitionToSwapBackRestore(client);
@@ -1933,14 +2044,292 @@ public class MaceTarget extends Module {
         );
     }
 
+    private double getPlayerDiveAngleDeg(Minecraft client) {
+        if (client == null || client.player == null) {
+            return 0.0D;
+        }
+        Vec3 v = client.player.getDeltaMovement();
+        return Math.toDegrees(Math.atan2(-v.y, Math.hypot(v.x, v.z)));
+    }
+
+    private double getEffectiveBetaApproachAngleDeg(Minecraft client, LivingEntity entity) {
+        double playerAngle = getPlayerDiveAngleDeg(client);
+        double enemyAngle = 0.0D;
+        if (entity != null && entity.isFallFlying()) {
+            double eHoriz = Math.hypot(betaEnemyVx, betaEnemyVz);
+            if (eHoriz > 1.0E-4D || Math.abs(betaEnemyVy) > 1.0E-4D) {
+                enemyAngle = Math.toDegrees(Math.atan2(-betaEnemyVy, eHoriz));
+            }
+        }
+        if (client != null && client.player != null && client.player.isFallFlying()) {
+            // If both are gliding steeply, respect the steeper dive angle; otherwise use player's dive angle
+            return Math.max(playerAngle, enemyAngle >= 55.0D ? enemyAngle : 0.0D);
+        }
+        if (entity != null && entity.isFallFlying() && enemyAngle >= 55.0D) {
+            return enemyAngle;
+        }
+        return Math.max(playerAngle, enemyAngle);
+    }
+
+    /**
+     * Vertical hitbox aim height ratio for Beta mode:
+     * - 70 deg or steeper -> Chest (0.56)
+     * - 40 deg or shallower -> Head / Upper Chest (0.78)
+     * - Smoothly interpolated between 40 deg and 70 deg.
+     */
+    private double computeBetaAimYRatio(Minecraft client, LivingEntity entity) {
+        double angleDeg = getEffectiveBetaApproachAngleDeg(client, entity);
+        double t = Mth.clamp((angleDeg - 40.0D) / 30.0D, 0.0D, 1.0D);
+        return Mth.lerp(t, 0.78D, 0.56D);
+    }
+
+    private Vec3 getBetaDynamicAnchor(Minecraft client, LivingEntity entity) {
+        AABB box = entity.getBoundingBox();
+        double yRatio = betaAimMace.getValue() ? computeBetaAimYRatio(client, entity) : 0.62D;
+        return new Vec3(
+                (box.minX + box.maxX) * 0.5D,
+                box.minY + (box.getYsize() * yRatio),
+                (box.minZ + box.maxZ) * 0.5D
+        );
+    }
+
+    private void updateBetaEnemyVelocityOncePerTick(Minecraft client, LivingEntity entity) {
+        if (client == null || client.player == null || entity == null || !entity.isAlive()) {
+            betaTrackedTargetId = -1;
+            betaEnemyVx = 0.0D;
+            betaEnemyVy = 0.0D;
+            betaEnemyVz = 0.0D;
+            betaLastEnemyX = Double.NaN;
+            betaLastEnemyY = Double.NaN;
+            betaLastEnemyZ = Double.NaN;
+            return;
+        }
+        int curTick = client.player.tickCount;
+        if (curTick == betaEnemyVelTick && entity.getId() == betaTrackedTargetId) {
+            return;
+        }
+        betaEnemyVelTick = curTick;
+
+        double x = entity.getX();
+        double y = entity.getY();
+        double z = entity.getZ();
+        if (entity.getId() != betaTrackedTargetId || Double.isNaN(betaLastEnemyX)) {
+            betaTrackedTargetId = entity.getId();
+            betaLastEnemyX = x;
+            betaLastEnemyY = y;
+            betaLastEnemyZ = z;
+            Vec3 dm = entity.getDeltaMovement();
+            betaEnemyVx = dm.x;
+            betaEnemyVy = dm.y;
+            betaEnemyVz = dm.z;
+            return;
+        }
+
+        double rawVx = x - betaLastEnemyX;
+        double rawVy = y - betaLastEnemyY;
+        double rawVz = z - betaLastEnemyZ;
+        betaLastEnemyX = x;
+        betaLastEnemyY = y;
+        betaLastEnemyZ = z;
+
+        double speedSq = rawVx * rawVx + rawVy * rawVy + rawVz * rawVz;
+        if (speedSq > 16.0D) {
+            betaEnemyVx = 0.0D;
+            betaEnemyVy = 0.0D;
+            betaEnemyVz = 0.0D;
+            return;
+        }
+        if (speedSq < 1.0E-8D) {
+            Vec3 dm = entity.getDeltaMovement();
+            if (dm.lengthSqr() > 1.0E-5D) {
+                rawVx = dm.x;
+                rawVy = dm.y;
+                rawVz = dm.z;
+            }
+        }
+        betaEnemyVx = 0.45D * rawVx + 0.55D * betaEnemyVx;
+        betaEnemyVy = 0.45D * rawVy + 0.55D * betaEnemyVy;
+        betaEnemyVz = 0.45D * rawVz + 0.55D * betaEnemyVz;
+    }
+
+    /**
+     * Engages manual player aim lock during the final 1.0 second before impact so player mouse
+     * movement cannot accidentally pull the crosshair off target right before the smash.
+     */
+    private void updateBetaOneSecondAimLock(Minecraft client, LivingEntity entity) {
+        if (client == null || client.player == null || entity == null) {
+            releaseBetaManualAimLock();
+            return;
+        }
+        // Never lock aim if player is gliding below 40 degrees
+        if (client.player.isFallFlying() && getPlayerDiveAngleDeg(client) < 40.0D) {
+            releaseBetaManualAimLock();
+            return;
+        }
+
+        double ex = client.player.getX();
+        double ey = client.player.getEyeY();
+        double ez = client.player.getZ();
+        AABB box = entity.getBoundingBox();
+        double rx = Mth.clamp(ex, box.minX, box.maxX) - ex;
+        double ry = Mth.clamp(ey, box.minY, box.maxY) - ey;
+        double rz = Mth.clamp(ez, box.minZ, box.maxZ) - ez;
+        double dist = Math.sqrt(rx * rx + ry * ry + rz * rz);
+
+        Vec3 pVel = client.player.getDeltaMovement();
+        double relVx = pVel.x - betaEnemyVx;
+        double relVy = pVel.y - betaEnemyVy;
+        double relVz = pVel.z - betaEnemyVz;
+        double closingBlocksPerTick = dist > 1.0E-4D
+                ? (relVx * rx + relVy * ry + relVz * rz) / dist
+                : 1.0D;
+
+        double closingBlocksPerSec = closingBlocksPerTick * 20.0D;
+        double ttiSeconds = closingBlocksPerSec > 0.5D
+                ? Math.max(0.0D, dist - 2.5D) / closingBlocksPerSec
+                : Double.POSITIVE_INFINITY;
+
+        if (ttiSeconds <= 1.0D || dist <= swingRange.getValue() + 1.5D || isInMidOrPostUnequipSmash(client)) {
+            betaManualAimLocked = true;
+            betaManualAimLockUntilMs = System.currentTimeMillis() + 150L;
+        } else {
+            releaseBetaManualAimLock();
+        }
+    }
+
+    private void releaseBetaManualAimLock() {
+        betaManualAimLocked = false;
+        betaManualAimLockUntilMs = 0L;
+        hasLastBetaAppliedRot = false;
+    }
+
+    /**
+     * Beta Organic Elastic Hitbox Aim:
+     * - Aims at Chest (70 deg+) or Upper Chest/Head (40 deg) with subtle natural movement (never static).
+     * - Inside the hitbox interior, pull force is very light; as the crosshair nears the hitbox edge,
+     *   a nonlinear spring force (u^2.5) ramps up sharply to pull aim smoothly back inside.
+     */
+    private void applyBetaElasticAim(Minecraft client, LivingEntity targetEntity, double tickFraction) {
+        Vec3 eyePos = client.player.getEyePosition(1.0F);
+        AABB box = targetEntity.getBoundingBox();
+        Vec3 anchor = getBetaDynamicAnchor(client, targetEntity);
+
+        float currentYaw = client.player.getYRot();
+        float currentPitch = client.player.getXRot();
+        double gcd = MathUtils.computeGcd();
+        float gcdStep = gcd > 0.0D ? (float) gcd : 0.05F;
+
+        // Compute normalized proximity to the edge of the target's hitbox (0.0 = anchor, 1.0 = edge, >1.0 = outside)
+        double ex = eyePos.x, ey = eyePos.y, ez = eyePos.z;
+        double distToAnchor = Math.sqrt(
+                (anchor.x - ex) * (anchor.x - ex)
+                + (anchor.y - ey) * (anchor.y - ey)
+                + (anchor.z - ez) * (anchor.z - ez)
+        );
+        Vec3 lookDir = client.player.getViewVector(1.0F);
+        double projX = ex + lookDir.x * distToAnchor;
+        double projY = ey + lookDir.y * distToAnchor;
+        double projZ = ez + lookDir.z * distToAnchor;
+
+        double halfW = Math.max(0.24D, (box.maxX - box.minX) * 0.5D);
+        double horizErr = Math.hypot(projX - anchor.x, projZ - anchor.z);
+        double normH = horizErr / halfW;
+
+        double normV;
+        if (projY >= anchor.y) {
+            double upperSpan = Math.max(0.22D, box.maxY - anchor.y);
+            normV = (projY - anchor.y) / upperSpan;
+        } else {
+            double lowerSpan = Math.max(0.25D, anchor.y - box.minY);
+            normV = (anchor.y - projY) / lowerSpan;
+        }
+        double edgeRatio = Math.max(normH, normV);
+
+        // Organic floating target offset inside the hitbox so aim never freezes on one robotic point
+        double tSec = System.nanoTime() * 1.0E-9D;
+        double wanderScale = Mth.clamp(1.0D - Math.max(0.0D, edgeRatio - 0.55D) * 1.8D, 0.0D, 1.0D);
+        double wanderX = Math.sin(tSec * 2.4D) * (halfW * 0.28D) * wanderScale;
+        double wanderY = Math.cos(tSec * 1.85D + 0.9D) * (box.getYsize() * 0.10D) * wanderScale;
+        double wanderZ = Math.cos(tSec * 2.9D + 0.4D) * (halfW * 0.28D) * wanderScale;
+
+        double aimX = Mth.clamp(anchor.x + wanderX, box.minX + 0.08D, box.maxX - 0.08D);
+        double aimY = Mth.clamp(anchor.y + wanderY, box.minY + 0.12D, box.maxY - 0.08D);
+        double aimZ = Mth.clamp(anchor.z + wanderZ, box.minZ + 0.08D, box.maxZ - 0.08D);
+
+        // Keep aim point within 3.0m reach when diving directly above target
+        double maxReach = Math.min(3.0D, swingRange.getValue());
+        double distToBox = getPrecisionDistanceToTarget(client, targetEntity);
+        if (distToBox <= maxReach) {
+            Angle testAngle = MathAngle.fromTo(eyePos, new Vec3(aimX, aimY, aimZ)).adjustSensitivity();
+            if (!ActionManager.verifyStrict3mAttackRaycast(client, targetEntity, maxReach, testAngle.toVector())) {
+                aimX = Mth.clamp(ex, box.minX + 0.08D, box.maxX - 0.08D);
+                aimY = Mth.clamp(ey, box.minY + 0.12D, box.maxY - 0.08D);
+                aimZ = Mth.clamp(ez, box.minZ + 0.08D, box.maxZ - 0.08D);
+            }
+        }
+
+        Angle desiredAngle = MathAngle.fromTo(eyePos, new Vec3(aimX, aimY, aimZ)).adjustSensitivity();
+        double yawError = Mth.wrapDegrees(desiredAngle.getYaw() - currentYaw);
+        double pitchError = desiredAngle.getPitch() - currentPitch;
+        double angularDist = Math.hypot(yawError, pitchError);
+        if (angularDist < 0.04D) {
+            return;
+        }
+
+        // Nonlinear elastic restoring force: gentle inside interior, rapidly increasing pull near hitbox edge
+        double pullGain;
+        if (edgeRatio < 0.35D) {
+            pullGain = 0.09D;
+        } else if (edgeRatio < 1.0D) {
+            double u = (edgeRatio - 0.35D) / 0.65D;
+            pullGain = 0.09D + 0.86D * (u * u * Math.sqrt(u));
+        } else {
+            pullGain = 0.96D;
+        }
+
+        // Boost responsiveness slightly in the final strike zone so high-speed dive parallax can't pull it out
+        if (distToBox <= 4.5D && edgeRatio >= 0.60D) {
+            pullGain = Math.min(1.0D, pullGain * 1.25D);
+        }
+
+        double userSpeedRatio = Mth.clamp(aimSpeed.getValue() / 50.0D, 0.35D, 1.60D);
+        double smoothDamp = 1.0D - Mth.clamp(aimSmooth.getValue() / 10.0D, 0.0D, 0.70D) * 0.45D;
+        double maxDegPerTick = Mth.lerp(Mth.clamp(edgeRatio, 0.0D, 1.0D), 14.0D, 66.0D) * userSpeedRatio;
+
+        double stepFactor = Mth.clamp(pullGain * smoothDamp * tickFraction * 2.1D, 0.04D, 1.0D);
+        double stepYaw = yawError * stepFactor;
+        double stepPitch = pitchError * stepFactor;
+
+        double maxStepThisFrame = maxDegPerTick * tickFraction;
+        double stepMag = Math.hypot(stepYaw, stepPitch);
+        if (stepMag > maxStepThisFrame && stepMag > 1.0E-5D) {
+            double scale = maxStepThisFrame / stepMag;
+            stepYaw *= scale;
+            stepPitch *= scale;
+        }
+
+        if (Math.abs(stepYaw) > Math.abs(yawError)) stepYaw = yawError;
+        if (Math.abs(stepPitch) > Math.abs(pitchError)) stepPitch = pitchError;
+
+        float nextYaw = currentYaw + (float) stepYaw;
+        float nextPitch = Mth.clamp(currentPitch + (float) stepPitch, -89.5F, 89.5F);
+
+        if (gcd > 0.0D) {
+            nextYaw = currentYaw + Math.round((nextYaw - currentYaw) / gcdStep) * gcdStep;
+            nextPitch = Mth.clamp(currentPitch + Math.round((nextPitch - currentPitch) / gcdStep) * gcdStep, -89.5F, 89.5F);
+        }
+
+        client.player.setYRot(nextYaw);
+        client.player.setXRot(nextPitch);
+    }
+
     private Angle computeExactCenterAimAngle(Minecraft client, LivingEntity entity) {
         Vec3 actualEye = client.player.getEyePosition(1.0F);
         AABB box = entity.getBoundingBox();
-        Vec3 exactCenter = getExactBoundingBoxCenter(box);
+        Vec3 exactCenter = betaAimMace.getValue()
+                ? getBetaDynamicAnchor(client, entity)
+                : getExactBoundingBoxCenter(box);
 
-        // If the target hitbox is already within swingRange (<= 3.0m), verify whether the ray to exactCenter
-        // enters the hitbox within <= 3.0m; if we are steeply above the target so only their head/shoulders
-        // are within <= 3.0m, aim at the closest core point inside the hitbox so the mid-air hit never misses!
         double maxReach = Math.min(3.0D, swingRange.getValue());
         if (getPrecisionDistanceToTarget(client, entity) <= maxReach) {
             Angle centerAngle = MathAngle.fromTo(actualEye, exactCenter).adjustSensitivity();
@@ -2017,8 +2406,8 @@ public class MaceTarget extends Module {
                     transitionToSwapBackRestore(client);
                     return;
                 }
-                int maceSlot = targetMaceSlot != -1 ? targetMaceSlot : cachedMaceSlot;
-                if (maceSlot != -1 && !isMaceStack(client.player.getMainHandItem())) {
+                int maceSlot = targetMaceSlot != -1 ? targetMaceSlot : resolveMaceSlot(client);
+                if (maceSlot != -1 && client.player.getInventory().getSelectedSlot() != maceSlot) {
                     selectHotbarSlotLegit(client, maceSlot);
                 }
                 double requiredDelayMs = isInElytraOrRocketDive(client) ? 0.0D : maceSwapDelayMs.getValue();
@@ -2307,6 +2696,7 @@ public class MaceTarget extends Module {
         hitboxLocked = false;
         hitboxLockedTargetId = -1;
         lastSmoothFrameNs = 0L;
+        releaseBetaManualAimLock();
     }
 
     private void updateAirbornePeak(Minecraft client) {
@@ -2343,8 +2733,11 @@ public class MaceTarget extends Module {
         if (getPrecisionDistanceToTarget(client, target) > aimRange.getValue()) {
             return false;
         }
-        // If actively gliding with an Elytra, ONLY aim when genuinely diving toward the target (never when flying away!)
         if (client.player.isFallFlying()) {
+            // Beta rule: cancel aim whenever gliding with Elytra below 40 degrees dive angle
+            if (betaAimMace.getValue() && getPlayerDiveAngleDeg(client) < 40.0D) {
+                return false;
+            }
             return isGlidingTowardTarget(client, target);
         }
         if (isInMidOrPostUnequipSmash(client) || isInElytraOrRocketDive(client)) {
@@ -2407,7 +2800,30 @@ public class MaceTarget extends Module {
     }
 
     private int resolveMaceSlot(Minecraft client) {
-        if (cachedMaceSlot >= 0 && cachedMaceSlot <= 8 && client.player != null) {
+        if (client == null || client.player == null) {
+            return -1;
+        }
+        if (betaAimMace.getValue()) {
+            boolean needRefresh = (cachedBreachMaceSlot == -1 && cachedDensityWindMaceSlot == -1)
+                    || (cachedBreachMaceSlot >= 0 && !isMaceStack(client.player.getInventory().getItem(cachedBreachMaceSlot)))
+                    || (cachedDensityWindMaceSlot >= 0 && !isMaceStack(client.player.getInventory().getItem(cachedDensityWindMaceSlot)));
+            if (needRefresh) {
+                updateDynamicMaceCacheAt4Hz(client, true);
+            }
+            double fallDist = getEffectiveFallDistance(client);
+            if (fallDist < 3.0D) {
+                if (cachedBreachMaceSlot >= 0 && cachedBreachMaceSlot <= 8
+                        && isMaceStack(client.player.getInventory().getItem(cachedBreachMaceSlot))) {
+                    return cachedBreachMaceSlot;
+                }
+            } else {
+                if (cachedDensityWindMaceSlot >= 0 && cachedDensityWindMaceSlot <= 8
+                        && isMaceStack(client.player.getInventory().getItem(cachedDensityWindMaceSlot))) {
+                    return cachedDensityWindMaceSlot;
+                }
+            }
+        }
+        if (cachedMaceSlot >= 0 && cachedMaceSlot <= 8) {
             if (isMaceStack(client.player.getInventory().getItem(cachedMaceSlot))) {
                 return cachedMaceSlot;
             }
@@ -2545,8 +2961,18 @@ public class MaceTarget extends Module {
         lastActiveGlideDiveTick = -100;
         postUnequipSmashEndTick = -100;
         cachedMaceSlot = -1;
+        cachedBreachMaceSlot = -1;
+        cachedDensityWindMaceSlot = -1;
         cachedAxeSlot = -1;
         cachedSwordSlot = -1;
+        betaTrackedTargetId = -1;
+        betaEnemyVx = 0.0D;
+        betaEnemyVy = 0.0D;
+        betaEnemyVz = 0.0D;
+        betaLastEnemyX = Double.NaN;
+        betaLastEnemyY = Double.NaN;
+        betaLastEnemyZ = Double.NaN;
+        releaseBetaManualAimLock();
         airbornePeakY = Double.NaN;
         silentRotationActive = false;
         resetKinematicAimState();
@@ -2732,6 +3158,38 @@ public class MaceTarget extends Module {
 
             Minecraft client = Minecraft.getInstance();
             if (client.player != null && entity instanceof LivingEntity living) {
+                if (betaAimMace.getValue()) {
+                    AABB box = living.getBoundingBox();
+                    Vec3 eyePos = client.player.getEyePosition(1.0F);
+                    Vec3 anchor = getBetaDynamicAnchor(client, living);
+                    double dist = eyePos.distanceTo(anchor);
+                    Vec3 curDir = currentAngle.toVector();
+                    double projX = eyePos.x + curDir.x * dist;
+                    double projY = eyePos.y + curDir.y * dist;
+                    double projZ = eyePos.z + curDir.z * dist;
+
+                    double halfW = Math.max(0.24D, (box.maxX - box.minX) * 0.5D);
+                    double normH = Math.hypot(projX - anchor.x, projZ - anchor.z) / halfW;
+                    double normV = projY >= anchor.y
+                            ? (projY - anchor.y) / Math.max(0.22D, box.maxY - anchor.y)
+                            : (anchor.y - projY) / Math.max(0.25D, anchor.y - box.minY);
+                    double edgeRatio = Math.max(normH, normV);
+
+                    double pull = edgeRatio < 0.35D
+                            ? 0.12D
+                            : (edgeRatio < 1.0D ? (0.12D + 0.80D * Math.pow((edgeRatio - 0.35D) / 0.65D, 2.5D)) : 0.92D);
+
+                    float yawDelta = Mth.wrapDegrees((targetAngle.getYaw() + microYaw) - currentAngle.getYaw());
+                    float pitchDelta = (targetAngle.getPitch() + microPitch) - currentAngle.getPitch();
+                    double maxTickSpeed = Mth.lerp(Mth.clamp(edgeRatio, 0.0D, 1.0D), 12.0D, 42.0D);
+                    float stepYaw = (float) Mth.clamp(yawDelta * pull, -maxTickSpeed, maxTickSpeed);
+                    float stepPitch = (float) Mth.clamp(pitchDelta * pull, -maxTickSpeed, maxTickSpeed);
+                    return new Angle(
+                            currentAngle.getYaw() + stepYaw,
+                            Mth.clamp(currentAngle.getPitch() + stepPitch, -89.5F, 89.5F)
+                    ).adjustSensitivity();
+                }
+
                 if (isCrosshairInsideInner20PercentDeadzone(client, living, currentAngle)) {
                     return new Angle(
                             currentAngle.getYaw() + microYaw,
@@ -2750,11 +3208,7 @@ public class MaceTarget extends Module {
             double farRatio = Mth.clamp(angularDistance / 30.0D, 0.0D, 1.0D);
             double centerRatio = Mth.clamp(angularDistance / 18.0D, 0.12D, 1.0D);
             double decelFactor = Math.pow(centerRatio, 1.25D);
-            double maxTickSpeed = Mth.lerp(
-                    farRatio,
-                    16.0D,
-                    38.0D
-            ) * decelFactor;
+            double maxTickSpeed = Mth.lerp(farRatio, 16.0D, 38.0D) * decelFactor;
 
             float stepYaw = (float) Mth.clamp(yawDelta * 0.72D, -maxTickSpeed, maxTickSpeed);
             float stepPitch = (float) Mth.clamp(pitchDelta * 0.72D, -maxTickSpeed, maxTickSpeed);
