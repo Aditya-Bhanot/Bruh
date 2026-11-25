@@ -2420,6 +2420,10 @@ public class MaceTarget extends Module {
         if (client == null || client.player == null) {
             return false;
         }
+        // In Dynamic Intercept (Beta), wearing an inactive Elytra after flight-cancel still allows full Mace smash
+        if (ElytraTarget.isBetaDynamicInterceptEnabled()) {
+            return client.player.isFallFlying();
+        }
         return InventoryUtils.isElytraEquipped()
                 || client.player.getItemBySlot(EquipmentSlot.CHEST).is(Items.ELYTRA);
     }
