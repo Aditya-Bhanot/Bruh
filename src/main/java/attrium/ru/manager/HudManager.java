@@ -303,7 +303,7 @@ public final class HudManager {
         int barH = 26;
         int barX = (screenW - barW) / 2;
         int barY = 10;
-        drawGlassCard(guiGraphics, barX, barY, barW, barH, 10, 0xE6111318, 1.0F);
+        drawRoundedRect(guiGraphics, barX, barY, barW, barH, 10, 0xE6111318);
         guiGraphics.drawString(font, layoutBannerComp, barX + 12, barY + 9, 0xFFFFFFFF, false);
 
         int doneW = 42;
@@ -408,66 +408,6 @@ public final class HudManager {
             snapGuideYPos = screenH - 8;
         }
 
-        // Sibling HUD magnetic snapping (edges, 6px spacing, and centers)
-        for (int i = 0; i < CACHED_HUD_MODULES.size(); i++) {
-            HudModule other = CACHED_HUD_MODULES.get(i);
-            if (other == null || other == m || !other.isEnabled() || other.lastBoxW <= 0 || other.lastBoxH <= 0) {
-                continue;
-            }
-            float oL = other.lastBoxX;
-            float oR = other.lastBoxX + other.lastBoxW;
-            float oCX = oL + other.lastBoxW * 0.5F;
-            float oT = other.lastBoxY;
-            float oB = other.lastBoxY + other.lastBoxH;
-            float oCY = oT + other.lastBoxH * 0.5F;
-            if (!snapGuideXActive) {
-                if (Math.abs(rawX - oL) <= snapDist) {
-                    rawX = oL;
-                    snapGuideXActive = true;
-                    snapGuideXPos = Math.round(oL);
-                } else if (Math.abs((rawX + bw) - oR) <= snapDist) {
-                    rawX = oR - bw;
-                    snapGuideXActive = true;
-                    snapGuideXPos = Math.round(oR);
-                } else if (Math.abs(rawX - (oR + 6.0F)) <= snapDist) {
-                    rawX = oR + 6.0F;
-                    snapGuideXActive = true;
-                    snapGuideXPos = Math.round(oR);
-                } else if (Math.abs((rawX + bw) - (oL - 6.0F)) <= snapDist) {
-                    rawX = oL - 6.0F - bw;
-                    snapGuideXActive = true;
-                    snapGuideXPos = Math.round(oL);
-                } else if (Math.abs((rawX + bw * 0.5F) - oCX) <= snapDist) {
-                    rawX = oCX - bw * 0.5F;
-                    snapGuideXActive = true;
-                    snapGuideXPos = Math.round(oCX);
-                }
-            }
-            if (!snapGuideYActive) {
-                if (Math.abs(rawY - oT) <= snapDist) {
-                    rawY = oT;
-                    snapGuideYActive = true;
-                    snapGuideYPos = Math.round(oT);
-                } else if (Math.abs((rawY + bh) - oB) <= snapDist) {
-                    rawY = oB - bh;
-                    snapGuideYActive = true;
-                    snapGuideYPos = Math.round(oB);
-                } else if (Math.abs(rawY - (oB + 6.0F)) <= snapDist) {
-                    rawY = oB + 6.0F;
-                    snapGuideYActive = true;
-                    snapGuideYPos = Math.round(oB);
-                } else if (Math.abs((rawY + bh) - (oT - 6.0F)) <= snapDist) {
-                    rawY = oT - 6.0F - bh;
-                    snapGuideYActive = true;
-                    snapGuideYPos = Math.round(oT);
-                } else if (Math.abs((rawY + bh * 0.5F) - oCY) <= snapDist) {
-                    rawY = oCY - bh * 0.5F;
-                    snapGuideYActive = true;
-                    snapGuideYPos = Math.round(oCY);
-                }
-            }
-        }
-
         boolean rightAnchor = m.usesRightAnchorWhenOnRightHalf() && (rawX + bw * 0.5F >= screenW * 0.5F);
         boolean bottomAnchor = m.usesBottomAnchorWhenOnBottomHalf() && (rawY + bh * 0.5F >= screenH * 0.5F);
 
@@ -532,19 +472,17 @@ public final class HudManager {
         guiGraphics.fill(x + 9, y + size - 8, x + size - 9, y + size - 6, 0xCCFFFFFF);
     }
 
-
-    public static void drawGlassCard(GuiGraphics guiGraphics, int x, int y, int w, int h,
-                                     int radius, int bgColor, float alpha) {
-        float clamped = Math.max(0.0F, Math.min(1.0F, alpha));
-        int rimAlpha = Math.max(0, Math.min(255, Math.round(0x22 * clamped)));
-        if (rimAlpha > 2) {
-            drawRoundedRect(guiGraphics, x - 1, y - 1, w + 2, h + 2, radius + 1, (rimAlpha << 24) | 0xFFFFFF);
+    public static void drawGlassCard(GuiGraphics g, int x, int y, int w, int h, int radius, int bgColor, float alpha) {
+        if (g == null || w <= 0 || h <= 0 || alpha <= 0.01F) {
+            return;
         }
-        drawRoundedRect(guiGraphics, x, y, w, h, radius, bgColor);
-        int hiAlpha = Math.max(0, Math.min(255, Math.round(0x2A * clamped)));
-        int inset = Math.max(2, radius);
-        if (hiAlpha > 2 && w > inset * 2) {
-            guiGraphics.fill(x + inset, y, x + w - inset, y + 1, (hiAlpha << 24) | 0xFFFFFF);
+        int r = Mth.clamp(radius, 0, MAX_RADIUS);
+        drawRoundedRect(g, x - 1, y - 1, w + 2, h + 2, Math.min(MAX_RADIUS, r + 1),
+                AnimationUtil.withAlpha(0x30FFFFFF, alpha));
+        drawRoundedRect(g, x, y, w, h, r, AnimationUtil.withAlpha(bgColor, alpha));
+        if (h >= 8 && w >= 6) {
+            drawRoundedRect(g, x + 1, y + 1, w - 2, h / 2, Math.max(0, r - 1),
+                    AnimationUtil.withAlpha(0x12FFFFFF, alpha));
         }
     }
 
@@ -655,8 +593,9 @@ public final class HudManager {
         if (stylesReady) return;
         stylesReady = true;
         Style reg = GlassClickGuiScreen.getNunitoRegularStyle();
+        Style bold = GlassClickGuiScreen.getNunitoBoldStyle();
         hudRegularStyle = reg != null ? reg.withBold(false) : Style.EMPTY.withBold(false);
-        hudBoldStyle = hudRegularStyle.withBold(true);
+        hudBoldStyle = bold != null ? bold.withBold(false) : hudRegularStyle;
 
         iconCheckComp = Component.literal("+").withStyle(hudBoldStyle);
         iconCrossComp = Component.literal("x").withStyle(hudBoldStyle);

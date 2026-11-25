@@ -574,7 +574,7 @@ public class GlassClickGuiScreen extends Screen {
 
     public static Style getNunitoBoldStyle() {
         initIsolatedNunitoStylesOnce();
-        return nunitoRegularStyle;
+        return nunitoBoldStyle != null ? nunitoBoldStyle : nunitoRegularStyle;
     }
 
     public boolean isHudTabActive() {
@@ -615,13 +615,27 @@ public class GlassClickGuiScreen extends Screen {
             return;
         }
         nunitoStylesInitialized = true;
+        boolean hasInterMedium = GlassClickGuiScreen.class.getResource("/assets/attrium/font/inter_medium.json") != null
+                && GlassClickGuiScreen.class.getResource("/assets/attrium/font/inter_medium.otf") != null;
+        boolean hasInterSemiBold = GlassClickGuiScreen.class.getResource("/assets/attrium/font/inter_semibold.json") != null
+                && GlassClickGuiScreen.class.getResource("/assets/attrium/font/inter_semibold.otf") != null;
+        if (hasInterMedium) {
+            Style resolvedMed = loadIsolatedFontStyle("attrium", "inter_medium");
+            nunitoRegularStyle = resolvedMed != null ? resolvedMed.withBold(false) : Style.EMPTY.withBold(false);
+            if (hasInterSemiBold) {
+                Style resolvedSemi = loadIsolatedFontStyle("attrium", "inter_semibold");
+                nunitoBoldStyle = resolvedSemi != null ? resolvedSemi.withBold(false) : nunitoRegularStyle;
+            } else {
+                nunitoBoldStyle = nunitoRegularStyle;
+            }
+            return;
+        }
         boolean hasNunitoAssets = GlassClickGuiScreen.class.getResource("/assets/attrium/font/nunito_regular.json") != null
                 && GlassClickGuiScreen.class.getResource("/assets/attrium/font/nunito_regular.ttf") != null;
         if (hasNunitoAssets) {
             Style resolvedRegular = loadIsolatedFontStyle("attrium", "nunito_regular");
             nunitoRegularStyle = resolvedRegular != null ? resolvedRegular.withBold(false) : Style.EMPTY.withBold(false);
         } else {
-            // Safe fallback to vanilla Minecraft default font so text is NEVER invisible when nunito_regular.ttf is absent
             nunitoRegularStyle = Style.EMPTY.withBold(false);
         }
         nunitoBoldStyle = nunitoRegularStyle;

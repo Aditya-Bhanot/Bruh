@@ -1,0 +1,11 @@
+{
+  "providers": [
+    {
+      "type": "ttf",
+      "file": "attrium:inter_medium.otf",
+      "shift": [0.0, 0.5],
+      "size": 10.5,
+      "oversample": 4.0
+    }
+  ]
+}
