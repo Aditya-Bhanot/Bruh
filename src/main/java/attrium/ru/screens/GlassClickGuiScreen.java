@@ -1,7 +1,5 @@
 package attrium.ru.screens;
 
-
-import attrium.ru.manager.AutoUpdater;
 import com.mojang.blaze3d.platform.InputConstants;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.KeyMapping;
@@ -29,6 +27,7 @@ import org.lwjgl.glfw.GLFWKeyCallback;
 import net.minecraft.client.gui.components.PlayerFaceRenderer;
 import net.minecraft.client.multiplayer.PlayerInfo;
 import attrium.ru.api.module.Module;
+import attrium.ru.manager.FreelookManager;
 import attrium.ru.manager.FriendManager;
 import attrium.ru.api.module.impl.visual.HudModule;
 import attrium.ru.manager.CleanStateManager;
@@ -65,11 +64,6 @@ import java.util.Locale;
  * Type-Safe Keybinds, World-Join Null Guards, and Tactile UI Volume Mixer.
  */
 public class GlassClickGuiScreen extends Screen {
-    private float updCheckHoverAnim = 0.0F;
-    private float updRestartHoverAnim = 0.0F;
-    private float updChangelogRevealAnim = 0.0F;
-    private float updPulsePhase = 0.0F;
-
     private static GlassClickGuiScreen instance;
 
     // =========================================================================
@@ -199,6 +193,7 @@ public class GlassClickGuiScreen extends Screen {
     private volatile boolean pendingRightClickFromCallback = false;
     private static final Gson CONFIG_GSON = new GsonBuilder().setPrettyPrinting().create();
     private static volatile boolean configLoadedOnce = false;
+    private static volatile boolean shutdownHookRegistered = false;
     private static final java.util.Map<String, Integer> PERSISTENT_MODULE_BINDS = new java.util.concurrent.ConcurrentHashMap<>();
     private char lastKeyAppendedChar = 0;
     private long lastKeyAppendTimeNs = 0L;
@@ -501,6 +496,25 @@ public class GlassClickGuiScreen extends Screen {
             instance = new GlassClickGuiScreen();
         }
         return instance;
+    }
+
+    private static void ensureShutdownHookRegistered() {
+        if (shutdownHookRegistered) {
+            return;
+        }
+        shutdownHookRegistered = true;
+        try {
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                try {
+                    GlassClickGuiScreen g = instance;
+                    if (g != null && g.allModuleRows != null && g.allModuleRows.length > 0) {
+                        g.saveConfigNow();
+                    }
+                } catch (Throwable ignored) {
+                }
+            }, "Attrium-Config-Save"));
+        } catch (Throwable ignored) {
+        }
     }
 
     public static void openClickGuiFromBind(Minecraft mc) {
@@ -830,7 +844,10 @@ public class GlassClickGuiScreen extends Screen {
             }
             // Allow AutoLunge to restore previousSlot if a GUI screen was opened while holding the bind
             wasClickGuiKeyDownInGame = true;
-// [Post-flag fix: moved to START_CLIENT_TICK]             LungeHelper.tickMacroGlobal(mc, LungeHelper.getMacroBoundKey());
+            if (FreelookManager.isFreelooking() && FreelookManager.isHoldMode()) {
+                FreelookManager.deactivate(mc);
+            }
+            LungeHelper.tickMacroGlobal(mc, LungeHelper.getMacroBoundKey());
             return;
         }
 
@@ -872,7 +889,7 @@ public class GlassClickGuiScreen extends Screen {
                     invokeStaticMacroTick(row.module, mc, key);
                 } else {
                     lungeRowHandled = true;
-// [Post-flag fix: moved to START_CLIENT_TICK]                     LungeHelper.tickMacroGlobal(mc, key);
+                    LungeHelper.tickMacroGlobal(mc, key);
                 }
                 continue;
             }
@@ -897,17 +914,27 @@ public class GlassClickGuiScreen extends Screen {
                         || GLFW.glfwGetKey(windowHandle, key) == GLFW.GLFW_PRESS);
             }
 
+            if (row.name != null && row.name.equalsIgnoreCase("Freelook") && FreelookManager.isHoldMode()) {
+                if (isDown && !row.module.isEnabled()) {
+                    row.module.setEnabled(true);
+                } else if (!isDown && row.module.isEnabled()) {
+                    row.module.setEnabled(false);
+                }
+                row.wasKeyDownInGame = isDown;
+                continue;
+            }
             if (isDown && !row.wasKeyDownInGame) {
                 if (nowMs - row.lastBindTriggerMs > 60L) {
                     row.lastBindTriggerMs = nowMs;
                     row.module.toggle();
+                    gui.saveConfigNow();
                 }
             }
             row.wasKeyDownInGame = isDown;
         }
 
         if (!lungeRowHandled) {
-// [Post-flag fix: moved to START_CLIENT_TICK]             LungeHelper.tickMacroGlobal(mc, LungeHelper.getMacroBoundKey());
+            LungeHelper.tickMacroGlobal(mc, LungeHelper.getMacroBoundKey());
         }
 
         int fKey = FriendManager.getFriendBindKey();
@@ -966,10 +993,18 @@ public class GlassClickGuiScreen extends Screen {
             }
             int bound = resolveEffectiveBindKey(row);
             if (bound == key) {
+                if (row.name != null && row.name.equalsIgnoreCase("Freelook") && FreelookManager.isHoldMode()) {
+                    if (!row.module.isEnabled()) {
+                        row.module.setEnabled(true);
+                    }
+                    row.wasKeyDownInGame = true;
+                    continue;
+                }
                 row.wasKeyDownInGame = true;
                 if (nowMs - row.lastBindTriggerMs > 60L) {
                     row.lastBindTriggerMs = nowMs;
                     row.module.toggle();
+                    saveConfigNow();
                 }
             }
         }
@@ -4431,8 +4466,14 @@ public class GlassClickGuiScreen extends Screen {
                 }
                 if (!isActionMacroRow(row) && mObj.has("enabled") && mObj.get("enabled").isJsonPrimitive()) {
                     boolean wantEnabled = mObj.get("enabled").getAsBoolean();
-                    if (row.module.isEnabled() != wantEnabled) {
-                        row.module.toggle();
+                    if ("Freelook".equalsIgnoreCase(row.name) && FreelookManager.isHoldMode()) {
+                        wantEnabled = false;
+                    }
+                    try {
+                        if (row.module.isEnabled() != wantEnabled) {
+                            row.module.setEnabled(wantEnabled);
+                        }
+                    } catch (Throwable ignored) {
                     }
                 }
                 if (mObj.has("settings") && mObj.get("settings").isJsonObject()) {
@@ -4606,6 +4647,7 @@ public class GlassClickGuiScreen extends Screen {
     }
 
     public void loadConfigIfPresent() {
+        ensureShutdownHookRegistered();
         if (configLoadedOnce || allModuleRows == null || allModuleRows.length == 0) {
             return;
         }
@@ -4975,7 +5017,7 @@ public class GlassClickGuiScreen extends Screen {
         float p0 = computeBentoCardProgress(0);
         int y0 = bentoTop + Math.round(12.0F * (1.0F - p0));
         int bg0 = ClientThemeManager.getBentoCardBgColor(p0);
-        HudManager.drawGlassCard(guiGraphics, leftCardX, y0, fullW, bannerH, 12, bg0, p0);
+        HudManager.drawRoundedRect(guiGraphics, leftCardX, y0, fullW, bannerH, 12, bg0);
 
         if (p0 > 0.05F) {
             // Left: 34x34 rounded player avatar + 7px glowing online status dot
@@ -5021,12 +5063,22 @@ public class GlassClickGuiScreen extends Screen {
             int btnY = y0 + (bannerH - btnH) / 2;
             int resetW = 74;
             int folderW = 72;
+            int cleanW = 74;
             int resetX = leftCardX + fullW - resetW - 10;
             int folderX = resetX - folderW - 6;
+            int cleanX = folderX - cleanW - 6;
 
+            boolean hoverClean = isHovered(mouseX, mouseY, cleanX, btnY, cleanW, btnH);
             boolean hoverFolder = isHovered(mouseX, mouseY, folderX, btnY, folderW, btnH);
             boolean hoverReset = isHovered(mouseX, mouseY, resetX, btnY, resetW, btnH);
 
+            HudManager.drawRoundedRect(guiGraphics, cleanX, btnY, cleanW, btnH, 8,
+                    multiplyAlpha(hoverClean ? 0x55EF4444 : 0x33EF4444, p0));
+            int cw = this.font.width(bentoCleanStateComp);
+            if ((whiteCol >>> 24) > 8) {
+                guiGraphics.drawString(this.font, bentoCleanStateComp, cleanX + (cleanW - cw) / 2, btnY + 9,
+                        multiplyAlpha(hoverClean ? 0xFFFF6B6B : 0xFFEF4444, p0), false);
+            }
 
             HudManager.drawRoundedRect(guiGraphics, folderX, btnY, folderW, btnH, 8,
                     multiplyAlpha(hoverFolder ? 0x38FFFFFF : 0x20FFFFFF, p0));
@@ -5041,42 +5093,6 @@ public class GlassClickGuiScreen extends Screen {
             if ((whiteCol >>> 24) > 8) {
                 guiGraphics.drawString(this.font, bentoResetLayoutComp, resetX + (resetW - rw) / 2, btnY + 9, multiplyAlpha(accent, p0), false);
             }
-            // === ATTRIUM_UPDATER_RENDER_START ===
-            float updStep = Math.min(1.0F, Math.max(0.05F, dt * 14.0F));
-            updPulsePhase += dt * 3.8F;
-            boolean updReady = AutoUpdater.updateReady;
-            String updStatus = AutoUpdater.getStatusText();
-            String checkText = AutoUpdater.isChecking() ? updStatus : "Updates";
-            Component checkComp = Component.literal(checkText).withStyle(nunitoRegularStyle);
-            int checkW = Math.max(66, this.font.width(checkComp) + 14);
-            int checkX = folderX - checkW - 8;
-            boolean hoverCheck = isHovered(mouseX, mouseY, checkX, btnY, checkW, btnH);
-            updCheckHoverAnim = Mth.lerp(updStep, updCheckHoverAnim, hoverCheck ? 1.0F : 0.0F);
-            int checkBg = multiplyAlpha(lerpColor(0x24FFFFFF, 0x4800E5FF, updCheckHoverAnim), p0);
-            int checkFg = multiplyAlpha(lerpColor(0xFFFFFFFF, 0xFF00E5FF, updCheckHoverAnim * 0.85F), p0);
-            HudManager.drawRoundedRect(guiGraphics, checkX, btnY, checkW, btnH, 8, checkBg);
-            int cw = this.font.width(checkComp);
-            if ((whiteCol >>> 24) > 8) {
-                guiGraphics.drawString(this.font, checkComp, checkX + (checkW - cw) / 2, btnY + 9, checkFg, false);
-            }
-            boolean showPopup = updReady || (hoverCheck && !AutoUpdater.getChangelogLines().isEmpty());
-            updChangelogRevealAnim = Mth.lerp(updStep, updChangelogRevealAnim, showPopup ? 1.0F : 0.0F);
-            if (updReady) {
-                Component restartComp = Component.literal("Restart").withStyle(nunitoRegularStyle);
-                int restartW = Math.max(62, this.font.width(restartComp) + 14);
-                int restartX = checkX - restartW - 8;
-                boolean hoverRestart = isHovered(mouseX, mouseY, restartX, btnY, restartW, btnH);
-                updRestartHoverAnim = Mth.lerp(updStep, updRestartHoverAnim, hoverRestart ? 1.0F : 0.0F);
-                float pulse = 0.5F + 0.5F * (float) Math.sin(updPulsePhase);
-                int baseGlow = lerpColor(0x3400E5FF, 0x6200E5FF, Math.max(pulse * 0.65F, updRestartHoverAnim));
-                HudManager.drawRoundedRect(guiGraphics, restartX, btnY, restartW, btnH, 8, multiplyAlpha(baseGlow, p0));
-                int rsw = this.font.width(restartComp);
-                if ((whiteCol >>> 24) > 8) {
-                    guiGraphics.drawString(this.font, restartComp, restartX + (restartW - rsw) / 2, btnY + 9, multiplyAlpha(0xFF00E5FF, p0), false);
-                }
-            }
-            // === ATTRIUM_UPDATER_RENDER_END ===
-
         }
 
         // ---------------------------------------------------------------------
@@ -5084,7 +5100,8 @@ public class GlassClickGuiScreen extends Screen {
         // ---------------------------------------------------------------------
         float p1 = computeBentoCardProgress(1);
         int y1 = bottomYBase + Math.round(12.0F * (1.0F - p1));
-        HudManager.drawGlassCard(guiGraphics, leftCardX, y1, leftCardW, bottomH, 12, ClientThemeManager.getBentoCardBgColor(p1), p1);
+        HudManager.drawRoundedRect(guiGraphics, leftCardX, y1, leftCardW, bottomH, 12,
+                ClientThemeManager.getBentoCardBgColor(p1));
 
         if (p1 > 0.05F) {
             int pad = 14;
@@ -5152,7 +5169,8 @@ public class GlassClickGuiScreen extends Screen {
         // ---------------------------------------------------------------------
         float p2 = computeBentoCardProgress(2);
         int y2 = bottomYBase + Math.round(12.0F * (1.0F - p2));
-        HudManager.drawGlassCard(guiGraphics, rightCardX, y2, rightCardW, bottomH, 12, ClientThemeManager.getBentoCardBgColor(p2), p2);
+        HudManager.drawRoundedRect(guiGraphics, rightCardX, y2, rightCardW, bottomH, 12,
+                ClientThemeManager.getBentoCardBgColor(p2));
 
         if (p2 > 0.05F) {
             int pad = 14;
@@ -5268,32 +5286,6 @@ public class GlassClickGuiScreen extends Screen {
                 guiGraphics.drawString(this.font, bentoFloatSizeValComp, cx + innerW - flValW, flSizeY, mutedCol, false);
             }
         }
-    
-        // === ATTRIUM_UPDATER_OVERLAY_START ===
-        // Top z-order "What's New" popup (shows when update is ready OR when hovering Updates pill)
-        if (updChangelogRevealAnim > 0.04F) {
-            java.util.List<String> changes = AutoUpdater.getChangelogLines();
-            int lineCount = Math.min(4, changes.size());
-            int cardH = 24 + Math.max(1, lineCount) * 11;
-            int cardW = Math.min(fullW, 310);
-            int cardX = leftCardX + fullW - cardW;
-            int cardY = y0 + bannerH + 6 - Math.round(6.0F * (1.0F - updChangelogRevealAnim));
-            float ca = p0 * updChangelogRevealAnim;
-            HudManager.drawRoundedRect(guiGraphics, cardX - 1, cardY - 1, cardW + 2, cardH + 2, 11, multiplyAlpha(0x8800E5FF, ca));
-            HudManager.drawRoundedRect(guiGraphics, cardX, cardY, cardW, cardH, 10, multiplyAlpha(0xF510141F, ca));
-            String titleStr = AutoUpdater.updateReady
-                    ? "What's New in v" + AutoUpdater.getLatestVersion() + " (Restart to apply)"
-                    : "Attrium v" + AutoUpdater.getLatestVersion() + " — " + AutoUpdater.getStatusText();
-            Component hdr = Component.literal(titleStr).withStyle(nunitoRegularStyle);
-            if (((int) (255 * ca)) > 10) {
-                guiGraphics.drawString(this.font, hdr, cardX + 10, cardY + 7, multiplyAlpha(0xFF00E5FF, ca), false);
-                for (int ci = 0; ci < lineCount; ci++) {
-                    Component lineComp = Component.literal("• " + changes.get(ci)).withStyle(nunitoRegularStyle);
-                    guiGraphics.drawString(this.font, lineComp, cardX + 10, cardY + 20 + ci * 11, multiplyAlpha(0xFFE5E7EB, ca), false);
-                }
-            }
-        }
-        // === ATTRIUM_UPDATER_OVERLAY_END ===
     }
 
     private void drawElasticPillImmediate(GuiGraphics guiGraphics, int x, int y, int w, int h, float anim, float alpha) {
@@ -5326,8 +5318,14 @@ public class GlassClickGuiScreen extends Screen {
         int btnY = bentoTop + (bannerH - btnH) / 2;
         int resetW = 74;
         int folderW = 72;
+        int cleanW = 74;
         int resetX = leftCardX + fullW - resetW - 10;
         int folderX = resetX - folderW - 6;
+        int cleanX = folderX - cleanW - 6;
+        if (isHovered(mouseX, mouseY, cleanX, btnY, cleanW, btnH)) {
+            CleanStateManager.activateCleanState();
+            return;
+        }
         if (isHovered(mouseX, mouseY, folderX, btnY, folderW, btnH)) {
             ClientThemeManager.openConfigFolder();
             SoundUtil.playClick();
@@ -5339,26 +5337,6 @@ public class GlassClickGuiScreen extends Screen {
             SoundUtil.playTogglePop(true);
             return;
         }
-        // === ATTRIUM_UPDATER_CLICK_START ===
-        String checkTextClick = AutoUpdater.isChecking() ? AutoUpdater.getStatusText() : "Updates";
-        int checkW = Math.max(66, this.font.width(Component.literal(checkTextClick).withStyle(nunitoRegularStyle)) + 14);
-        int checkX = folderX - checkW - 8;
-        if (isHovered(mouseX, mouseY, checkX, btnY, checkW, btnH)) {
-            AutoUpdater.checkForUpdatesAsync(true);
-            SoundUtil.playClick();
-            return;
-        }
-        if (AutoUpdater.updateReady) {
-            int restartW = Math.max(62, this.font.width(Component.literal("Restart").withStyle(nunitoRegularStyle)) + 14);
-            int restartX = checkX - restartW - 8;
-            if (isHovered(mouseX, mouseY, restartX, btnY, restartW, btnH)) {
-                SoundUtil.playClick();
-                AutoUpdater.restartToApply();
-                return;
-            }
-        }
-        // === ATTRIUM_UPDATER_CLICK_END ===
-
 
         // Bottom-Left Card (Appearance)
         int lcx = leftCardX + pad;

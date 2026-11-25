@@ -3,7 +3,7 @@
   "id": "attrium",
   "version": "${version}",
   "name": "BBE",
-  "description": "Optimise and customize block entity rendering with a more modern approch",
+  "description": "Optimize and customize block entity rendering with a more modern approch.",
   "authors": [
     "Attitude-Wings"
   ],

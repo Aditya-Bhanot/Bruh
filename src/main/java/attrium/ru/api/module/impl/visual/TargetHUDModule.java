@@ -87,8 +87,8 @@ public class TargetHUDModule extends HudModule {
 
     private final NumberSetting holdDuration = register(new NumberSetting(
             "Hold Duration",
-            "Seconds TargetHUD stays visible after combat ends (0.5 - 3.0s).",
-            1.5D, 0.5D, 3.0D, 0.25D
+            "Seconds TargetHUD stays visible after combat ends (0.5 - 10.0s).",
+            1.5D, 0.5D, 10.0D, 0.25D
     ));
 
     // Zero-allocation persistent animation & string cache state
@@ -152,7 +152,7 @@ public class TargetHUDModule extends HudModule {
 
         Player candidate = resolveTarget(mc, isPreview);
         long nowMs = System.currentTimeMillis();
-        long holdMs = Math.round(Mth.clamp(holdDuration.getValue().floatValue(), 0.5F, 3.0F) * 1000.0F);
+        long holdMs = Math.round(Mth.clamp(holdDuration.getValue().floatValue(), 0.5F, 10.0F) * 1000.0F);
 
         if (candidate != null) {
             trackedTarget = candidate;

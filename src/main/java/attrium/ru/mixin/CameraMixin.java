@@ -23,7 +23,7 @@ public abstract class CameraMixin {
 
     @ModifyExpressionValue(method = "setup", at = @At(value = "INVOKE", target = "Lnet/minecraft/world/entity/Entity;getViewYRot(F)F"))
     private float attrium$freeLookYaw(float original) {
-        Angle angle = FreeLook.getActiveAngle();
+        Angle angle = null;
         if (angle != null) {
             return angle.getYaw();
         }
@@ -34,7 +34,7 @@ public abstract class CameraMixin {
 
     @ModifyExpressionValue(method = "setup", at = @At(value = "INVOKE", target = "Lnet/minecraft/world/entity/Entity;getViewXRot(F)F"))
     private float attrium$freeLookPitch(float original) {
-        Angle angle = FreeLook.getActiveAngle();
+        Angle angle = null;
         if (angle != null) {
             return angle.getPitch();
         }

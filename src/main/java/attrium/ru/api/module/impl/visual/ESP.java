@@ -61,9 +61,9 @@ import java.util.regex.Pattern;
 public class ESP extends Module {
     private static ESP instance;
 
-    // Hardcoded Friend Priority Override Color: Bright Ally Cyan (0x00FFCC -> R=0, G=255, B=204, A=255)
-    public static final int FRIEND_PRIORITY_BRIGHT_GREEN_RGBA = ColorUtil.rgba(0, 255, 204, 255);
-    public static final int FRIEND_PRIORITY_BRIGHT_GREEN_RGB = 0x00FFCC;
+    // Hardcoded Friend Priority Override Color: Bright Ally Cyan (0x86EFAC -> R=0, G=255, B=204, A=255)
+    public static final int FRIEND_PRIORITY_BRIGHT_GREEN_RGBA = ColorUtil.rgba(134, 239, 172, 255);
+    public static final int FRIEND_PRIORITY_BRIGHT_GREEN_RGB = 0x86EFAC;
 
     // Translucent 2D Box Inner Fill Alpha (~25% Opacity = 0x40)
     public static final int BOX_INNER_FILL_ALPHA = 0x40;
@@ -167,7 +167,7 @@ public class ESP extends Module {
     private final NumberSetting glowIntensity = register(new NumberSetting(
             "Glow Intensity",
             "Adjusts the opacity and brightness multiplier of the native Glow effect (0.1 - 1.0).",
-            1.0D, 0.1D, 1.0D, 0.05D
+            1.0D, 0.05D, 1.0D, 0.05D
     ));
 
     private final NumberSetting lineThickness = register(new NumberSetting(
@@ -195,7 +195,13 @@ public class ESP extends Module {
             true
     ));
 
-    // =========================================================================
+        private final BooleanSetting tracers = register(new BooleanSetting(
+            "Tracers",
+            "Draws 2D tracer lines from screen center to visible ESP targets.",
+            false
+    ));
+
+// =========================================================================
     // Zero-Allocation 10Hz Target Pool State
     // =========================================================================
     private PooledEspEntry[] entityPool = null;
@@ -624,7 +630,17 @@ public class ESP extends Module {
             }
 
             int argbColor = esp.resolveEntityColorARGB(entity, entry.isFriend);
-            draw2DBoxWithTranslucentFill(graphics, x1, y1, x2, y2, thickness, argbColor);
+            ESP _esp = getInstance();
+            if (_esp == null || "2D Box".equalsIgnoreCase(_esp.mode.getValue())) {
+                draw2DBoxWithTranslucentFill(graphics, x1, y1, x2, y2, thickness, argbColor);
+            }
+            if (_esp != null && Boolean.TRUE.equals(_esp.tracers.getValue())) {
+                int cx = graphics.guiWidth() / 2;
+                int cy = graphics.guiHeight() / 2;
+                int tx = Math.round((x1 + x2) * 0.5F);
+                int ty = Math.round(y2);
+                drawTracerLine(graphics, cx, cy, tx, ty, argbColor);
+            }
         }
     }
 
@@ -911,4 +927,26 @@ public class ESP extends Module {
         float baseHealth = (cached != null && cached > 0.0F) ? cached : entity.getHealth();
         return includeAbsorption ? (baseHealth + entity.getAbsorptionAmount()) : baseHealth;
     }
+
+    private static void drawTracerLine(GuiGraphics guiGraphics, int x0, int y0, int x1, int y1, int color) {
+        if ((color >>> 24) <= 6) {
+            return;
+        }
+        int dx = Math.abs(x1 - x0);
+        int dy = Math.abs(y1 - y0);
+        int steps = Math.max(dx, dy);
+        if (steps <= 0) {
+            return;
+        }
+        // Cap step count on huge offscreen coordinates to stay fast on mobile GPUs
+        int stride = steps > 420 ? (steps / 420) : 1;
+        float sx = (x1 - x0) / (float) steps;
+        float sy = (y1 - y0) / (float) steps;
+        for (int i = 0; i <= steps; i += stride) {
+            int px = Math.round(x0 + sx * i);
+            int py = Math.round(y0 + sy * i);
+            guiGraphics.fill(px, py, px + 1, py + 1, color);
+        }
+    }
+
 }

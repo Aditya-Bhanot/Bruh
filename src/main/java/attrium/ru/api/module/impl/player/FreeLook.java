@@ -1,100 +1,71 @@
 package attrium.ru.api.module.impl.player;
 
-import net.minecraft.client.CameraType;
 import net.minecraft.client.Minecraft;
-import net.minecraft.util.Mth;
-import org.lwjgl.glfw.GLFW;
-import attrium.ru.api.events.annotation.SubscribeEvent;
-import attrium.ru.api.events.impl.CameraEvent;
-import attrium.ru.api.events.impl.MouseRotationEvent;
 import attrium.ru.api.module.Module;
 import attrium.ru.api.module.ModuleCategory;
-import attrium.ru.api.module.impl.combat.aura.Angle;
-import attrium.ru.api.module.impl.combat.aura.MathAngle;
-import attrium.ru.api.settings.bind.KeyBind;
-import attrium.ru.api.settings.impl.BindSetting;
+import attrium.ru.api.settings.impl.BooleanSetting;
+import attrium.ru.api.settings.impl.ModeSetting;
+import attrium.ru.api.settings.impl.NumberSetting;
+import attrium.ru.manager.FreelookManager;
 
-public final class FreeLook extends Module {
-    public static final BindSetting FREE_LOOK_BIND = new BindSetting("Free Look", "Free look key.", KeyBind.keyboard(GLFW.GLFW_KEY_LEFT_ALT));
-    private static FreeLook instance;
-    private CameraType perspective;
-    private Angle angle;
+/**
+ * 100% Legit Freelook Module (Minecraft 1.21.11 Official Mojang Mappings).
+ * Supports Hold-to-Freelook (default) and Toggle-on-Bind modes with zero server packet changes.
+ */
+public class FreeLook extends Module {
+    private static volatile FreeLook instance;
+
+    private final ModeSetting activationMode = register(new ModeSetting(
+            "Mode",
+            "Hold activates Freelook while holding the bound key; Toggle switches ON/OFF.",
+            "Hold",
+            "Hold", "Toggle"
+    ));
+
+    private final BooleanSetting autoThirdPerson = register(new BooleanSetting(
+            "Auto Third Person",
+            "Automatically switches to third-person back view while Freelook is active.",
+            true
+    ));
+
+    private final BooleanSetting invertPitch = register(new BooleanSetting(
+            "Invert Pitch",
+            "Inverts vertical camera look while orbiting.",
+            false
+    ));
+
+    private final NumberSetting sensitivity = register(new NumberSetting(
+            "Sensitivity",
+            "Camera orbit sensitivity multiplier (0.25 - 2.0).",
+            1.00D, 0.25D, 2.00D, 0.05D
+    ));
 
     public FreeLook() {
-        super("Free Look", "Free camera look while holding bind.", ModuleCategory.PLAYER);
+        super("Freelook", "Orbits camera freely without altering movement or rotations", ModuleCategory.VISUAL);
         instance = this;
-        register(FREE_LOOK_BIND);
+        syncSettingsToManager();
     }
 
-    public static Angle getActiveAngle() {
-        FreeLook freeLook = instance;
-        Minecraft client = Minecraft.getInstance();
-        if (freeLook == null || !freeLook.isEnabled() || !freeLook.isBindDown(client)) {
-            return null;
-        }
-        freeLook.handleFreeLookActivation(client);
-        return freeLook.angle;
+    public static FreeLook getInstance() {
+        return instance;
+    }
+
+    private void syncSettingsToManager() {
+        FreelookManager.setHoldMode("Hold".equalsIgnoreCase(activationMode.getValue()));
+        FreelookManager.setAutoThirdPerson(Boolean.TRUE.equals(autoThirdPerson.getValue()));
+        FreelookManager.setInvertPitch(Boolean.TRUE.equals(invertPitch.getValue()));
+        FreelookManager.setSensitivity(sensitivity.getValue().floatValue());
+    }
+
+    @Override
+    protected void onEnable() {
+        syncSettingsToManager();
+        FreelookManager.activate(Minecraft.getInstance());
     }
 
     @Override
     protected void onDisable() {
-        handleFreeLookDeactivation();
-    }
-
-    @Override
-    public void onTick(Minecraft client) {
-        if (isBindDown(client)) {
-            handleFreeLookActivation(client);
-        } else if (perspective != null) {
-            handleFreeLookDeactivation();
-        }
-    }
-
-    @SubscribeEvent
-    private void onMouseRotation(MouseRotationEvent event) {
-        Minecraft client = Minecraft.getInstance();
-        if (!isBindDown(client)) {
-            angle = null;
-            return;
-        }
-        if (angle == null) {
-            angle = MathAngle.cameraAngle();
-        }
-        angle.setYaw(angle.getYaw() + event.getCursorDeltaX() * 0.15F);
-        angle.setPitch(Mth.clamp(angle.getPitch() + event.getCursorDeltaY() * 0.15F, -90.0F, 90.0F));
-        event.setCancelled(true);
-    }
-
-    @SubscribeEvent
-    private void onCamera(CameraEvent event) {
-        if (isBindDown(Minecraft.getInstance()) && angle != null) {
-            event.setAngle(angle);
-            event.setCancelled(true);
-        }
-    }
-
-    private void handleFreeLookActivation(Minecraft client) {
-        if (perspective == null) {
-            perspective = client.options.getCameraType();
-        }
-        if (client.options.getCameraType().isFirstPerson()) {
-            client.options.setCameraType(CameraType.THIRD_PERSON_BACK);
-        }
-        if (angle == null) {
-            angle = MathAngle.cameraAngle();
-        }
-    }
-
-    private void handleFreeLookDeactivation() {
-        Minecraft client = Minecraft.getInstance();
-        if (perspective != null && client.options != null) {
-            client.options.setCameraType(perspective);
-        }
-        perspective = null;
-        angle = null;
-    }
-
-    private boolean isBindDown(Minecraft client) {
-        return client != null && client.screen == null && client.getWindow() != null && FREE_LOOK_BIND.getValue().isDown(client.getWindow().handle());
+        syncSettingsToManager();
+        FreelookManager.deactivate(Minecraft.getInstance());
     }
 }

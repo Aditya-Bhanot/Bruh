@@ -22,7 +22,7 @@ public final class ConfigManager {
     public static final String USER_CONFIG_FOLDER = "config";
     public static final String SYSTEM_FOLDER = "system";
     public static final String CONFIG_EXTENSION = ".attrium";
-    private static final long AUTO_SAVE_DELAY_MS = 1000L;
+    private static final long AUTO_SAVE_DELAY_MS = 250L;
 
     private final Gson gson = new GsonBuilder().disableHtmlEscaping().create();
     private final Path systemDirectory;
@@ -60,6 +60,16 @@ public final class ConfigManager {
         } catch (IOException exception) {
             throw new ConfigException("Failed to create config directories under: " + rootDirectory(), exception);
         }
+        try {
+            net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents.CLIENT_STOPPING.register(client -> saveAll());
+        } catch (Throwable ignored) {
+        }
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            try {
+                saveAll();
+            } catch (Throwable ignored) {
+            }
+        }, "Attrium-Config-ShutdownSave"));
     }
 
     public void loadAll() {
@@ -77,6 +87,10 @@ public final class ConfigManager {
             dirtySince = System.currentTimeMillis();
         }
         dirty = true;
+        net.minecraft.client.Minecraft mc = net.minecraft.client.Minecraft.getInstance();
+        if (mc == null || mc.level == null) {
+            saveAll();
+        }
     }
 
     @SubscribeEvent
@@ -104,8 +118,14 @@ public final class ConfigManager {
     private void saveModules() {
         try {
             Files.createDirectories(systemDirectory);
-            try (Writer writer = Files.newBufferedWriter(modulesFile, StandardCharsets.UTF_8)) {
+            Path tmpFile = modulesFile.resolveSibling(modulesFile.getFileName().toString() + ".tmp");
+            try (Writer writer = Files.newBufferedWriter(tmpFile, StandardCharsets.UTF_8)) {
                 gson.toJson(moduleStorage.save(), writer);
+            }
+            try {
+                Files.move(tmpFile, modulesFile, java.nio.file.StandardCopyOption.REPLACE_EXISTING, java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+            } catch (IOException atomicErr) {
+                Files.move(tmpFile, modulesFile, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
             }
         } catch (IOException exception) {
             throw new ConfigException("Failed to save module config: " + modulesFile, exception);

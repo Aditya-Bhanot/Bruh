@@ -76,7 +76,9 @@
     "NameProtectScoreboardMixin",
     "NameProtectTabListMixin",
     "TickPipelineMixin",
-    "ChatUtilsMixin"
+    "ChatUtilsMixin",
+    "FreelookCameraMixin",
+    "FreelookEntityMixin"
   ],
   "injectors": {
     "defaultRequire": 1
