@@ -30,6 +30,7 @@ import attrium.ru.api.module.Module;
 import attrium.ru.manager.FreelookManager;
 import attrium.ru.manager.FriendManager;
 import attrium.ru.api.module.impl.visual.HudModule;
+import attrium.ru.manager.AutoUpdater;
 import attrium.ru.manager.CleanStateManager;
 import attrium.ru.manager.ClientThemeManager;
 import attrium.ru.manager.HudManager;
@@ -130,7 +131,7 @@ public class GlassClickGuiScreen extends Screen {
     private static final int LIST_SIDE_PADDING = 18;
 
     private static final String[] TOP_TABS = new String[]{
-            "Modules", "Configs", "HUD", "Friends", "Client"
+            "Modules", "Configs", "HUD", "Friends", "Client", "Updater"
     };
 
     private static final String[] CATEGORY_PILLS = new String[]{
@@ -451,6 +452,35 @@ public class GlassClickGuiScreen extends Screen {
     private int hudDraggingSliderType = -1; // 0 = Background Opacity, 1 = Scale
     private int hudDraggingTrackX = 0;
     private int hudDraggingTrackW = 0;
+
+    // Updater Tab State (activeTopTabIndex == 5)
+    private static final class WrappedReleaseCard {
+        final Component tagComp;
+        final Component titleComp;
+        final Component dateComp;
+        final List<Component> wrappedLines;
+        final int cardHeight;
+
+        WrappedReleaseCard(Component tagComp, Component titleComp, Component dateComp, List<Component> wrappedLines, int cardHeight) {
+            this.tagComp = tagComp;
+            this.titleComp = titleComp;
+            this.dateComp = dateComp;
+            this.wrappedLines = wrappedLines;
+            this.cardHeight = cardHeight;
+        }
+    }
+    private float updaterTabOpenTime = 0.0F;
+    private float updaterScrollOffset = 0.0F;
+    private float updaterTargetScrollOffset = 0.0F;
+    private float updaterMaxScrollOffset = 0.0F;
+    private int updaterActionBtnX = 0, updaterActionBtnY = 0, updaterActionBtnW = 0, updaterActionBtnH = 0;
+    private int updaterRefreshBtnX = 0, updaterRefreshBtnY = 0, updaterRefreshBtnW = 0, updaterRefreshBtnH = 0;
+    private List<AutoUpdater.ReleaseNoteEntry> cachedUpdaterReleasesRef = null;
+    private int lastUpdaterWrapWidth = -1;
+    private final List<WrappedReleaseCard> cachedWrappedReleaseCards = new ArrayList<>(3);
+    private Component updaterHeaderTitleComp = null;
+    private Component updaterWhatsNewComp = null;
+    private Component updaterRefreshComp = null;
 
     // Configs Tab State (activeTopTabIndex == 1)
     private String configInputText = "";
@@ -828,6 +858,8 @@ public class GlassClickGuiScreen extends Screen {
             hudTargetScrollOffset = Mth.clamp(hudTargetScrollOffset + step, 0.0F, hudMaxScrollOffset);
         } else if (activeTopTabIndex == 3) {
             friendTargetScrollOffset = Mth.clamp(friendTargetScrollOffset + step, 0.0F, friendMaxScrollOffset);
+        } else if (activeTopTabIndex == 5) {
+            updaterTargetScrollOffset = Mth.clamp(updaterTargetScrollOffset + step, 0.0F, updaterMaxScrollOffset);
         } else {
             targetScrollOffset = Mth.clamp(targetScrollOffset + step, 0.0F, maxScrollOffset);
         }
@@ -1364,12 +1396,17 @@ public class GlassClickGuiScreen extends Screen {
                 clientTabOpenTime = 0.0F;
             } else if (activeTopTabIndex == 2) {
                 hudTabOpenTime = 0.0F;
+            } else if (activeTopTabIndex == 5) {
+                updaterTabOpenTime = 0.0F;
+                AutoUpdater.fetchRecentThreeReleasesAsync(false);
             }
         }
         if (activeTopTabIndex == 4) {
             clientTabOpenTime = Math.min(2.0F, clientTabOpenTime + dtSeconds);
         } else if (activeTopTabIndex == 2) {
             hudTabOpenTime = Math.min(2.0F, hudTabOpenTime + dtSeconds);
+        } else if (activeTopTabIndex == 5) {
+            updaterTabOpenTime = Math.min(2.0F, updaterTabOpenTime + dtSeconds);
         }
 
         processDirtyCachesIfNeeded();
@@ -1421,6 +1458,8 @@ public class GlassClickGuiScreen extends Screen {
             enqueueHudTopBar(effMouseX, effMouseY);
         } else if (activeTopTabIndex == 3) {
             enqueueFriendsTopInputBar(effMouseX, effMouseY);
+        } else if (activeTopTabIndex == 5) {
+            enqueueUpdaterTopBar(effMouseX, effMouseY);
         }
 
         if (activeTopTabIndex == 0 && maxScrollOffset > 1.0F) {
@@ -1452,6 +1491,8 @@ public class GlassClickGuiScreen extends Screen {
                 renderHudTabPanel(guiGraphics, dtSeconds, effMouseX, effMouseY);
             } else if (activeTopTabIndex == 3) {
                 renderFriendsListPanel(guiGraphics, dtSeconds, effMouseX, effMouseY);
+            } else if (activeTopTabIndex == 5) {
+                renderUpdaterPanel(guiGraphics, dtSeconds, effMouseX, effMouseY);
             } else {
                 enqueueSecondaryTabView();
                 flushBatchedRenderPasses(guiGraphics);
@@ -1508,6 +1549,11 @@ public class GlassClickGuiScreen extends Screen {
             friendScrollOffset += (friendTargetScrollOffset - friendScrollOffset) * scrollLerp;
         } else {
             friendScrollOffset = friendTargetScrollOffset;
+        }
+        if (Math.abs(updaterTargetScrollOffset - updaterScrollOffset) > 0.1F) {
+            updaterScrollOffset += (updaterTargetScrollOffset - updaterScrollOffset) * scrollLerp;
+        } else {
+            updaterScrollOffset = updaterTargetScrollOffset;
         }
 
         float toggleRate = Mth.clamp(dt / 0.15F, 0.05F, 1.0F);
@@ -3667,6 +3713,10 @@ public class GlassClickGuiScreen extends Screen {
             handleFriendsTabClick(mouseX, mouseY, leftClicked, rightClicked);
             return;
         }
+        if (activeTopTabIndex == 5) {
+            handleUpdaterTabClick(mouseX, mouseY, leftClicked, rightClicked);
+            return;
+        }
         if (activeTopTabIndex == 0 && isHovered(mouseX, mouseY, listLeft, listTop, listRight - listLeft, listHeight)) {
             handleModuleListClick(mouseX, mouseY, leftClicked, rightClicked);
         } else if (activeTopTabIndex == 4) {
@@ -5224,27 +5274,16 @@ public class GlassClickGuiScreen extends Screen {
                 guiGraphics.drawString(this.font, bentoActiveCfgComp, tx, y0 + 30, mutedCol, false);
             }
 
-            // Right: Three 26px-tall, 8px-radius pill buttons ("Clean State", "Open Folder", "Reset Layout")
+            // Right: Two 26px-tall, 8px-radius pill buttons ("Open Folder", "Reset Layout")
             int btnH = 26;
             int btnY = y0 + (bannerH - btnH) / 2;
             int resetW = 74;
             int folderW = 72;
-            int cleanW = 74;
             int resetX = leftCardX + fullW - resetW - 10;
             int folderX = resetX - folderW - 6;
-            int cleanX = folderX - cleanW - 6;
 
-            boolean hoverClean = isHovered(mouseX, mouseY, cleanX, btnY, cleanW, btnH);
             boolean hoverFolder = isHovered(mouseX, mouseY, folderX, btnY, folderW, btnH);
             boolean hoverReset = isHovered(mouseX, mouseY, resetX, btnY, resetW, btnH);
-
-            HudManager.drawRoundedRect(guiGraphics, cleanX, btnY, cleanW, btnH, 8,
-                    multiplyAlpha(hoverClean ? 0x55EF4444 : 0x33EF4444, p0));
-            int cw = this.font.width(bentoCleanStateComp);
-            if ((whiteCol >>> 24) > 8) {
-                guiGraphics.drawString(this.font, bentoCleanStateComp, cleanX + (cleanW - cw) / 2, btnY + 9,
-                        multiplyAlpha(hoverClean ? 0xFFFF6B6B : 0xFFEF4444, p0), false);
-            }
 
             HudManager.drawRoundedRect(guiGraphics, folderX, btnY, folderW, btnH, 8,
                     multiplyAlpha(hoverFolder ? 0x38FFFFFF : 0x20FFFFFF, p0));
@@ -5479,19 +5518,13 @@ public class GlassClickGuiScreen extends Screen {
         int pad = 14;
 
         if (leftClicked) {
-        // Top Banner Buttons: "Clean State", "Open Folder", & "Reset Layout"
+        // Top Banner Buttons: "Open Folder" & "Reset Layout"
         int btnH = 26;
         int btnY = bentoTop + (bannerH - btnH) / 2;
         int resetW = 74;
         int folderW = 72;
-        int cleanW = 74;
         int resetX = leftCardX + fullW - resetW - 10;
         int folderX = resetX - folderW - 6;
-        int cleanX = folderX - cleanW - 6;
-        if (isHovered(mouseX, mouseY, cleanX, btnY, cleanW, btnH)) {
-            CleanStateManager.activateCleanState();
-            return;
-        }
         if (isHovered(mouseX, mouseY, folderX, btnY, folderW, btnH)) {
             ClientThemeManager.openConfigFolder();
             SoundUtil.playClick();
@@ -5592,4 +5625,250 @@ public class GlassClickGuiScreen extends Screen {
         }
     }
 
+    // =========================================================================
+    // Dedicated Updater Tab (activeTopTabIndex == 5) — Previous 3 Updates Feed
+    // =========================================================================
+    private void ensureUpdaterComponents() {
+        if (updaterHeaderTitleComp != null) return;
+        updaterHeaderTitleComp = Component.literal("Client Updater").withStyle(HudManager.getBoldStyle());
+        updaterWhatsNewComp = Component.literal("What's New — Previous 3 Updates").withStyle(HudManager.getBoldStyle());
+        updaterRefreshComp = Component.literal("Refresh").withStyle(nunitoRegularStyle);
+    }
+
+    private float computeUpdaterCardProgress(int index) {
+        float t = Mth.clamp((updaterTabOpenTime - index * 0.04F) / 0.22F, 0.0F, 1.0F);
+        float inv = 1.0F - t;
+        return 1.0F - inv * inv * inv;
+    }
+
+    private void enqueueUpdaterTopBar(int mouseX, int mouseY) {
+        ensureUpdaterComponents();
+        int accent = ClientThemeManager.getAccentArgb();
+        int barY = searchBoxY;
+        int barH = searchBoxH;
+
+        enqueueComponentText(updaterHeaderTitleComp, listLeft + 4, barY + 6, COLOR_TEXT_BRIGHT_WHITE);
+        int cursorX = listLeft + 4 + this.font.width(updaterHeaderTitleComp) + 8;
+
+        // Current installed version pill
+        Component verComp = Component.literal("v" + AutoUpdater.uiGetLocalVersion()).withStyle(nunitoRegularStyle);
+        int verW = this.font.width(verComp) + 12;
+        drawRoundedRect(cursorX, barY + 3, verW, barH - 6, 6, 0x24FFFFFF);
+        enqueueComponentText(verComp, cursorX + 6, barY + 6, 0xFFE5E7EB);
+        cursorX += verW + 6;
+
+        // Live status pill (Up to date / Checking... / Restart Ready)
+        String statusStr = AutoUpdater.uiGetStatusText();
+        Component stComp = Component.literal(statusStr).withStyle(nunitoRegularStyle);
+        int stW = this.font.width(stComp) + 12;
+        int stBg = AutoUpdater.updateReady
+                ? ClientThemeManager.getAccentWithAlpha(0.24F)
+                : 0x1EFFFFFF;
+        int stFg = AutoUpdater.updateReady ? accent : 0xFF9CA3AF;
+        drawRoundedRect(cursorX, barY + 3, stW, barH - 6, 6, stBg);
+        enqueueComponentText(stComp, cursorX + 6, barY + 6, stFg);
+
+        // Right-aligned primary action button ("Check Updates" / "Restart to Update") + "Refresh"
+        String actionLabel = AutoUpdater.uiGetPrimaryButtonText();
+        Component actionComp = Component.literal(actionLabel).withStyle(HudManager.getBoldStyle());
+        int actionLabelW = this.font.width(actionComp);
+        updaterActionBtnW = Math.max(92, actionLabelW + 18);
+        updaterActionBtnH = barH;
+        updaterActionBtnX = listRight - updaterActionBtnW;
+        updaterActionBtnY = barY;
+
+        int refW = this.font.width(updaterRefreshComp) + 16;
+        updaterRefreshBtnW = Math.max(52, refW);
+        updaterRefreshBtnH = barH;
+        updaterRefreshBtnX = updaterActionBtnX - updaterRefreshBtnW - 6;
+        updaterRefreshBtnY = barY;
+
+        boolean hoverRef = isHovered(mouseX, mouseY, updaterRefreshBtnX, updaterRefreshBtnY, updaterRefreshBtnW, updaterRefreshBtnH);
+        drawRoundedRect(updaterRefreshBtnX, updaterRefreshBtnY, updaterRefreshBtnW, updaterRefreshBtnH, 7,
+                hoverRef ? 0x36FFFFFF : 0x1EFFFFFF);
+        int rw = this.font.width(updaterRefreshComp);
+        enqueueComponentText(updaterRefreshComp, updaterRefreshBtnX + (updaterRefreshBtnW - rw) / 2,
+                updaterRefreshBtnY + 6, hoverRef ? COLOR_TEXT_BRIGHT_WHITE : 0xFFD1D5DB);
+
+        boolean hoverAct = isHovered(mouseX, mouseY, updaterActionBtnX, updaterActionBtnY, updaterActionBtnW, updaterActionBtnH);
+        int actBg = AutoUpdater.updateReady
+                ? (hoverAct ? lerpColor(accent, 0xFFFFFFFF, 0.16F) : accent)
+                : (hoverAct ? 0xFFE2E6F5 : COLOR_PILL_ACTIVE_BG);
+        drawRoundedRect(updaterActionBtnX, updaterActionBtnY, updaterActionBtnW, updaterActionBtnH, 7, actBg);
+        enqueueComponentText(actionComp, updaterActionBtnX + (updaterActionBtnW - actionLabelW) / 2,
+                updaterActionBtnY + 6, 0xFF0B0D10);
+    }
+
+    private void rebuildWrappedReleaseCardsIfNeeded(List<AutoUpdater.ReleaseNoteEntry> entries, int maxTextWidth) {
+        if (entries == cachedUpdaterReleasesRef && maxTextWidth == lastUpdaterWrapWidth) {
+            return;
+        }
+        cachedUpdaterReleasesRef = entries;
+        lastUpdaterWrapWidth = maxTextWidth;
+        cachedWrappedReleaseCards.clear();
+
+        if (entries == null || entries.isEmpty() || this.font == null) {
+            return;
+        }
+
+        int limit = Math.min(3, entries.size());
+        for (int i = 0; i < limit; i++) {
+            AutoUpdater.ReleaseNoteEntry e = entries.get(i);
+            Component tagComp = Component.literal(e.tag).withStyle(HudManager.getBoldStyle());
+            Component titleComp = Component.literal(e.title).withStyle(HudManager.getBoldStyle());
+            Component dateComp = Component.literal(e.date).withStyle(nunitoRegularStyle);
+
+            List<Component> lines = new ArrayList<>();
+            for (String bullet : e.bullets) {
+                wrapBulletIntoComponents("• " + bullet, maxTextWidth, lines);
+            }
+            if (lines.isEmpty()) {
+                lines.add(Component.literal("• Maintenance and performance improvements.").withStyle(nunitoRegularStyle));
+            }
+            int cardH = 34 + lines.size() * 12 + 8;
+            cachedWrappedReleaseCards.add(new WrappedReleaseCard(tagComp, titleComp, dateComp, lines, cardH));
+        }
+    }
+
+    private void wrapBulletIntoComponents(String text, int maxWidth, List<Component> out) {
+        if (text == null || text.isEmpty() || this.font == null) return;
+        String[] words = text.split("\s+");
+        StringBuilder cur = new StringBuilder();
+        boolean firstLine = true;
+        for (String word : words) {
+            if (word.isEmpty()) continue;
+            String candidate = cur.length() == 0 ? (firstLine ? word : ("  " + word)) : (cur + " " + word);
+            if (this.font.width(Component.literal(candidate).withStyle(nunitoRegularStyle)) > maxWidth && cur.length() > 0) {
+                out.add(Component.literal(cur.toString()).withStyle(nunitoRegularStyle));
+                cur.setLength(0);
+                firstLine = false;
+                cur.append("  ").append(word);
+            } else {
+                cur.setLength(0);
+                cur.append(candidate);
+            }
+        }
+        if (cur.length() > 0) {
+            out.add(Component.literal(cur.toString()).withStyle(nunitoRegularStyle));
+        }
+    }
+
+    private void renderUpdaterPanel(GuiGraphics guiGraphics, float dt, int mouseX, int mouseY) {
+        ensureUpdaterComponents();
+        int accent = ClientThemeManager.getAccentArgb();
+        List<AutoUpdater.ReleaseNoteEntry> entries = AutoUpdater.getRecentThreeReleases();
+        int cardPad = 14;
+        int maxTextWidth = Math.max(140, rowWidth - cardPad * 2);
+
+        rebuildWrappedReleaseCardsIfNeeded(entries, maxTextWidth);
+
+        int sectionHeaderH = 22;
+        int cardGap = 8;
+        int totalH = sectionHeaderH + 8;
+        for (int i = 0; i < cachedWrappedReleaseCards.size(); i++) {
+            totalH += cachedWrappedReleaseCards.get(i).cardHeight + cardGap;
+        }
+        if (cachedWrappedReleaseCards.isEmpty()) {
+            totalH += 72;
+        }
+
+        updaterMaxScrollOffset = Math.max(0.0F, (float) (totalH - listHeight + 8));
+        updaterTargetScrollOffset = Mth.clamp(updaterTargetScrollOffset, 0.0F, updaterMaxScrollOffset);
+        updaterScrollOffset = AnimationUtil.lerp(updaterScrollOffset, updaterTargetScrollOffset, 16.0F, dt);
+
+        int cursorY = listTop + 4 - Math.round(updaterScrollOffset);
+
+        // Section Header: "What's New — Previous 3 Updates"
+        if (cursorY + 14 >= listTop - 10 && cursorY <= listBottom + 10) {
+            guiGraphics.drawString(this.font, updaterWhatsNewComp, listLeft + 4, cursorY + 4, COLOR_TEXT_BRIGHT_WHITE, false);
+        }
+        cursorY += sectionHeaderH;
+
+        if (cachedWrappedReleaseCards.isEmpty()) {
+            int emptyH = 62;
+            HudManager.drawGlassCard(guiGraphics, listLeft, cursorY, rowWidth, emptyH, 11, 0xB813161F, 1.0F);
+            String msg;
+            if (AutoUpdater.isFetchingRecentReleases()) {
+                msg = "Fetching previous 3 updates from GitHub...";
+            } else if (!AutoUpdater.getRecentReleasesError().isEmpty()) {
+                msg = AutoUpdater.getRecentReleasesError();
+            } else {
+                msg = "No release notes loaded yet. Click Refresh above.";
+            }
+            Component msgComp = Component.literal(msg).withStyle(nunitoRegularStyle);
+            int mw = this.font.width(msgComp);
+            guiGraphics.drawString(this.font, msgComp, listLeft + (rowWidth - mw) / 2, cursorY + 27, COLOR_TEXT_DIMMED_GRAY, false);
+            return;
+        }
+
+        for (int i = 0; i < cachedWrappedReleaseCards.size(); i++) {
+            WrappedReleaseCard card = cachedWrappedReleaseCards.get(i);
+            float prog = computeUpdaterCardProgress(i);
+            int drawY = cursorY + Math.round(10.0F * (1.0F - prog));
+            int cardH = card.cardHeight;
+
+            if (drawY + cardH >= listTop - 12 && drawY <= listBottom + 12 && prog > 0.04F) {
+                boolean isLatestCard = (i == 0);
+                HudManager.drawGlassCard(guiGraphics, listLeft, drawY, rowWidth, cardH, 11,
+                        isLatestCard ? 0xC6161B28 : 0xB413161F, prog);
+
+                // Left accent bar on the most recent update card
+                if (isLatestCard) {
+                    HudManager.drawRoundedRect(guiGraphics, listLeft + 2, drawY + 10, 3, Math.max(12, cardH - 20), 1,
+                            multiplyAlpha(accent, prog));
+                }
+
+                // Header row: [Tag Pill] Title ...... Date
+                int headerY = drawY + 10;
+                int tagW = this.font.width(card.tagComp) + 12;
+                int tagX = listLeft + cardPad;
+                int tagBg = isLatestCard
+                        ? ClientThemeManager.getAccentWithAlpha(0.24F * prog)
+                        : multiplyAlpha(0x22FFFFFF, prog);
+                int tagFg = isLatestCard ? multiplyAlpha(accent, prog) : multiplyAlpha(0xFFD1D5DB, prog);
+                HudManager.drawRoundedRect(guiGraphics, tagX, headerY - 2, tagW, 14, 5, tagBg);
+                if ((tagFg >>> 24) > 8) {
+                    guiGraphics.drawString(this.font, card.tagComp, tagX + 6, headerY + 1, tagFg, false);
+                }
+
+                int dateW = this.font.width(card.dateComp);
+                int dateCol = multiplyAlpha(0xFF8B94A5, prog);
+                if ((dateCol >>> 24) > 8 && dateW > 0) {
+                    guiGraphics.drawString(this.font, card.dateComp, listLeft + rowWidth - cardPad - dateW, headerY + 1, dateCol, false);
+                }
+
+                int titleCol = multiplyAlpha(0xFFFFFFFF, prog);
+                if ((titleCol >>> 24) > 8) {
+                    guiGraphics.drawString(this.font, card.titleComp, tagX + tagW + 8, headerY + 1, titleCol, false);
+                }
+
+                // Subtle divider between card header and bullet list
+                guiGraphics.fill(listLeft + cardPad, drawY + 27, listLeft + rowWidth - cardPad, drawY + 28,
+                        multiplyAlpha(0x1CFFFFFF, prog));
+
+                int lineY = drawY + 34;
+                int bulletCol = multiplyAlpha(0xFFCBD5E1, prog);
+                if ((bulletCol >>> 24) > 8) {
+                    for (int l = 0; l < card.wrappedLines.size(); l++) {
+                        guiGraphics.drawString(this.font, card.wrappedLines.get(l), listLeft + cardPad, lineY, bulletCol, false);
+                        lineY += 12;
+                    }
+                }
+            }
+            cursorY += cardH + cardGap;
+        }
+    }
+
+    private void handleUpdaterTabClick(int mouseX, int mouseY, boolean leftClicked, boolean rightClicked) {
+        if (!leftClicked) return;
+        if (isHovered(mouseX, mouseY, updaterActionBtnX, updaterActionBtnY, updaterActionBtnW, updaterActionBtnH)) {
+            AutoUpdater.uiOnPrimaryButtonClick();
+            SoundUtil.playTogglePop(true);
+            return;
+        }
+        if (isHovered(mouseX, mouseY, updaterRefreshBtnX, updaterRefreshBtnY, updaterRefreshBtnW, updaterRefreshBtnH)) {
+            AutoUpdater.uiTriggerRefreshAll();
+            SoundUtil.playClick();
+        }
+    }
 }

@@ -668,4 +668,240 @@ public final class AutoUpdater {
         }
     }
 
+    // =========================================================================
+    // ClickGUI Updater Tab Bridge & Previous 3 Updates Release History Fetcher
+    // =========================================================================
+    public static final class ReleaseNoteEntry {
+        public final String tag;
+        public final String title;
+        public final String date;
+        public final java.util.List<String> bullets;
+
+        public ReleaseNoteEntry(String tag, String title, String date, java.util.List<String> bullets) {
+            this.tag = tag != null ? tag : "update";
+            this.title = title != null ? title : this.tag;
+            this.date = date != null ? date : "";
+            this.bullets = bullets != null ? java.util.Collections.unmodifiableList(bullets) : java.util.Collections.emptyList();
+        }
+    }
+
+    private static final String RECENT_RELEASES_API_URL = "https://api.github.com/repos/Aditya-Bhanot/Bruh/releases?per_page=10";
+    private static final String RECENT_COMMITS_API_URL = "https://api.github.com/repos/Aditya-Bhanot/Bruh/commits?per_page=5";
+    private static final java.util.concurrent.atomic.AtomicBoolean FETCHING_RECENT_RELEASES = new java.util.concurrent.atomic.AtomicBoolean(false);
+    private static volatile java.util.List<ReleaseNoteEntry> recentThreeReleases = java.util.Collections.emptyList();
+    private static volatile String recentReleasesError = "";
+    private static volatile long lastRecentReleasesFetchMs = 0L;
+
+    public static java.util.List<ReleaseNoteEntry> getRecentThreeReleases() {
+        return recentThreeReleases;
+    }
+
+    public static boolean isFetchingRecentReleases() {
+        return FETCHING_RECENT_RELEASES.get();
+    }
+
+    public static String getRecentReleasesError() {
+        return recentReleasesError != null ? recentReleasesError : "";
+    }
+
+    public static boolean uiIsChecking() {
+        return isChecking();
+    }
+
+    public static String uiGetStatusText() {
+        return (statusText != null && !statusText.isEmpty()) ? statusText : (updateReady ? "Restart Ready" : "Up to date");
+    }
+
+    public static String uiGetPrimaryButtonText() {
+        if (updateReady) return "Restart to Update";
+        if (uiIsChecking()) return "Checking...";
+        return "Check Updates";
+    }
+
+    public static int uiGetPrimaryButtonColor() {
+        return updateReady ? 0xFF00E5FF : 0xFFB8C0D0;
+    }
+
+    public static String uiGetLocalVersion() {
+        try {
+            for (net.fabricmc.loader.api.ModContainer container : net.fabricmc.loader.api.FabricLoader.getInstance().getAllMods()) {
+                String id = container.getMetadata().getId();
+                if (id != null && (id.equalsIgnoreCase("attrium") || id.toLowerCase(java.util.Locale.ROOT).contains("attrium"))) {
+                    return container.getMetadata().getVersion().getFriendlyString();
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return "1.0.0";
+    }
+
+    public static void uiOnPrimaryButtonClick() {
+        onUpdateButtonClicked();
+        fetchRecentThreeReleasesAsync(true);
+    }
+
+    public static void uiTriggerRefreshAll() {
+        fetchRecentThreeReleasesAsync(true);
+    }
+
+    public static void fetchRecentThreeReleasesAsync(boolean force) {
+        long now = System.currentTimeMillis();
+        if (!force && !recentThreeReleases.isEmpty() && (now - lastRecentReleasesFetchMs) < 120_000L) {
+            return;
+        }
+        if (!FETCHING_RECENT_RELEASES.compareAndSet(false, true)) {
+            return;
+        }
+        Thread t = new Thread(() -> {
+            try {
+                java.net.http.HttpClient http = java.net.http.HttpClient.newBuilder()
+                        .connectTimeout(java.time.Duration.ofSeconds(8))
+                        .followRedirects(java.net.http.HttpClient.Redirect.NORMAL)
+                        .build();
+
+                java.util.List<ReleaseNoteEntry> entries = new java.util.ArrayList<>(3);
+
+                // 1. Fetch GitHub Releases first (up to 3 non-draft releases)
+                try {
+                    java.net.http.HttpRequest req = java.net.http.HttpRequest.newBuilder()
+                            .uri(java.net.URI.create(RECENT_RELEASES_API_URL))
+                            .timeout(java.time.Duration.ofSeconds(10))
+                            .header("User-Agent", USER_AGENT)
+                            .header("Accept", "application/vnd.github+json")
+                            .GET()
+                            .build();
+                    java.net.http.HttpResponse<String> resp = http.send(req, java.net.http.HttpResponse.BodyHandlers.ofString(java.nio.charset.StandardCharsets.UTF_8));
+                    if (resp.statusCode() >= 200 && resp.statusCode() < 300 && resp.body() != null) {
+                        com.google.gson.JsonElement parsed = com.google.gson.JsonParser.parseString(resp.body());
+                        if (parsed != null && parsed.isJsonArray()) {
+                            for (com.google.gson.JsonElement el : parsed.getAsJsonArray()) {
+                                if (entries.size() >= 3) break;
+                                if (!el.isJsonObject()) continue;
+                                com.google.gson.JsonObject obj = el.getAsJsonObject();
+                                if (obj.has("draft") && obj.get("draft").isJsonPrimitive() && obj.get("draft").getAsBoolean()) {
+                                    continue;
+                                }
+                                String tag = readJsonString(obj, "tag_name", "release");
+                                String name = readJsonString(obj, "name", tag);
+                                if (name.isEmpty()) name = tag;
+                                String rawDate = readJsonString(obj, "published_at", readJsonString(obj, "created_at", ""));
+                                String shortDate = rawDate.length() >= 10 ? rawDate.substring(0, 10) : rawDate;
+                                String body = readJsonString(obj, "body", "");
+                                entries.add(new ReleaseNoteEntry(tag, name, shortDate, parseReleaseBullets(body)));
+                            }
+                        }
+                    }
+                } catch (Throwable ignored) {
+                }
+
+                // 2. If fewer than 3 GitHub Releases exist (e.g. rolling 'latest' release), fill up to 3 from recent commits
+                if (entries.size() < 3) {
+                    try {
+                        java.net.http.HttpRequest creq = java.net.http.HttpRequest.newBuilder()
+                                .uri(java.net.URI.create(RECENT_COMMITS_API_URL))
+                                .timeout(java.time.Duration.ofSeconds(10))
+                                .header("User-Agent", USER_AGENT)
+                                .header("Accept", "application/vnd.github+json")
+                                .GET()
+                                .build();
+                        java.net.http.HttpResponse<String> cresp = http.send(creq, java.net.http.HttpResponse.BodyHandlers.ofString(java.nio.charset.StandardCharsets.UTF_8));
+                        if (cresp.statusCode() >= 200 && cresp.statusCode() < 300 && cresp.body() != null) {
+                            com.google.gson.JsonElement parsed = com.google.gson.JsonParser.parseString(cresp.body());
+                            if (parsed != null && parsed.isJsonArray()) {
+                                for (com.google.gson.JsonElement el : parsed.getAsJsonArray()) {
+                                    if (entries.size() >= 3) break;
+                                    if (!el.isJsonObject()) continue;
+                                    com.google.gson.JsonObject obj = el.getAsJsonObject();
+                                    String sha = readJsonString(obj, "sha", "");
+                                    String tag = sha.length() >= 7 ? ("#" + sha.substring(0, 7)) : "commit";
+                                    com.google.gson.JsonObject commitObj = (obj.has("commit") && obj.get("commit").isJsonObject())
+                                            ? obj.getAsJsonObject("commit") : null;
+                                    if (commitObj == null) continue;
+                                    String msg = readJsonString(commitObj, "message", "Update");
+                                    String[] msgLines = msg.replace("\r\n", "\n").split("\n");
+                                    String title = msgLines.length > 0 && !msgLines[0].trim().isEmpty() ? msgLines[0].trim() : "Client Update";
+                                    String dateStr = "";
+                                    if (commitObj.has("author") && commitObj.get("author").isJsonObject()) {
+                                        String rawD = readJsonString(commitObj.getAsJsonObject("author"), "date", "");
+                                        dateStr = rawD.length() >= 10 ? rawD.substring(0, 10) : rawD;
+                                    }
+                                    java.util.List<String> bullets = new java.util.ArrayList<>();
+                                    for (int i = 1; i < msgLines.length && bullets.size() < 5; i++) {
+                                        String cleaned = cleanMarkdownLine(msgLines[i]);
+                                        if (!cleaned.isEmpty()) bullets.add(cleaned);
+                                    }
+                                    if (bullets.isEmpty()) {
+                                        bullets.add(title);
+                                    }
+                                    // Avoid duplicate title if already listed as a release
+                                    boolean dup = false;
+                                    for (ReleaseNoteEntry existing : entries) {
+                                        if (existing.title.equalsIgnoreCase(title)) {
+                                            dup = true;
+                                            break;
+                                        }
+                                    }
+                                    if (!dup) {
+                                        entries.add(new ReleaseNoteEntry(tag, title, dateStr, bullets));
+                                    }
+                                }
+                            }
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+
+                if (!entries.isEmpty()) {
+                    recentThreeReleases = java.util.Collections.unmodifiableList(entries);
+                    recentReleasesError = "";
+                    lastRecentReleasesFetchMs = System.currentTimeMillis();
+                } else {
+                    recentReleasesError = "Could not fetch recent updates from GitHub. Tap Refresh to retry.";
+                }
+            } catch (Throwable ex) {
+                recentReleasesError = "Update history unavailable (offline or GitHub rate-limited).";
+            } finally {
+                FETCHING_RECENT_RELEASES.set(false);
+            }
+        }, "Attrium-Updater-History");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    private static String readJsonString(com.google.gson.JsonObject obj, String key, String fallback) {
+        if (obj == null || !obj.has(key) || !obj.get(key).isJsonPrimitive()) return fallback;
+        String val = obj.get(key).getAsString();
+        return val != null ? val.trim() : fallback;
+    }
+
+    private static java.util.List<String> parseReleaseBullets(String rawBody) {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        if (rawBody != null && !rawBody.isBlank()) {
+            String[] lines = rawBody.replace("\r\n", "\n").split("\n");
+            for (String line : lines) {
+                if (out.size() >= 7) break;
+                String cleaned = cleanMarkdownLine(line);
+                if (!cleaned.isEmpty()) {
+                    out.add(cleaned);
+                }
+            }
+        }
+        if (out.isEmpty()) {
+            out.add("General fixes, performance improvements, and stability updates.");
+        }
+        return out;
+    }
+
+    private static String cleanMarkdownLine(String raw) {
+        if (raw == null) return "";
+        String s = raw.trim();
+        if (s.isEmpty() || s.equals("---") || s.equals("***") || s.startsWith("```")) return "";
+        while (s.startsWith("#")) s = s.substring(1).trim();
+        if (s.startsWith("- ") || s.startsWith("* ") || s.startsWith("• ")) {
+            s = s.substring(2).trim();
+        }
+        s = s.replace("**", "").replace("__", "").replace("`", "").trim();
+        if (s.toLowerCase(java.util.Locale.ROOT).startsWith("full changelog:")) return "";
+        return s;
+    }
 }
