@@ -129,12 +129,12 @@ public final class ClientThemeManager {
 
     public static int getWindowBgColor() {
         int a = Mth.clamp(Math.round(panelOpacity * 255.0F), 140, 245);
-        return (a << 24) | 0x101218;
+        return (a << 24) | 0x141822;
     }
 
     public static int getBentoCardBgColor(float cardAlpha) {
         int baseA = Mth.clamp(Math.round(panelOpacity * 240.0F * cardAlpha), 0, 240);
-        return (baseA << 24) | 0x111318;
+        return (baseA << 24) | 0x161B26;
     }
 
     public static boolean isBackgroundDimEnabled() {

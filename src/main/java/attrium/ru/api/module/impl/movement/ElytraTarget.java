@@ -150,6 +150,9 @@ public final class ElytraTarget extends Module {
     private boolean betaPendingReequip = false;
     private int betaReequipAfterTick = -100;
 
+    private static final long AUTO_GLIDE_IDLE_EQUIP_MS = 5000L;
+    private long elytraEquippedNotGlidingSinceMs = 0L;
+    private int trackedEnemyUpdatedTick = -100;
     private int trackedEnemyId = -1;
     private double trackedEnemyVx = 0.0D;
     private double trackedEnemyVy = 0.0D;
@@ -273,6 +276,13 @@ public final class ElytraTarget extends Module {
         refreshToggleBindLabel();
     }
 
+    public void syncTargetAndVelocity(LivingEntity target) {
+        if (target != null && target.isAlive() && !isWhitelistedFriend(target)) {
+            cachedTarget = target;
+            updateTrackedEnemyVelocity(target);
+        }
+    }
+
     public boolean ensureUnequippedBeforeMaceAttack(LivingEntity target) {
         if (!isEnabled() || mc.player == null || mc.screen != null) {
             return false;
@@ -374,7 +384,13 @@ public final class ElytraTarget extends Module {
         updateHotbarArmorCache(false);
 
         boolean wearingElytra = isWearingElytra();
+        if (!wearingElytra || mc.player.isFallFlying()) {
+            elytraEquippedNotGlidingSinceMs = 0L;
+        } else if (elytraEquippedNotGlidingSinceMs == 0L) {
+            elytraEquippedNotGlidingSinceMs = System.currentTimeMillis();
+        }
         if (wearingElytra && !wasWearingElytraLastTick) {
+            elytraEquippedNotGlidingSinceMs = mc.player.isFallFlying() ? 0L : System.currentTimeMillis();
             lastElytraEquippedTimeMs = System.currentTimeMillis();
             lastElytraEquipCompletedTick = actionManager.getClientTick() + 2;
             forceCancelFlightInput = false;
@@ -619,13 +635,13 @@ public final class ElytraTarget extends Module {
         int chestplateSlot = getValidChestplateSlot();
         int currentSlot = mc.player.getInventory().getSelectedSlot();
 
-        // Keep original hotbar slot (Sword / Wind Charge / Hand) after equipping Chestplate so AutoMace
-        // only swaps to the Mace on the exact hit tick (Mace Cooldown Swap for maximum damage!),
-        // while notifying AutoMace to lock onto cachedTarget for the smash window!
         int nextSlotAfterUnequip = currentSlot;
         MaceTarget autoMace = MaceTarget.getInstance();
-        if (autoMace != null && autoMace.isEnabled() && cachedTarget != null && !mc.player.onGround()) {
+        if (automaceSync.getValue() && autoMace != null && autoMace.isEnabled()
+                && cachedTarget != null && !mc.player.onGround()) {
             autoMace.notifyElytraUnequippedForSmash(mc, currentSlot, cachedTarget);
+            // Direct Tick-1 Chestplate -> Mace handoff on fast/close dives eliminates 1-2 ticks of swing latency
+            nextSlotAfterUnequip = autoMace.resolveOptimalMaceSlotForHandoff(mc, cachedTarget, currentSlot);
         }
 
         boolean accepted;
@@ -648,11 +664,10 @@ public final class ElytraTarget extends Module {
 
     private boolean requestPriority3ElytraEquip() {
         if (ElytraHelper.isManualSwapLockActive()
-                || (System.currentTimeMillis() - lastAutoArmorSwapMs) < 450L
+                || (System.currentTimeMillis() - lastAutoArmorSwapMs) < 120L
                 || !ActionManager.getInstance().canMutateHotbarSlotThisTick()) {
             return false;
         }
-        lastAutoArmorSwapMs = System.currentTimeMillis();
         if (mc.player == null || mc.screen != null || mc.player.isUsingItem()) {
             return false;
         }
@@ -675,9 +690,13 @@ public final class ElytraTarget extends Module {
             accepted = ActionManager.executeLegitArmorSwapFromSlot(-1);
         }
         if (accepted) {
+            long now = System.currentTimeMillis();
+            lastAutoArmorSwapMs = now;
             forceCancelFlightInput = false;
             swapCommitmentTimer.reset();
-            lastElytraEquippedTimeMs = System.currentTimeMillis();
+            lastElytraEquippedTimeMs = now;
+            // Start 5s non-gliding timer: re-equip Elytra WITHOUT auto-gliding until 5s have elapsed
+            elytraEquippedNotGlidingSinceMs = now;
             lastElytraEquipCompletedTick = ActionManager.getInstance().getClientTick() + 3;
             glideWindowTimer.reset();
             jumpPulseToggle = false;
@@ -750,18 +769,17 @@ public final class ElytraTarget extends Module {
             return false;
         }
 
-        // Strict vanilla fall preconditions: never pulse jump before genuine descent
+        // Strict vanilla fall preconditions (prevents GrimAC Elytra A/B)
         double velY = mc.player.getDeltaMovement().y;
         if (velY >= MAX_LEGAL_GLIDE_VELOCITY_Y || mc.player.fallDistance < MIN_LEGAL_FALL_DISTANCE) {
             return false;
         }
 
-        boolean recentlyEquippedElytra = (System.currentTimeMillis() - lastElytraEquippedTimeMs) <= 900L;
-        if (!recentlyEquippedElytra && !windChargeAscentDetected && getEffectiveFallDistance() < minDropDist.getValue()) {
+        // Only auto-glide if the player has been wearing the Elytra for >= 5 seconds without gliding
+        if (elytraEquippedNotGlidingSinceMs == 0L) {
             return false;
         }
-
-        return recentlyEquippedElytra || !glideWindowTimer.finished(650.0D) || windChargeAscentDetected;
+        return (System.currentTimeMillis() - elytraEquippedNotGlidingSinceMs) >= AUTO_GLIDE_IDLE_EQUIP_MS;
     }
 
     private void updateAirbornePeakAndWindChargeState() {
@@ -963,14 +981,11 @@ public final class ElytraTarget extends Module {
         if (!dynamicInterceptBeta.getValue()) {
             return;
         }
+        // Keep Chestplate on through the smash and suppress auto-glide; re-equip cleanly after Reequip Delay (ms)
         betaFlightCancelSuppressGlide = true;
         betaFlightCancelUntilMs = System.currentTimeMillis() + 750L;
-        if (flightCancelReequip.getValue()) {
-            betaPendingReequip = true;
-            betaReequipAfterTick = ActionManager.getInstance().getClientTick() + 2;
-        } else {
-            betaPendingReequip = false;
-        }
+        betaPendingReequip = false;
+        betaReequipAfterTick = -100;
     }
 
     private void expireBetaFlightCancelIfNeeded() {
@@ -1015,8 +1030,9 @@ public final class ElytraTarget extends Module {
     }
 
     private void updateTrackedEnemyVelocity(LivingEntity target) {
-        if (target == null || !target.isAlive()) {
+        if (target == null || !target.isAlive() || mc.player == null) {
             trackedEnemyId = -1;
+            trackedEnemyUpdatedTick = -100;
             trackedEnemyVx = 0.0D;
             trackedEnemyVy = 0.0D;
             trackedEnemyVz = 0.0D;
@@ -1025,6 +1041,12 @@ public final class ElytraTarget extends Module {
             lastEnemyZ = Double.NaN;
             return;
         }
+        int curTick = ActionManager.getInstance().getClientTick();
+        if (target.getId() == trackedEnemyId && curTick == trackedEnemyUpdatedTick) {
+            return;
+        }
+        trackedEnemyUpdatedTick = curTick;
+
         double x = target.getX();
         double y = target.getY();
         double z = target.getZ();
@@ -1048,7 +1070,6 @@ public final class ElytraTarget extends Module {
 
         double rawSpeedSq = rawVx * rawVx + rawVy * rawVy + rawVz * rawVz;
         if (rawSpeedSq > 16.0D) {
-            // Reset EMA on Ender Pearl / server teleport (> 4 blocks/tick)
             trackedEnemyVx = 0.0D;
             trackedEnemyVy = 0.0D;
             trackedEnemyVz = 0.0D;
@@ -1062,9 +1083,9 @@ public final class ElytraTarget extends Module {
                 rawVz = dm.z;
             }
         }
-        trackedEnemyVx = 0.45D * rawVx + 0.55D * trackedEnemyVx;
-        trackedEnemyVy = 0.45D * rawVy + 0.55D * trackedEnemyVy;
-        trackedEnemyVz = 0.45D * rawVz + 0.55D * trackedEnemyVz;
+        trackedEnemyVx = 0.50D * rawVx + 0.50D * trackedEnemyVx;
+        trackedEnemyVy = 0.50D * rawVy + 0.50D * trackedEnemyVy;
+        trackedEnemyVz = 0.50D * rawVz + 0.50D * trackedEnemyVz;
     }
 
     private int getLocalPingMs() {
@@ -1095,6 +1116,9 @@ public final class ElytraTarget extends Module {
             return false;
         }
 
+        // Always ensure enemy 3D velocity is up-to-date even when called first by MaceTarget
+        updateTrackedEnemyVelocity(target);
+
         Vec3 pVel = mc.player.getDeltaMovement();
         double pvx = pVel.x;
         double pvy = pVel.y;
@@ -1122,27 +1146,27 @@ public final class ElytraTarget extends Module {
         double ry = cy - ey;
         double rz = cz - ez;
         double dist = Math.sqrt(rx * rx + ry * ry + rz * rz);
-        if (dist < 0.01D || dist > 14.0D) {
+        if (dist < 0.01D || dist > 16.0D) {
             return false;
         }
 
-        // True 3D closing speed (rate at which distance between player & enemy is decreasing)
+        // True 3D relative closing speed (works for stationary AND gliding enemies)
         double relVx = pvx - evx;
         double relVy = pvy - evy;
         double relVz = pvz - evz;
         double relSpeed = Math.sqrt(relVx * relVx + relVy * relVy + relVz * relVz);
-        if (relSpeed < 0.25D) {
+        if (relSpeed < 0.22D) {
             return false;
         }
 
         double closingSpeed = (relVx * rx + relVy * ry + relVz * rz) / dist;
-        if (closingSpeed < 0.22D) {
+        if (closingSpeed < 0.20D) {
             return false;
         }
 
-        // Off-axis fly-by guard (must be moving generally toward target)
+        // Relaxed approach cone (0.55 ~ 56 deg) so curved Rocket-3 dives never delay unequip
         double alignment = closingSpeed / relSpeed;
-        if (alignment < 0.72D && dist > 3.6D) {
+        if (alignment < 0.55D && dist > 4.5D) {
             return false;
         }
 
@@ -1153,15 +1177,21 @@ public final class ElytraTarget extends Module {
             return false;
         }
 
-        // Continuous angle- and ping-scaled lead window:
-        // Rocket 3 @ 70 deg -> ~2.4 ticks lead (~6-7m); Rocket 3 @ 40 deg -> ~1.9 ticks lead (~4-5m)
-        double sinDive = Mth.clamp(Math.sin(Math.toRadians(Math.max(0.0D, diveAngleDeg))), 0.0D, 1.0D);
-        double pingTicks = Mth.clamp(getLocalPingMs() / 100.0D, 0.0D, 1.2D);
-        double leadTicks = 0.55D + 1.65D * sinDive + pingTicks;
-        int fullTicks = (int) Math.floor(leadTicks);
-        double fracTick = leadTicks - fullTicks;
+        // Close-range emergency cancel: never fly past a target inside 3.6m while still gliding
+        if (dist <= 3.6D && closingSpeed >= 0.35D && (diveAngleDeg >= 15.0D || mc.player.fallDistance >= 1.5F)) {
+            return true;
+        }
 
-        // Vanilla travelFallFlying() clamps fallDistance to 1.0 whenever vy > -0.5 b/t
+        // Angle-, speed-, and ping-scaled lead window:
+        // Rocket 3 @ 70 deg -> ~6.2-7.0m; Rocket 3 @ 40 deg -> ~4.4-5.1m; Elytra head-on -> ~8.0-9.0m
+        double sinDive = Mth.clamp(Math.sin(Math.toRadians(Math.max(0.0D, diveAngleDeg))), 0.0D, 1.0D);
+        double speedBonus = Mth.clamp((relSpeed - 1.15D) * 0.45D, 0.0D, 0.65D);
+        double pingTicks = Mth.clamp(getLocalPingMs() / 100.0D, 0.0D, 1.4D);
+        double leadTicks = 0.45D + 1.05D * sinDive + speedBonus + pingTicks;
+        int fullTicks = Math.min(5, (int) Math.floor(leadTicks));
+        double fracTick = leadTicks - Math.floor(leadTicks);
+
+        // Vanilla travelFallFlying() clamps fal
         double simFallDist = (pvy <= -0.5D) ? Math.max(mc.player.fallDistance, 1.0D) : 1.0D;
 
         double simPx = ex, simPy = ey, simPz = ez;
@@ -1169,7 +1199,7 @@ public final class ElytraTarget extends Module {
         double simOffX = 0.0D, simOffY = 0.0D, simOffZ = 0.0D;
         double simEvx = evx, simEvy = evy, simEvz = evz;
         double enemyDrag = target.isFallFlying() ? 0.99D : 0.91D;
-        double strikeRadius = 2.15D;
+        double strikeRadius = 2.55D;
 
         for (int t = 1; t <= fullTicks + 1; t++) {
             double stepFraction = (t <= fullTicks) ? 1.0D : fracTick;
@@ -1179,6 +1209,7 @@ public final class ElytraTarget extends Module {
 
             double prevPx = simPx, prevPy = simPy, prevPz = simPz;
             double prevOffX = simOffX, prevOffY = simOffY, prevOffZ = simOffZ;
+            double prevFall = simFallDist;
 
             simPx += simVx * stepFraction;
             simPy += simVy * stepFraction;
@@ -1191,6 +1222,27 @@ public final class ElytraTarget extends Module {
             simOffY += simEvy * stepFraction;
             simOffZ += simEvz * stepFraction;
 
+            // 4-substep swept check per tick: prevents high-speed tunneling AND checks floor height per substep
+            for (int s = 1; s <= 4; s++) {
+                double f = s * 0.25D;
+                double subPx = prevPx + (simPx - prevPx) * f;
+                double subPy = prevPy + (simPy - prevPy) * f;
+                double subPz = prevPz + (simPz - prevPz) * f;
+                double subOffX = prevOffX + (simOffX - prevOffX) * f;
+                double subOffY = prevOffY + (simOffY - prevOffY) * f;
+                double subOffZ = prevOffZ + (simOffZ - prevOffZ) * f;
+                double subFall = prevFall + (simFallDist - prevFall) * f;
+
+                boolean aboveEnemyFloor = subPy >= (box.minY + subOffY - 0.55D);
+                if (!aboveEnemyFloor || subFall < 1.50D) {
+                    continue;
+                }
+                double subDist = distPointToShiftedBox(subPx, subPy, subPz, box, subOffX, subOffY, subOffZ);
+                if (subDist <= strikeRadius) {
+                    return true;
+                }
+            }
+
             if (stepFraction >= 0.999D) {
                 simVx *= 0.91D;
                 simVy = (simVy - 0.08D) * 0.98D;
@@ -1201,24 +1253,6 @@ public final class ElytraTarget extends Module {
                 if (!target.onGround() && !target.isFallFlying()) {
                     simEvy = (simEvy - 0.08D) * 0.98D;
                 }
-            }
-
-            // Evaluate midpoint + endpoint so high-speed Rocket 3 dives cannot tunnel past hitbox
-            double midPx = (prevPx + simPx) * 0.5D;
-            double midPy = (prevPy + simPy) * 0.5D;
-            double midPz = (prevPz + simPz) * 0.5D;
-            double midOffX = (prevOffX + simOffX) * 0.5D;
-            double midOffY = (prevOffY + simOffY) * 0.5D;
-            double midOffZ = (prevOffZ + simOffZ) * 0.5D;
-
-            double midDist = distPointToShiftedBox(midPx, midPy, midPz, box, midOffX, midOffY, midOffZ);
-            double endDist = distPointToShiftedBox(simPx, simPy, simPz, box, simOffX, simOffY, simOffZ);
-
-            // Prevent premature unequip if gravity sag drops eyes underneath enemy feet before arrival
-            boolean aboveEnemyFloor = simPy >= (box.minY + simOffY - 0.35D);
-
-            if (aboveEnemyFloor && simFallDist >= 1.55D && (endDist <= strikeRadius || midDist <= strikeRadius)) {
-                return true;
             }
         }
         return false;
@@ -1276,6 +1310,8 @@ public final class ElytraTarget extends Module {
         betaFlightCancelUntilMs = 0L;
         betaPendingReequip = false;
         betaReequipAfterTick = -100;
+        elytraEquippedNotGlidingSinceMs = 0L;
+        trackedEnemyUpdatedTick = -100;
         trackedEnemyId = -1;
         trackedEnemyVx = 0.0D;
         trackedEnemyVy = 0.0D;

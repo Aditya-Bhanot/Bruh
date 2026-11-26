@@ -508,8 +508,10 @@ public class MaceTarget extends Module {
             boolean armorChanged = isWearingElytra(client) != wasWearingElytraAtStart;
 
             if (swapStage == ConsolidatedSwapStage.WAIT_TO_RESTORE) {
-                // Wait at least 1 tick so handleKeybinds() on stageStartTick consumes keyUse and equips the armor!
-                if (ticksElapsed < 1 || (!armorChanged && ticksElapsed < 2)) {
+                boolean unequipReady = (queuedSwapPriority == ActionPriority.AUTO_ELYTRA_UNEQUIP
+                        && !client.player.isFallFlying());
+                // Wait 1 tick for useItem processing; don't stall to Tick 2 on fast dives once glide is cancelled
+                if (ticksElapsed < 1 || (!armorChanged && !unequipReady && ticksElapsed < 2)) {
                     if (targetHotbarSlot >= 0 && targetHotbarSlot <= 8
                             && client.player.getInventory().getSelectedSlot() != targetHotbarSlot) {
                         client.player.getInventory().setSelectedSlot(targetHotbarSlot);
@@ -1143,6 +1145,7 @@ public class MaceTarget extends Module {
             if (isWearingElytra(client)) {
                 ElytraTarget autoElytra = ElytraTarget.getInstance();
                 if (autoElytra != null && autoElytra.isEnabled()) {
+                    autoElytra.syncTargetAndVelocity(target);
                     if (autoElytra.shouldTriggerPriority1Unequip(target)) {
                         yieldToPriority1AutoElytraUnequip(client);
                     }
@@ -1161,9 +1164,12 @@ public class MaceTarget extends Module {
                 if (!isRightClickUseOrSwapActive(client) && shouldAimAtTarget(client) && canSafelyAimForMace(client)) {
                     queueSilentServerRotation(computeExactCenterAimAngle(client, target));
                 }
-            } else if (distToTarget <= swingRange.getValue() + 0.75D) {
+            } else if (distToTarget <= swingRange.getValue() + 2.5D) {
                 if (!ActionManager.verifyStrict3mAttackRaycast(client, target, swingRange.getValue(), client.player.getViewVector(1.0F))) {
                     alignCameraOntoHitboxForStrike(client, target);
+                    lastBetaAppliedYaw = client.player.getYRot();
+                    lastBetaAppliedPitch = client.player.getXRot();
+                    hasLastBetaAppliedRot = true;
                 }
             }
 
@@ -1254,6 +1260,27 @@ public class MaceTarget extends Module {
         lastActiveGlideDiveTick = curTick;
         postUnequipSmashEndTick = curTick + 25;
         CombatStateManager.acquireMaceSmashLock();
+    }
+
+    public int resolveOptimalMaceSlotForHandoff(Minecraft client, LivingEntity diveTarget, int fallbackSlot) {
+        if (!isEnabled() || !autoSwitch.getValue() || client == null || client.player == null || diveTarget == null) {
+            return fallbackSlot;
+        }
+        int maceSlot = resolveMaceSlot(client);
+        if (maceSlot < 0 || maceSlot > 8) {
+            return fallbackSlot;
+        }
+        double dist = getPrecisionDistanceToTarget(client, diveTarget);
+        double speed = client.player.getDeltaMovement().length();
+        // On fast/close dives (<= 2.5 ticks to reach), hand off directly from Chestplate -> Mace on Tick 1
+        if (dist <= Math.max(4.8D, swingRange.getValue() + speed * 2.5D)) {
+            if (savedHotbarSlot == -1 && fallbackSlot >= 0 && fallbackSlot <= 8 && fallbackSlot != maceSlot) {
+                savedHotbarSlot = fallbackSlot;
+            }
+            targetMaceSlot = maceSlot;
+            return maceSlot;
+        }
+        return fallbackSlot;
     }
 
     public int prepareDirectMaceHandoffSlot(Minecraft client, int currentHotbarSlot, LivingEntity diveTarget) {
