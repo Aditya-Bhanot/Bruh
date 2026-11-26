@@ -95,6 +95,8 @@ public class ElytraHelper extends Module {
     private int phaseTicksElapsed = 0;
     private int requiredPhaseTicks = 1;
     private long lastProcessedGameTime = Long.MIN_VALUE;
+    private int lastProcessedPlayerTick = -1;
+    private long queuedSwapAtMs = 0L;
     private long clientTickCounter = 0L;
     private long nextAllowedSwapTick = 0L;
     private boolean wasBindPressedLastTick = false;
@@ -213,17 +215,19 @@ public class ElytraHelper extends Module {
 
     private void processClientTick(Minecraft client) {
         if (client == null || client.player == null || client.level == null || client.gameMode == null) {
+            lastProcessedPlayerTick = -1;
             releaseForcedJump(client);
             resetState();
             return;
         }
 
         MaceTarget.ActionManager.getInstance().onPreTickRender(client);
-        long gameTime = client.level.getGameTime();
-        if (gameTime == lastProcessedGameTime) {
+
+        int playerTick = client.player.tickCount;
+        if (playerTick == lastProcessedPlayerTick) {
             return;
         }
-        lastProcessedGameTime = gameTime;
+        lastProcessedPlayerTick = playerTick;
         clientTickCounter++;
         if (nextAllowedSwapTick - clientTickCounter > 10L) {
             nextAllowedSwapTick = clientTickCounter;
@@ -243,6 +247,12 @@ public class ElytraHelper extends Module {
             return;
         }
 
+        long nowMs = System.currentTimeMillis();
+        // Never allow a pending swap to stick isSwapBusy() == true permanently
+        if (queuedSwapPending && (nowMs - queuedSwapAtMs) > 450L) {
+            queuedSwapPending = false;
+        }
+
         boolean keyDown = isMacroKeyDown(client);
         boolean callbackTap = callbackPressLatched;
         callbackPressLatched = false;
@@ -254,12 +264,12 @@ public class ElytraHelper extends Module {
                 queuedSwapPending = false;
             } else {
                 queuedSwapPending = true;
-                manualSwapLockUntilMs = System.currentTimeMillis() + MANUAL_OVERRIDE_LOCK_MS;
+                queuedSwapAtMs = nowMs;
+                manualSwapLockUntilMs = nowMs + MANUAL_OVERRIDE_LOCK_MS;
             }
         }
 
         if (phase != SwapPhase.IDLE) {
-            // Skip packet stages during back-to-back FCL lag catch-up ticks (<20ms apart) to prevent Post
             if (!canSendPacketThisTick()) {
                 return;
             }
@@ -282,7 +292,7 @@ public class ElytraHelper extends Module {
             queuedSwapPending = false;
             startSwapMacro(client);
         }
-    }
+}
 
     private void startSwapMacro(Minecraft client) {
         boolean wearingElytra = client.player.getItemBySlot(EquipmentSlot.CHEST).is(Items.ELYTRA);
@@ -462,7 +472,7 @@ public class ElytraHelper extends Module {
     private boolean canSendPacketThisTick() {
         MaceTarget.ActionManager mgr = MaceTarget.ActionManager.getInstance();
         return mgr.isSafePreMotionTick()
-                && (System.nanoTime() - lastPacketActionNanoTime) >= 28_000_000L;
+                && (System.nanoTime() - lastPacketActionNanoTime) >= 12_000_000L;
     }
 
     private void markPacketActionSent() {

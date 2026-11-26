@@ -167,6 +167,8 @@ public class MaceTarget extends Module {
         private int cachedTargetMask = -1;
         private int lastPreTickHandled = -100;
         private int lastObservedPlayerId = -1;
+        private int consecutiveCatchUpSkips = 0;
+        private int lastObservedPlayerTickCount = -1;
         private int lastSlotMutationTick = -100;
         private boolean insideStartClientTick = false;
         private boolean hasQueuedExternalSwap = false;
@@ -222,21 +224,29 @@ public class MaceTarget extends Module {
                 resetAll();
                 return;
             }
-            long nowNs = System.nanoTime();
-            // Detect genuine new client ticks vs same-tick duplicate callers vs lag catch-up bursts (<28ms)
-            if (client.player.tickCount != lastPreTickHandled) {
+            checkWorldOrRespawnReset(client);
+
+            int curPlayerTick = client.player.tickCount;
+            if (curPlayerTick != lastPreTickHandled) {
+                long nowNs = System.nanoTime();
                 long deltaNs = lastPreTickNanoTime == 0L ? 50_000_000L : (nowNs - lastPreTickNanoTime);
-                prevClientTickIntervalNs = deltaNs;
-                catchUpTickActive = deltaNs < 28_000_000L;
+                // Only defer on true same-frame catch-up bursts (<12ms) and never skip 2 ticks in a row
+                if (deltaNs < 12_000_000L && consecutiveCatchUpSkips < 1) {
+                    catchUpTickActive = true;
+                    consecutiveCatchUpSkips++;
+                } else {
+                    catchUpTickActive = false;
+                    consecutiveCatchUpSkips = 0;
+                }
                 clientTickCounter++;
                 lastPreTickNanoTime = nowNs;
-                lastPreTickHandled = client.player.tickCount;
+                lastPreTickHandled = curPlayerTick;
             }
+
             if (client.screen != null) {
                 abortActiveConsolidatedSwap(client);
                 return;
             }
-            checkWorldOrRespawnReset(client);
             checkLockTimeouts();
             int currentMask = MaceTarget.getTargetSelectionMask();
             if (cachedTargetsTick != clientTickCounter || cachedTargetMask != currentMask) {
@@ -250,7 +260,7 @@ public class MaceTarget extends Module {
             }
             insideStartClientTick = true;
             try {
-                if (hasQueuedExternalSwap && !isSwapInProgress() && client.screen == null) {
+                if (hasQueuedExternalSwap && !isSwapInProgress() && client.screen == null && !catchUpTickActive) {
                     boolean useCurrent = queuedExternalUseCurrentSlot;
                     int prefSlot = queuedExternalPreferredSlot;
                     hasQueuedExternalSwap = false;
@@ -296,11 +306,13 @@ public class MaceTarget extends Module {
 
         private void checkWorldOrRespawnReset(Minecraft client) {
             int playerId = client.player.getId();
-            if (playerId != lastObservedPlayerId || client.player.tickCount < cachedTargetsTick) {
+            int playerTick = client.player.tickCount;
+            if (playerId != lastObservedPlayerId
+                    || (lastObservedPlayerTickCount >= 0 && playerTick < lastObservedPlayerTickCount)) {
                 lastObservedPlayerId = playerId;
                 resetAll();
-                cachedTargetsTick = client.player.tickCount;
             }
+            lastObservedPlayerTickCount = playerTick;
         }
 
         private void detectCriticalSurvivalLock(Minecraft client) {
@@ -851,6 +863,10 @@ public class MaceTarget extends Module {
             lastSlotMutationTick = -100;
             cachedTargetsTick = -100;
             lastPreTickHandled = -100;
+            lastPreTickNanoTime = 0L;
+            catchUpTickActive = false;
+            consecutiveCatchUpSkips = 0;
+            lastObservedPlayerTickCount = -1;
             validTargetsMutable.clear();
             validTargetsView = Collections.emptyList();
         }

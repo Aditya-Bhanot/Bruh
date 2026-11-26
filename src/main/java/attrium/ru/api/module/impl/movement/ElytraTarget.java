@@ -143,6 +143,7 @@ public final class ElytraTarget extends Module {
     private double airbornePeakY = Double.NaN;
     private int lastProcessedMovementTick = -100;
     private int lastObservedPlayerId = -1;
+    private int lastObservedPlayerTickCount = -1;
     private LivingEntity cachedTarget = null;
 
     private boolean betaFlightCancelSuppressGlide = false;
@@ -364,18 +365,24 @@ public final class ElytraTarget extends Module {
             return;
         }
         int currentId = mc.player.getId();
-        if (currentId != lastObservedPlayerId || mc.player.tickCount < lastProcessedMovementTick) {
+        int playerTick = mc.player.tickCount;
+        if (currentId != lastObservedPlayerId
+                || (lastObservedPlayerTickCount >= 0 && playerTick < lastObservedPlayerTickCount)) {
             lastObservedPlayerId = currentId;
-            lastProcessedMovementTick = mc.player.tickCount;
+            lastProcessedMovementTick = -100;
             lastElytraEquipCompletedTick = -100;
             lastHotbarScanTick = -100;
             cachedChestplateSlot = -1;
             cachedElytraSlot = -1;
             flightState = CombatFlightState.STATE_1_FLIGHT;
             forceCancelFlightInput = false;
+            postHitReequipPending = false;
+            postHitReequipAttempts = 0;
+            elytraEquippedNotGlidingSinceMs = 0L;
+            releaseForcedGlideJump();
             swapCommitmentTimer.reset();
-            ActionManager.getInstance().resetAll();
         }
+        lastObservedPlayerTickCount = playerTick;
     }
 
     private void runAutoElytraCycle() {
