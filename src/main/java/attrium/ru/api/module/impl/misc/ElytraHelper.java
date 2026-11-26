@@ -6,6 +6,7 @@ import attrium.ru.api.events.impl.TickEvent;
 import attrium.ru.api.module.Module;
 import attrium.ru.api.module.ModuleCategory;
 import attrium.ru.api.module.impl.combat.MaceTarget;
+import attrium.ru.manager.Manager;
 import attrium.ru.api.settings.impl.BooleanSetting;
 import attrium.ru.api.settings.impl.NumberSetting;
 import attrium.ru.mixin.accessor.CarriedItemSyncInvoker;
@@ -95,6 +96,7 @@ public class ElytraHelper extends Module {
     private int phaseTicksElapsed = 0;
     private int requiredPhaseTicks = 1;
     private long lastProcessedGameTime = Long.MIN_VALUE;
+    private int lastProcessedStartTickId = -1;
     private int lastProcessedPlayerTick = -1;
     private long queuedSwapAtMs = 0L;
     private long clientTickCounter = 0L;
@@ -176,10 +178,14 @@ public class ElytraHelper extends Module {
     }
 
     public static void tickMacroGlobal(Minecraft client, int guiBoundKey) {
-        ElytraHelper helper = getInstance();
         if (guiBoundKey != -1 && guiBoundKey != 0 && guiBoundKey != GLFW.GLFW_KEY_UNKNOWN) {
             syncedGuiBoundKey = guiBoundKey;
         }
+        // Reject any out-of-phase caller (GUI poll, render thread, END_CLIENT_TICK) to prevent GrimAC Post flags
+        if (!Manager.isInStartClientTick()) {
+            return;
+        }
+        ElytraHelper helper = getInstance();
         helper.processClientTick(client);
     }
 
@@ -210,12 +216,15 @@ public class ElytraHelper extends Module {
 
     @SubscribeEvent
     public void onTick(TickEvent.Pre event) {
-        // Driven exclusively via Manager.java ClientTickEvents.START_CLIENT_TICK -> tickMacroGlobal()
+        // Driven exclusively via Manager.java START_CLIENT_TICK -> tickMacroGlobal()
     }
 
     private void processClientTick(Minecraft client) {
+        if (!Manager.isInStartClientTick()) {
+            return;
+        }
         if (client == null || client.player == null || client.level == null || client.gameMode == null) {
-            lastProcessedPlayerTick = -1;
+            lastProcessedStartTickId = -1;
             releaseForcedJump(client);
             resetState();
             return;
@@ -223,11 +232,11 @@ public class ElytraHelper extends Module {
 
         MaceTarget.ActionManager.getInstance().onPreTickRender(client);
 
-        int playerTick = client.player.tickCount;
-        if (playerTick == lastProcessedPlayerTick) {
+        int startTickId = Manager.getStartClientTickCount();
+        if (startTickId == lastProcessedStartTickId) {
             return;
         }
-        lastProcessedPlayerTick = playerTick;
+        lastProcessedStartTickId = startTickId;
         clientTickCounter++;
         if (nextAllowedSwapTick - clientTickCounter > 10L) {
             nextAllowedSwapTick = clientTickCounter;
@@ -248,7 +257,6 @@ public class ElytraHelper extends Module {
         }
 
         long nowMs = System.currentTimeMillis();
-        // Never allow a pending swap to stick isSwapBusy() == true permanently
         if (queuedSwapPending && (nowMs - queuedSwapAtMs) > 450L) {
             queuedSwapPending = false;
         }
@@ -292,7 +300,7 @@ public class ElytraHelper extends Module {
             queuedSwapPending = false;
             startSwapMacro(client);
         }
-}
+    }
 
     private void startSwapMacro(Minecraft client) {
         boolean wearingElytra = client.player.getItemBySlot(EquipmentSlot.CHEST).is(Items.ELYTRA);
@@ -488,8 +496,8 @@ public class ElytraHelper extends Module {
             return;
         }
         if (client.player.getInventory().getSelectedSlot() != targetSlot) {
+            // Set selectedSlot inside START_CLIENT_TICK; vanilla gameMode.tick() / useItem() sends C09 cleanly
             client.player.getInventory().setSelectedSlot(targetSlot);
-            ((CarriedItemSyncInvoker) client.gameMode).attrium$ensureHasSentCarriedItem();
             MaceTarget.ActionManager.getInstance().markHotbarSlotMutated();
             markPacketActionSent();
         }

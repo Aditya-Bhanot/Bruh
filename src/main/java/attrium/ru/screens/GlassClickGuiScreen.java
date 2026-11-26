@@ -893,7 +893,7 @@ public class GlassClickGuiScreen extends Screen {
             if (FreelookManager.isFreelooking() && FreelookManager.isHoldMode()) {
                 FreelookManager.deactivate(mc);
             }
-            LungeHelper.tickMacroGlobal(mc, LungeHelper.getMacroBoundKey());
+            // Never tick LungeHelper from pollGlobalKeybinds() (causes GrimAC Post flags)
             return;
         }
 
@@ -929,13 +929,15 @@ public class GlassClickGuiScreen extends Screen {
             CachedModuleRow row = gui.allModuleRows[i];
             int key = gui.resolveEffectiveBindKey(row);
 
-            // Action Macros (LungeHelper & ElytraHelper): pure keybind-driven macros with no ON/OFF toggle
+            // Action Macros (LungeHelper & ElytraHelper): sync bound key ONLY; ticking runs strictly in Manager START_CLIENT_TICK
             if (isActionMacroRow(row)) {
-                if (isElytraHelperRow(row)) {
-                    invokeStaticMacroTick(row.module, mc, key);
-                } else {
-                    lungeRowHandled = true;
-                    LungeHelper.tickMacroGlobal(mc, key);
+                if (key != -1 && key != 0 && key != GLFW.GLFW_KEY_UNKNOWN) {
+                    if (isElytraHelperRow(row)) {
+                        invokeStaticMacroSetKey(row.module, key);
+                    } else {
+                        lungeRowHandled = true;
+                        LungeHelper.setMacroBoundKey(key);
+                    }
                 }
                 continue;
             }
@@ -979,9 +981,7 @@ public class GlassClickGuiScreen extends Screen {
             row.wasKeyDownInGame = isDown;
         }
 
-        if (!lungeRowHandled) {
-            LungeHelper.tickMacroGlobal(mc, LungeHelper.getMacroBoundKey());
-        }
+        // LungeHelper ticks strictly inside Manager.java START_CLIENT_TICK (never from pollGlobalKeybinds)
 
         int fKey = FriendManager.getFriendBindKey();
         if (fKey != -1 && fKey != 0 && fKey != GLFW.GLFW_KEY_UNKNOWN) {

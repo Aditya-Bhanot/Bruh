@@ -294,13 +294,10 @@ public class MaceTarget extends Module {
 
             int currentMask = MaceTarget.getTargetSelectionMask();
             if (cachedTargetsTick != clientTickCounter || cachedTargetMask != currentMask) {
-                boolean newTick = (cachedTargetsTick != clientTickCounter);
                 cachedTargetsTick = clientTickCounter;
                 cachedTargetMask = currentMask;
                 rebuildValidTargetsCacheOncePerTick(client);
-                if (newTick) {
-                    advanceSwapBeforeKeybinds(client);
-                }
+                // NEVER advance hotbar swaps here (ensureTickSynchronized can be called from DrawEvent!)
             }
         }
 

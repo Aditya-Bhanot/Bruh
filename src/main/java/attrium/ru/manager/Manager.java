@@ -58,14 +58,31 @@ public class Manager {
         eventBus.register(ItemToolkit.INSTANCE);
 
         ClientTickEvents.START_CLIENT_TICK.register(client -> {
-            warmClickGuiText();
-            WorldAnimation.tick();
-            ClickGui.tickMovementKeys();
-            postEvent(new TickEvent.Pre(client));
-            ElytraHelper.tickMacroGlobal(client, ElytraHelper.getMacroBoundKey());
-            LungeHelper.tickMacroGlobal(client, LungeHelper.getMacroBoundKey());
+            inStartClientTick = true;
+            startClientTickCount++;
+            try {
+                warmClickGuiText();
+                WorldAnimation.tick();
+                ClickGui.tickMovementKeys();
+                postEvent(new TickEvent.Pre(client));
+                ElytraHelper.tickMacroGlobal(client, ElytraHelper.getMacroBoundKey());
+                LungeHelper.tickMacroGlobal(client, LungeHelper.getMacroBoundKey());
+            } finally {
+                inStartClientTick = false;
+            }
         });
         ClientTickEvents.END_CLIENT_TICK.register(client -> postEvent(new TickEvent.Post(client)));
+    }
+
+    private static volatile boolean inStartClientTick = false;
+    private static int startClientTickCount = 0;
+
+    public static boolean isInStartClientTick() {
+        return inStartClientTick;
+    }
+
+    public static int getStartClientTickCount() {
+        return startClientTickCount;
     }
 
     public static Manager getInstance() {

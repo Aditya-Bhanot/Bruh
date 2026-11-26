@@ -16,6 +16,8 @@ import attrium.ru.api.events.impl.DrawEvent;
 import attrium.ru.api.events.impl.TickEvent;
 import attrium.ru.api.module.Module;
 import attrium.ru.api.module.impl.combat.MaceTarget;
+import attrium.ru.manager.Manager;
+import attrium.ru.api.module.impl.combat.MaceTarget;
 import attrium.ru.api.module.ModuleCategory;
 import attrium.ru.api.settings.impl.BooleanSetting;
 import attrium.ru.api.settings.impl.ModeSetting;
@@ -50,6 +52,7 @@ public class LungeHelper extends Module {
 
     private enum LungePhase {
         IDLE,
+        WAIT_BEFORE_STAB,
         HOLD_VISIBLE_SPEAR_BEFORE_SWAP_BACK
     }
 
@@ -146,6 +149,7 @@ public class LungeHelper extends Module {
     private boolean wasBindPressedLastTick = false;
     private boolean singleLungeFiredThisHold = false;
     private long lastTickProcessedGameTime = -1L;
+    private int lastProcessedStartTickId = -1;
 
     private int clientTickCounter = 0;
     private int nextAllowedLungeTick = 0;
@@ -203,6 +207,10 @@ public class LungeHelper extends Module {
         if (guiBoundKey != -1 && guiBoundKey != 0 && guiBoundKey != GLFW.GLFW_KEY_UNKNOWN) {
             syncedGuiBoundKey = guiBoundKey;
         }
+        // Reject any out-of-phase caller (GUI poll, render thread, END_CLIENT_TICK) to prevent GrimAC Post flags
+        if (!Manager.isInStartClientTick()) {
+            return;
+        }
         LungeHelper mod = getInstance();
         if (mod != null) {
             mod.processClientTick(client);
@@ -245,21 +253,27 @@ public class LungeHelper extends Module {
 
     @SubscribeEvent
     public void onTick(TickEvent.Pre event) {
-        // Driven exclusively via Manager.java ClientTickEvents.START_CLIENT_TICK -> tickMacroGlobal()
+        // Driven exclusively via Manager.java START_CLIENT_TICK -> tickMacroGlobal()
     }
 
     public void processClientTick(Minecraft client) {
+        if (!Manager.isInStartClientTick()) {
+            return;
+        }
         if (client == null || client.player == null || client.level == null || client.gameMode == null) {
+            lastProcessedStartTickId = -1;
             resetState();
             return;
         }
 
-        MaceTarget.ActionManager.getInstance().onPreTickRender(client);
-        long currentGameTime = client.level.getGameTime();
-        if (currentGameTime == lastTickProcessedGameTime) {
+        MaceTarget.ActionManager actionMgr = MaceTarget.ActionManager.getInstance();
+        actionMgr.onPreTickRender(client);
+
+        int startTickId = Manager.getStartClientTickCount();
+        if (startTickId == lastProcessedStartTickId) {
             return;
         }
-        lastTickProcessedGameTime = currentGameTime;
+        lastProcessedStartTickId = startTickId;
         clientTickCounter++;
         if (nextAllowedLungeTick - clientTickCounter > 25) {
             nextAllowedLungeTick = clientTickCounter;
@@ -269,7 +283,7 @@ public class LungeHelper extends Module {
             callbackPressLatched = false;
             wasBindPressedLastTick = false;
             pendingSingleLunge = false;
-            if (phase == LungePhase.HOLD_VISIBLE_SPEAR_BEFORE_SWAP_BACK || lungeFiredDuringCurrentHold) {
+            if (phase != LungePhase.IDLE || lungeFiredDuringCurrentHold) {
                 executeFinalReleaseSwap(client);
             }
             return;
@@ -296,31 +310,44 @@ public class LungeHelper extends Module {
 
         if (fallingEdge) {
             this.singleLungeFiredThisHold = false;
-            if (this.lungeFiredDuringCurrentHold || this.phase == LungePhase.HOLD_VISIBLE_SPEAR_BEFORE_SWAP_BACK) {
+            if (this.lungeFiredDuringCurrentHold || this.phase != LungePhase.IDLE) {
                 this.pendingReleaseSwap = true;
             }
         }
 
-        // Stage 2: Keep Spear visibly selected in client view for 2 ticks (~100ms), then swap back cleanly
+        // Stage 1B (Tick +1 after slot swap): Spear is already synced by vanilla gameMode.tick() -> fire STAB + swing cleanly
+        if (phase == LungePhase.WAIT_BEFORE_STAB) {
+            if (!actionMgr.isSafePreMotionTick()) {
+                return;
+            }
+            if (client.player.isUsingItem()
+                    || activeSpearSlot < 0 || activeSpearSlot >= 9
+                    || client.player.getInventory().getSelectedSlot() != activeSpearSlot
+                    || !isSpearItem(client.player.getInventory().getItem(activeSpearSlot))) {
+                executeFinalReleaseSwap(client);
+                return;
+            }
+            dispatchSpearStabNow(client);
+            return;
+        }
+
+        // Stage 2: Keep Spear visibly selected for 1 tick, then swap back via vanilla gameMode.tick() C09
         if (phase == LungePhase.HOLD_VISIBLE_SPEAR_BEFORE_SWAP_BACK) {
             visibleHoldTicks++;
-            if (visibleHoldTicks >= VISIBLE_SPEAR_HOLD_TICKS
-                    && MaceTarget.ActionManager.getInstance().isSafePreMotionTick()) {
+            if (visibleHoldTicks >= VISIBLE_SPEAR_HOLD_TICKS && actionMgr.isSafePreMotionTick()) {
                 if (!keyDown || pendingReleaseSwap) {
-                    // Keybind was released -> switch to SwapBack To Selected Slot (if ON) or original slot
                     executeFinalReleaseSwap(client);
                 } else {
-                    // Keybind is STILL held (e.g. Hold To Spam) -> NEVER switch to SwapBack To Selected Slot!
-                    // Switch only to Cooldown Slot (if set) or original fast carrier slot to recharge.
                     executeMidHoldSwapBack(client);
                 }
             }
             return;
         }
 
-        // If user just released the keybind while IDLE after spamming/lunging, now switch to Selected Slot!
         if (!keyDown && pendingReleaseSwap && !pendingSingleLunge) {
-            executeFinalReleaseSwap(client);
+            if (actionMgr.isSafePreMotionTick()) {
+                executeFinalReleaseSwap(client);
+            }
             return;
         }
 
@@ -335,15 +362,13 @@ public class LungeHelper extends Module {
             pendingWaitTicks++;
             if (pendingWaitTicks > MAX_PENDING_WAIT_TICKS) {
                 pendingSingleLunge = false;
-                if (!keyDown && pendingReleaseSwap) {
+                if (!keyDown && pendingReleaseSwap && actionMgr.isSafePreMotionTick()) {
                     executeFinalReleaseSwap(client);
                 }
                 return;
             }
         }
 
-        // Do not fire while eating/blocking, on a catch-up tick, or during an AutoElytra/AutoMace swap
-        MaceTarget.ActionManager actionMgr = MaceTarget.ActionManager.getInstance();
         if (client.player.isUsingItem()
                 || !actionMgr.isSafePreMotionTick()
                 || actionMgr.isSwapInProgress()
@@ -365,16 +390,6 @@ public class LungeHelper extends Module {
             return;
         }
 
-        // Vanilla 1.21.11 requires a 100% charged attack bar for Spear STAB / Lunge (works on ground and in air)
-        if (false /* advanced macro: do not stall on post-swap attack ticker reset */) {
-            int cooldownSlot = getSelectedCooldownSlotIndex();
-            if (cooldownSlot >= 0 && cooldownSlot < 9) {
-                selectHotbarSlotWithPacket(client, cooldownSlot);
-            }
-            return;
-        }
-
-        // Stage 1: Visibly swap to Spear (C09) + dispatch Action.STAB + swing
         executeLegitVisibleSpearLunge(client, spearSlot);
 
         pendingSingleLunge = false;
@@ -384,7 +399,7 @@ public class LungeHelper extends Module {
             pendingReleaseSwap = true;
         }
         int extraTicks = Boolean.TRUE.equals(randomization.getValue()) ? computeRandomizedDelayTicks() : 0;
-        nextAllowedLungeTick = clientTickCounter + Math.max(1, extraTicks);
+        nextAllowedLungeTick = clientTickCounter + Math.max(2, extraTicks + 1);
     }
 
     private void executeLegitVisibleSpearLunge(Minecraft client, int spearSlot) {
@@ -398,12 +413,24 @@ public class LungeHelper extends Module {
         }
         activeSpearSlot = spearSlot;
 
-        // 1. Visibly switch to Spear slot & send C09 FIRST
+        // If switching hotbar slots, select Spear on Tick 0 so vanilla gameMode.tick() sends C09 cleanly,
+        // then fire Action.STAB + swing on Tick 1 (WAIT_BEFORE_STAB) with zero same-tick packet burst.
         if (currentSlot != spearSlot) {
             selectHotbarSlotWithPacket(client, spearSlot);
+            this.visibleHoldTicks = 0;
+            this.phase = LungePhase.WAIT_BEFORE_STAB;
+            return;
         }
 
-        // 2. Dispatch Minecraft 1.21.11 Spear Jab / Lunge packet + swing + reset attack ticker
+        // Already holding Spear -> fire STAB + swing directly inside START_CLIENT_TICK
+        dispatchSpearStabNow(client);
+    }
+
+    private void dispatchSpearStabNow(Minecraft client) {
+        if (client == null || client.player == null || client.player.connection == null) {
+            this.phase = LungePhase.IDLE;
+            return;
+        }
         client.player.connection.send(new ServerboundPlayerActionPacket(
                 ServerboundPlayerActionPacket.Action.STAB,
                 BlockPos.ZERO,
@@ -411,8 +438,6 @@ public class LungeHelper extends Module {
         ));
         client.player.swing(InteractionHand.MAIN_HAND);
         client.player.resetAttackStrengthTicker();
-
-        // 3. Keep Spear visibly held for 2 ticks before swapping back so client view looks legit
         this.visibleHoldTicks = 0;
         this.phase = LungePhase.HOLD_VISIBLE_SPEAR_BEFORE_SWAP_BACK;
     }
@@ -466,10 +491,8 @@ public class LungeHelper extends Module {
             return;
         }
         if (client.player.getInventory().getSelectedSlot() != targetSlot) {
+            // Set selectedSlot inside START_CLIENT_TICK; vanilla gameMode.tick() sends the single C09 in native order
             client.player.getInventory().setSelectedSlot(targetSlot);
-            if (client.gameMode != null) {
-                ((CarriedItemSyncInvoker) client.gameMode).attrium$ensureHasSentCarriedItem();
-            }
             MaceTarget.ActionManager.getInstance().markHotbarSlotMutated();
         }
     }
