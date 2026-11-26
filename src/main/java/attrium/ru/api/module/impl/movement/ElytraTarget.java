@@ -408,14 +408,7 @@ public final class ElytraTarget extends Module {
 
         boolean wearingElytra = isWearingElytra();
         if (!wearingElytra || mc.player.isFallFlying()) {
-            releaseForcedGlideJump();
-        elytraEquippedNotGlidingSinceMs = 0L;
-        postHitReequipPending = false;
-        postHitReequipAtMs = 0L;
-        postHitReequipExpireMs = 0L;
-        postHitReequipNextAttemptMs = 0L;
-        postHitReequipAttempts = 0;
-        groundedSinceMs = 0L;
+            elytraEquippedNotGlidingSinceMs = 0L;
         } else if (elytraEquippedNotGlidingSinceMs == 0L) {
             elytraEquippedNotGlidingSinceMs = now;
         }
@@ -1414,7 +1407,14 @@ public final class ElytraTarget extends Module {
         betaFlightCancelUntilMs = 0L;
         betaPendingReequip = false;
         betaReequipAfterTick = -100;
+        releaseForcedGlideJump();
         elytraEquippedNotGlidingSinceMs = 0L;
+        postHitReequipPending = false;
+        postHitReequipAtMs = 0L;
+        postHitReequipExpireMs = 0L;
+        postHitReequipNextAttemptMs = 0L;
+        postHitReequipAttempts = 0;
+        groundedSinceMs = 0L;
         trackedEnemyUpdatedTick = -100;
         trackedEnemyId = -1;
         trackedEnemyVx = 0.0D;

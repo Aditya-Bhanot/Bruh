@@ -208,8 +208,7 @@ public class ElytraHelper extends Module {
 
     @SubscribeEvent
     public void onTick(TickEvent.Pre event) {
-        Minecraft client = event != null ? event.getClient() : Minecraft.getInstance();
-        processClientTick(client);
+        // Driven exclusively via Manager.java ClientTickEvents.START_CLIENT_TICK -> tickMacroGlobal()
     }
 
     private void processClientTick(Minecraft client) {
@@ -219,6 +218,7 @@ public class ElytraHelper extends Module {
             return;
         }
 
+        MaceTarget.ActionManager.getInstance().onPreTickRender(client);
         long gameTime = client.level.getGameTime();
         if (gameTime == lastProcessedGameTime) {
             return;
@@ -460,7 +460,9 @@ public class ElytraHelper extends Module {
     }
 
     private boolean canSendPacketThisTick() {
-        return (System.nanoTime() - lastPacketActionNanoTime) >= 20_000_000L;
+        MaceTarget.ActionManager mgr = MaceTarget.ActionManager.getInstance();
+        return mgr.isSafePreMotionTick()
+                && (System.nanoTime() - lastPacketActionNanoTime) >= 28_000_000L;
     }
 
     private void markPacketActionSent() {

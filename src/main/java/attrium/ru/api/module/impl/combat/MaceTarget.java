@@ -159,6 +159,8 @@ public class MaceTarget extends Module {
 
         private int clientTickCounter = 0;
         private long lastPreTickNanoTime = 0L;
+        private long prevClientTickIntervalNs = 50_000_000L;
+        private boolean catchUpTickActive = false;
         private int cachedTargetsTick = -100;
         private int cachedTargetMask = -1;
         private int lastPreTickHandled = -100;
@@ -169,8 +171,16 @@ public class MaceTarget extends Module {
         private int queuedExternalPreferredSlot = -1;
         private boolean queuedExternalUseCurrentSlot = false;
 
+        /**
+         * Returns false on back-to-back lag catch-up ticks (< 28ms apart) where Minecraft.runTick()
+         * runs multiple ticks without pumping Pong packets, preventing GrimAC Post flags.
+         */
+        public boolean isSafePreMotionTick() {
+            return !catchUpTickActive;
+        }
+
         public boolean canMutateHotbarSlotThisTick() {
-            return clientTickCounter > lastSlotMutationTick;
+            return !catchUpTickActive && clientTickCounter > lastSlotMutationTick;
         }
 
         public void markHotbarSlotMutated() {
@@ -211,8 +221,11 @@ public class MaceTarget extends Module {
                 return;
             }
             long nowNs = System.nanoTime();
-            // Guard against multiple callers invoking onPreTickRender in the same START_CLIENT_TICK pass
-            if (nowNs - lastPreTickNanoTime > 20_000_000L || client.player.tickCount != lastPreTickHandled) {
+            // Detect genuine new client ticks vs same-tick duplicate callers vs lag catch-up bursts (<28ms)
+            if (client.player.tickCount != lastPreTickHandled) {
+                long deltaNs = lastPreTickNanoTime == 0L ? 50_000_000L : (nowNs - lastPreTickNanoTime);
+                prevClientTickIntervalNs = deltaNs;
+                catchUpTickActive = deltaNs < 28_000_000L;
                 clientTickCounter++;
                 lastPreTickNanoTime = nowNs;
                 lastPreTickHandled = client.player.tickCount;
@@ -379,7 +392,7 @@ public class MaceTarget extends Module {
             if (isBlockedByHigherPriority(priority)) {
                 return false;
             }
-            if (clientTickCounter == lastInteractionTick) {
+            if (catchUpTickActive || clientTickCounter == lastInteractionTick) {
                 return false;
             }
             long now = System.currentTimeMillis();
@@ -1296,10 +1309,7 @@ public class MaceTarget extends Module {
 
     @Override
     protected void onDisable() {
-        Minecraft client = Minecraft.getInstance();
-        if (swapBack.getValue()) {
-            executeSafeLegitSwapBack(client);
-        }
+        // Never mutate hotbar slot from GUI/render thread onDisable (prevents GrimAC Post flags)
         suspendSilentRotation();
         CombatStateManager.releaseMaceSmashLock();
         resetAllStates();

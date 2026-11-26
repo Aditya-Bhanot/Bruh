@@ -15,6 +15,7 @@ import attrium.ru.api.events.annotation.SubscribeEvent;
 import attrium.ru.api.events.impl.DrawEvent;
 import attrium.ru.api.events.impl.TickEvent;
 import attrium.ru.api.module.Module;
+import attrium.ru.api.module.impl.combat.MaceTarget;
 import attrium.ru.api.module.ModuleCategory;
 import attrium.ru.api.settings.impl.BooleanSetting;
 import attrium.ru.api.settings.impl.ModeSetting;
@@ -244,11 +245,7 @@ public class LungeHelper extends Module {
 
     @SubscribeEvent
     public void onTick(TickEvent.Pre event) {
-        Minecraft mc = event != null ? event.getClient() : Minecraft.getInstance();
-        if (mc == null || mc.player == null || mc.level == null) {
-            return;
-        }
-        processClientTick(mc);
+        // Driven exclusively via Manager.java ClientTickEvents.START_CLIENT_TICK -> tickMacroGlobal()
     }
 
     public void processClientTick(Minecraft client) {
@@ -257,6 +254,7 @@ public class LungeHelper extends Module {
             return;
         }
 
+        MaceTarget.ActionManager.getInstance().onPreTickRender(client);
         long currentGameTime = client.level.getGameTime();
         if (currentGameTime == lastTickProcessedGameTime) {
             return;
@@ -306,7 +304,8 @@ public class LungeHelper extends Module {
         // Stage 2: Keep Spear visibly selected in client view for 2 ticks (~100ms), then swap back cleanly
         if (phase == LungePhase.HOLD_VISIBLE_SPEAR_BEFORE_SWAP_BACK) {
             visibleHoldTicks++;
-            if (visibleHoldTicks >= VISIBLE_SPEAR_HOLD_TICKS) {
+            if (visibleHoldTicks >= VISIBLE_SPEAR_HOLD_TICKS
+                    && MaceTarget.ActionManager.getInstance().isSafePreMotionTick()) {
                 if (!keyDown || pendingReleaseSwap) {
                     // Keybind was released -> switch to SwapBack To Selected Slot (if ON) or original slot
                     executeFinalReleaseSwap(client);
@@ -343,8 +342,12 @@ public class LungeHelper extends Module {
             }
         }
 
-        // Do not fire while eating, blocking with shield, or charging a Spear
-        if (client.player.isUsingItem()) {
+        // Do not fire while eating/blocking, on a catch-up tick, or during an AutoElytra/AutoMace swap
+        MaceTarget.ActionManager actionMgr = MaceTarget.ActionManager.getInstance();
+        if (client.player.isUsingItem()
+                || !actionMgr.isSafePreMotionTick()
+                || actionMgr.isSwapInProgress()
+                || !actionMgr.canMutateHotbarSlotThisTick()) {
             return;
         }
 
@@ -467,6 +470,7 @@ public class LungeHelper extends Module {
             if (client.gameMode != null) {
                 ((CarriedItemSyncInvoker) client.gameMode).attrium$ensureHasSentCarriedItem();
             }
+            MaceTarget.ActionManager.getInstance().markHotbarSlotMutated();
         }
     }
 
