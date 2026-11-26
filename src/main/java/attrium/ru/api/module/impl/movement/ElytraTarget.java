@@ -150,7 +150,15 @@ public final class ElytraTarget extends Module {
     private boolean betaPendingReequip = false;
     private int betaReequipAfterTick = -100;
 
-    private static final long AUTO_GLIDE_IDLE_EQUIP_MS = 5000L;
+    private static final long AUTO_GLIDE_IDLE_EQUIP_MS = 3500L;
+    private static final long ELYTRA_HELPER_POST_REEQUIP_GUARD_MS = 500L;
+    private boolean forcedGlideJumpDown = false;
+    private boolean postHitReequipPending = false;
+    private long postHitReequipAtMs = 0L;
+    private long postHitReequipExpireMs = 0L;
+    private long postHitReequipNextAttemptMs = 0L;
+    private int postHitReequipAttempts = 0;
+    private long groundedSinceMs = 0L;
     private long elytraEquippedNotGlidingSinceMs = 0L;
     private int trackedEnemyUpdatedTick = -100;
     private int trackedEnemyId = -1;
@@ -270,6 +278,7 @@ public final class ElytraTarget extends Module {
     @Override
     protected void onDisable() {
         shouldElytraTarget = false;
+        releaseForcedGlideJump();
         ActionManager.getInstance().releaseLock(ActionPriority.AUTO_ELYTRA_UNEQUIP, "AutoElytra_UNEQUIP");
         ActionManager.getInstance().releaseLock(ActionPriority.AUTO_ELYTRA_EQUIP, "AutoElytra_EQUIP");
         resetInternalState();
@@ -311,13 +320,24 @@ public final class ElytraTarget extends Module {
     }
 
     public void enterState3RecoveryLock() {
+        long now = System.currentTimeMillis();
         flightState = CombatFlightState.STATE_3_RECOVERY;
         forceCancelFlightInput = false;
         betaFlightCancelSuppressGlide = false;
         betaFlightCancelUntilMs = 0L;
         betaPendingReequip = false;
-        swapCommitmentTimer.reset();
         glideWindowTimer.reset();
+
+        // Schedule exact Reequip Delay (ms) once per hit (don't reset if Wind Burst bounce arrives 1-2 ticks later)
+        if (!postHitReequipPending || now > postHitReequipExpireMs) {
+            long delayMs = Math.max(0L, Math.round(computeDynamicReequipDelayMs()));
+            postHitReequipPending = true;
+            postHitReequipAtMs = now + delayMs;
+            postHitReequipNextAttemptMs = postHitReequipAtMs;
+            postHitReequipExpireMs = now + Math.max(2500L, delayMs + 2000L);
+            postHitReequipAttempts = 0;
+            swapCommitmentTimer.reset();
+        }
     }
 
     public void notifyMaceAttackLanded() {
@@ -359,9 +379,11 @@ public final class ElytraTarget extends Module {
     }
 
     private void runAutoElytraCycle() {
-        if (ElytraHelper.isManualSwapLockActive()) {
-            return;
+        // Always release our 1-tick synthetic auto-glide jump press on the next tick first
+        if (forcedGlideJumpDown) {
+            releaseForcedGlideJump();
         }
+
         if (mc.player == null || mc.level == null) {
             ActionManager.getInstance().releaseLock(ActionPriority.AUTO_ELYTRA_UNEQUIP, "AutoElytra_UNEQUIP");
             ActionManager.getInstance().releaseLock(ActionPriority.AUTO_ELYTRA_EQUIP, "AutoElytra_EQUIP");
@@ -377,6 +399,7 @@ public final class ElytraTarget extends Module {
             return;
         }
 
+        long now = System.currentTimeMillis();
         ActionManager actionManager = ActionManager.getInstance();
         actionManager.ensureTickSynchronized(mc);
 
@@ -385,15 +408,29 @@ public final class ElytraTarget extends Module {
 
         boolean wearingElytra = isWearingElytra();
         if (!wearingElytra || mc.player.isFallFlying()) {
-            elytraEquippedNotGlidingSinceMs = 0L;
+            releaseForcedGlideJump();
+        elytraEquippedNotGlidingSinceMs = 0L;
+        postHitReequipPending = false;
+        postHitReequipAtMs = 0L;
+        postHitReequipExpireMs = 0L;
+        postHitReequipNextAttemptMs = 0L;
+        postHitReequipAttempts = 0;
+        groundedSinceMs = 0L;
         } else if (elytraEquippedNotGlidingSinceMs == 0L) {
-            elytraEquippedNotGlidingSinceMs = System.currentTimeMillis();
+            elytraEquippedNotGlidingSinceMs = now;
         }
+
         if (wearingElytra && !wasWearingElytraLastTick) {
-            elytraEquippedNotGlidingSinceMs = mc.player.isFallFlying() ? 0L : System.currentTimeMillis();
-            lastElytraEquippedTimeMs = System.currentTimeMillis();
+            lastElytraEquippedTimeMs = now;
             lastElytraEquipCompletedTick = actionManager.getClientTick() + 2;
+            elytraEquippedNotGlidingSinceMs = mc.player.isFallFlying() ? 0L : now;
             forceCancelFlightInput = false;
+            if (postHitReequipPending) {
+                // Confirm Elytra equipped post-hit & extend 0.5s ElytraHelper swap guard
+                postHitReequipPending = false;
+                postHitReequipAttempts = 0;
+                ElytraHelper.notifyAutoElytraReequipped(ELYTRA_HELPER_POST_REEQUIP_GUARD_MS);
+            }
             if (!betaFlightCancelSuppressGlide) {
                 glideWindowTimer.reset();
                 if (flightState != CombatFlightState.STATE_1_FLIGHT) {
@@ -404,6 +441,18 @@ public final class ElytraTarget extends Module {
         wasWearingElytraLastTick = wearingElytra;
         if (!wearingElytra) {
             forceCancelFlightInput = false;
+        } else if (postHitReequipPending) {
+            postHitReequipPending = false;
+            postHitReequipAttempts = 0;
+        }
+
+        if (postHitReequipPending && now > postHitReequipExpireMs) {
+            postHitReequipPending = false;
+            postHitReequipAttempts = 0;
+        }
+
+        if (ElytraHelper.isManualSwapLockActive()) {
+            return;
         }
 
         if (actionManager.isBlockedByHigherPriority(ActionPriority.AUTO_ELYTRA_UNEQUIP)) {
@@ -411,19 +460,35 @@ public final class ElytraTarget extends Module {
             return;
         }
 
-        // Ground landing handling
+        // Ground landing handling (preserve postHitReequipPending across brief <= 350ms ground grazes)
         if (mc.player.onGround()) {
+            if (groundedSinceMs == 0L) {
+                groundedSinceMs = now;
+            }
             forceCancelFlightInput = false;
             betaFlightCancelSuppressGlide = false;
             betaFlightCancelUntilMs = 0L;
             betaPendingReequip = false;
+
+            if (postHitReequipPending && !wearingElytra && !disableOnGround.getValue()
+                    && now >= postHitReequipAtMs && now >= postHitReequipNextAttemptMs) {
+                attemptScheduledPostHitReequip(now, actionManager);
+                return;
+            }
+            if (postHitReequipPending && disableOnGround.getValue() && (now - groundedSinceMs) > 350L) {
+                postHitReequipPending = false;
+                postHitReequipAttempts = 0;
+            }
+
             if (disableOnGround.getValue() && wearingElytra && !actionManager.isSwapInProgress() && canStartNewArmorSwap()) {
                 requestPriority1ChestplateUnequip();
             }
-            if (flightState != CombatFlightState.STATE_1_FLIGHT && !CombatStateManager.isMaceSmashLocked()) {
+            if (flightState != CombatFlightState.STATE_1_FLIGHT && !CombatStateManager.isMaceSmashLocked() && !postHitReequipPending) {
                 flightState = CombatFlightState.STATE_1_FLIGHT;
             }
             return;
+        } else {
+            groundedSinceMs = 0L;
         }
 
         // Resolve target synchronized with AutoMace Target Selection (Players, Mobs, Animals)
@@ -442,7 +507,6 @@ public final class ElytraTarget extends Module {
 
         // =========================================================================
         // PRIORITY 1 (HIGHEST): AUTO_ELYTRA_UNEQUIP
-        // Triggers via Dynamic Intercept (Beta) OR legacy static thresholds
         // =========================================================================
         if (wearingElytra && shouldTriggerPriority1Unequip(cachedTarget)) {
             forceCancelFlightInput = true;
@@ -455,20 +519,37 @@ public final class ElytraTarget extends Module {
             return;
         }
 
+        // =========================================================================
+        // 3.5-SECOND IDLE AUTO-GLIDE PULSE (only after wearing Elytra >= 3.5s without gliding)
+        // =========================================================================
+        if (wearingElytra) {
+            processAutoGlideJumpPulse(actionManager);
+        }
+
+        // =========================================================================
+        // GUARANTEED POST-HIT RE-EQUIP (honors exact Reequip Delay (ms) with retries)
+        // =========================================================================
+        if (postHitReequipPending && !wearingElytra) {
+            if (now >= postHitReequipAtMs && now >= postHitReequipNextAttemptMs) {
+                attemptScheduledPostHitReequip(now, actionManager);
+            }
+            return;
+        }
+
         if (automaceSync.getValue() && CombatStateManager.isMaceSmashLocked() && !wearingElytra) {
             flightState = CombatFlightState.STATE_2_SMASH_WINDOW;
             return;
         }
 
         // =========================================================================
-        // PRIORITY 3: AUTO_ELYTRA_EQUIP (Re-wear Elytra after Dynamic 200ms Delay)
+        // PRIORITY 3: AUTO_ELYTRA_EQUIP
         // =========================================================================
         switch (flightState) {
             case STATE_1_FLIGHT -> {
                 forceCancelFlightInput = false;
                 if (!wearingElytra) {
                     if (shouldEquipElytraInFlightState() && canStartNewArmorSwap()) {
-                        requestPriority3ElytraEquip();
+                        requestPriority3ElytraEquip(false);
                     }
                 }
             }
@@ -484,27 +565,6 @@ public final class ElytraTarget extends Module {
 
                 forceCancelFlightInput = false;
 
-                if (!wearingElytra
-                        && betaPendingReequip
-                        && dynamicInterceptBeta.getValue()
-                        && flightCancelReequip.getValue()
-                        && !mc.player.isFallFlying()
-                        && actionManager.getClientTick() >= betaReequipAfterTick
-                        && !actionManager.isSwapInProgress()) {
-                    double curDist = (cachedTarget != null && cachedTarget.isAlive())
-                            ? getDistanceToBox(mc.player.getEyePosition(1.0F), cachedTarget.getBoundingBox())
-                            : 99.0D;
-                    if (curDist <= 3.15D) {
-                        // Already inside Mace strike zone: skip mid-dive re-equip so AutoMace strikes immediately
-                        betaPendingReequip = false;
-                    } else if (requestBetaSilentElytraReequip()) {
-                        betaPendingReequip = false;
-                    }
-                }
-
-                // Velaris Smash Window Hold:
-                // Keep Chestplate locked on while descending (vel.y < -0.05D) toward cachedTarget so the Mace smash
-                // ALWAYS lands before the 200ms Reequip Delay timer begins!
                 double velY = mc.player.getDeltaMovement().y;
                 boolean stillDescendingOnTarget = velY < -0.05D
                         && cachedTarget != null
@@ -513,13 +573,13 @@ public final class ElytraTarget extends Module {
                 boolean maceStillStriking = (autoMace != null && autoMace.isEnabled() && autoMace.isMidSlamSequence())
                         || CombatStateManager.isMaceSmashLocked();
 
-                if (velY > 0.08D) {
-                    // Player just bounced upward (e.g. Wind Burst / Rocket bounce): start 200ms Reequip Delay now!
+                // Detect upward bounce OR manual melee swing during smash window to start exact Reequip Delay
+                if (velY > 0.08D || mc.player.swinging || mc.player.attackAnim > 0.0F) {
                     enterState3RecoveryLock();
                 } else if (!stillDescendingOnTarget && !maceStillStriking && swapCommitmentTimer.finished(computeDynamicReequipDelayMs())) {
-                    flightState = CombatFlightState.STATE_3_RECOVERY;
+                    enterState3RecoveryLock();
                 } else if (swapCommitmentTimer.finished(1200.0D)) {
-                    flightState = CombatFlightState.STATE_3_RECOVERY;
+                    enterState3RecoveryLock();
                 }
             }
 
@@ -533,10 +593,31 @@ public final class ElytraTarget extends Module {
                     return;
                 }
                 if (canStartNewArmorSwap() && shouldEquipElytraInRecovery()) {
-                    if (requestPriority3ElytraEquip()) {
+                    if (requestPriority3ElytraEquip(true)) {
                         flightState = CombatFlightState.STATE_1_FLIGHT;
                     }
                 }
+            }
+        }
+    }
+
+    private void attemptScheduledPostHitReequip(long now, ActionManager actionManager) {
+        if (mc.player == null || mc.screen != null || mc.player.isUsingItem()) {
+            return;
+        }
+        if (CombatStateManager.isMaceSmashLocked()
+                || actionManager.isSwapInProgress()
+                || !actionManager.canMutateHotbarSlotThisTick()) {
+            return;
+        }
+        if (requestPriority3ElytraEquip(true)) {
+            postHitReequipAttempts++;
+            if (postHitReequipAttempts >= 3) {
+                postHitReequipPending = false;
+                flightState = CombatFlightState.STATE_1_FLIGHT;
+            } else {
+                // Retry after 150ms only if server didn't confirm EquipmentSlot.CHEST flip
+                postHitReequipNextAttemptMs = now + 150L;
             }
         }
     }
@@ -663,8 +744,12 @@ public final class ElytraTarget extends Module {
     }
 
     private boolean requestPriority3ElytraEquip() {
+        return requestPriority3ElytraEquip(false);
+    }
+
+    private boolean requestPriority3ElytraEquip(boolean isPostHitReequip) {
         if (ElytraHelper.isManualSwapLockActive()
-                || (System.currentTimeMillis() - lastAutoArmorSwapMs) < 120L
+                || (!isPostHitReequip && (System.currentTimeMillis() - lastAutoArmorSwapMs) < 120L)
                 || !ActionManager.getInstance().canMutateHotbarSlotThisTick()) {
             return false;
         }
@@ -695,41 +780,63 @@ public final class ElytraTarget extends Module {
             forceCancelFlightInput = false;
             swapCommitmentTimer.reset();
             lastElytraEquippedTimeMs = now;
-            // Start 5s non-gliding timer: re-equip Elytra WITHOUT auto-gliding until 5s have elapsed
+            // Start 3.5s non-gliding timer: re-equip Elytra WITHOUT auto-gliding until 3.5s have elapsed
             elytraEquippedNotGlidingSinceMs = now;
             lastElytraEquipCompletedTick = ActionManager.getInstance().getClientTick() + 3;
             glideWindowTimer.reset();
             jumpPulseToggle = false;
             equipAfterWindChargeApexPending = false;
+            // Block ElytraHelper swaps for 0.5s so pressing ElytraHelper right after post-hit equip won't swap it back
+            ElytraHelper.notifyAutoElytraReequipped(ELYTRA_HELPER_POST_REEQUIP_GUARD_MS);
         }
         return accepted;
     }
 
     @SubscribeEvent
-    private void onInput(InputEvent event) {
+    public void onInput(InputEvent event) {
         if (!isEnabled() || mc.player == null || mc.level == null || mc.screen != null) {
             jumpPulseToggle = false;
             return;
         }
-
         if (forceCancelFlightInput && mc.player.isFallFlying()) {
             event.setJumping(false);
             jumpPulseToggle = false;
+        }
+    }
+
+    private void processAutoGlideJumpPulse(ActionManager actionManager) {
+        if (mc == null || mc.player == null || mc.options == null || mc.screen != null) {
+            releaseForcedGlideJump();
             return;
         }
-
-        if (shouldSendLegalGlideStartPulse()) {
-            int _nowTick = MaceTarget.ActionManager.getInstance().getClientTick();
-            if (_nowTick >= nextGlidePulseAllowedTick && mc.player.getDeltaMovement().y < -0.05D) {
-                event.setJumping(true);
-                nextGlidePulseAllowedTick = _nowTick + 5;
-            }
-            if (mc.player.isFallFlying()) {
-                windChargeAscentDetected = false;
-            }
-        } else {
-            jumpPulseToggle = false;
+        if (forceCancelFlightInput && mc.player.isFallFlying()) {
+            releaseForcedGlideJump();
+            return;
         }
+        if (!shouldSendLegalGlideStartPulse()) {
+            return;
+        }
+        int nowTick = actionManager.getClientTick();
+        if (nowTick < nextGlidePulseAllowedTick) {
+            return;
+        }
+        // If Spacebar is already held, release for 1 tick so vanilla LocalPlayer.aiStep() sees a clean rising edge
+        if (mc.options.keyJump.isDown()) {
+            mc.options.keyJump.setDown(false);
+            forcedGlideJumpDown = true;
+            return;
+        }
+        // Pulse vanilla keyJump inside START_CLIENT_TICK (exact vanilla packet order, zero Post / Elytra A-B)
+        mc.options.keyJump.setDown(true);
+        forcedGlideJumpDown = true;
+        nextGlidePulseAllowedTick = nowTick + 5;
+    }
+
+    private void releaseForcedGlideJump() {
+        if (forcedGlideJumpDown && mc != null && mc.options != null) {
+            mc.options.keyJump.setDown(false);
+        }
+        forcedGlideJumpDown = false;
     }
 
     private boolean shouldSendLegalGlideStartPulse() {
@@ -739,10 +846,7 @@ public final class ElytraTarget extends Module {
         if (betaFlightCancelSuppressGlide && System.currentTimeMillis() <= betaFlightCancelUntilMs) {
             return false;
         }
-        if (flightState != CombatFlightState.STATE_1_FLIGHT) {
-            return false;
-        }
-        if (ActionManager.getInstance().isSwapInProgress()) {
+        if (CombatStateManager.isMaceSmashLocked() || ActionManager.getInstance().isSwapInProgress()) {
             return false;
         }
         if (!isWearingElytra()) {
@@ -775,7 +879,7 @@ public final class ElytraTarget extends Module {
             return false;
         }
 
-        // Only auto-glide if the player has been wearing the Elytra for >= 5 seconds without gliding
+        // Only auto-glide if the player has been wearing the Elytra for >= 3.5 seconds without gliding
         if (elytraEquippedNotGlidingSinceMs == 0L) {
             return false;
         }

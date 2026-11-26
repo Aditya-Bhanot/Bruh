@@ -50,6 +50,7 @@ public class ElytraHelper extends Module {
     private static int syncedGuiBoundKey = -1;
     private static boolean callbackPressLatched = false;
     private static volatile long manualSwapLockUntilMs = 0L;
+    private static volatile long autoElytraReequipGuardUntilMs = 0L;
 
     private static boolean reflectionInitialized = false;
     private static Method moduleKeyGetterMethod = null;
@@ -123,6 +124,20 @@ public class ElytraHelper extends Module {
             return true;
         }
         return System.currentTimeMillis() < manualSwapLockUntilMs;
+    }
+
+    public static void notifyAutoElytraReequipped(long guardDurationMs) {
+        long until = System.currentTimeMillis() + Math.max(0L, guardDurationMs);
+        if (until > autoElytraReequipGuardUntilMs) {
+            autoElytraReequipGuardUntilMs = until;
+        }
+        if (instance != null && instance.phase == SwapPhase.IDLE) {
+            instance.queuedSwapPending = false;
+        }
+    }
+
+    public static boolean isAutoElytraReequipGuardActive() {
+        return System.currentTimeMillis() < autoElytraReequipGuardUntilMs;
     }
 
     public static boolean isSwapBusy() {
@@ -235,8 +250,12 @@ public class ElytraHelper extends Module {
         wasBindPressedLastTick = keyDown;
 
         if (risingEdge) {
-            queuedSwapPending = true;
-            manualSwapLockUntilMs = System.currentTimeMillis() + MANUAL_OVERRIDE_LOCK_MS;
+            if (isAutoElytraReequipGuardActive()) {
+                queuedSwapPending = false;
+            } else {
+                queuedSwapPending = true;
+                manualSwapLockUntilMs = System.currentTimeMillis() + MANUAL_OVERRIDE_LOCK_MS;
+            }
         }
 
         if (phase != SwapPhase.IDLE) {
@@ -254,6 +273,10 @@ public class ElytraHelper extends Module {
                 && canSendPacketThisTick()) {
             if (MaceTarget.ActionManager.getInstance().isSwapInProgress()
                     || !MaceTarget.ActionManager.getInstance().canMutateHotbarSlotThisTick()) {
+                return;
+            }
+            if (isAutoElytraReequipGuardActive()) {
+                queuedSwapPending = false;
                 return;
             }
             queuedSwapPending = false;
