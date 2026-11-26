@@ -52,7 +52,6 @@ public class LungeHelper extends Module {
 
     private enum LungePhase {
         IDLE,
-        WAIT_BEFORE_STAB,
         HOLD_VISIBLE_SPEAR_BEFORE_SWAP_BACK
     }
 
@@ -315,23 +314,7 @@ public class LungeHelper extends Module {
             }
         }
 
-        // Stage 1B (Tick +1 after slot swap): Spear is already synced by vanilla gameMode.tick() -> fire STAB + swing cleanly
-        if (phase == LungePhase.WAIT_BEFORE_STAB) {
-            if (!actionMgr.isSafePreMotionTick()) {
-                return;
-            }
-            if (client.player.isUsingItem()
-                    || activeSpearSlot < 0 || activeSpearSlot >= 9
-                    || client.player.getInventory().getSelectedSlot() != activeSpearSlot
-                    || !isSpearItem(client.player.getInventory().getItem(activeSpearSlot))) {
-                executeFinalReleaseSwap(client);
-                return;
-            }
-            dispatchSpearStabNow(client);
-            return;
-        }
-
-        // Stage 2: Keep Spear visibly selected for 1 tick, then swap back via vanilla gameMode.tick() C09
+        // Stage 2 (Tick +1): Swap back to Cooldown Slot or original slot via vanilla gameMode.tick() C09
         if (phase == LungePhase.HOLD_VISIBLE_SPEAR_BEFORE_SWAP_BACK) {
             visibleHoldTicks++;
             if (visibleHoldTicks >= VISIBLE_SPEAR_HOLD_TICKS && actionMgr.isSafePreMotionTick()) {
@@ -369,7 +352,12 @@ public class LungeHelper extends Module {
             }
         }
 
+        // Vanilla 1.21.11 Lunge preconditions: not using item, not gliding/in water/riding, hunger >= 7 (or creative)
         if (client.player.isUsingItem()
+                || client.player.isFallFlying()
+                || client.player.isInWater()
+                || client.player.isPassenger()
+                || (!client.player.getAbilities().instabuild && client.player.getFoodData().getFoodLevel() <= 6)
                 || !actionMgr.isSafePreMotionTick()
                 || actionMgr.isSwapInProgress()
                 || !actionMgr.canMutateHotbarSlotThisTick()) {
@@ -382,14 +370,18 @@ public class LungeHelper extends Module {
             return;
         }
 
-        if (isSpearOnCooldown(client, spearSlot) || clientTickCounter < nextAllowedLungeTick) {
+        // Vanilla 1.21.11 requires 100% charged attack bar BEFORE swapping to Spear (same-tick Lunge Swap)
+        boolean attackReady = client.player.getAttackStrengthScale(0.5F) >= 1.0F;
+        if (!attackReady || isSpearOnCooldown(client, spearSlot) || clientTickCounter < nextAllowedLungeTick) {
             int cooldownSlot = getSelectedCooldownSlotIndex();
-            if (cooldownSlot >= 0 && cooldownSlot < 9) {
+            if (cooldownSlot >= 0 && cooldownSlot < 9 && client.player.getInventory().getSelectedSlot() != cooldownSlot) {
                 selectHotbarSlotWithPacket(client, cooldownSlot);
             }
             return;
         }
 
+        // Stage 1 (Tick 0, strictly pre-motion inside START_CLIENT_TICK):
+        // Sync C09(Spear) immediately -> send Action.STAB -> swing before server resets attackStrengthTicker!
         executeLegitVisibleSpearLunge(client, spearSlot);
 
         pendingSingleLunge = false;
@@ -399,7 +391,7 @@ public class LungeHelper extends Module {
             pendingReleaseSwap = true;
         }
         int extraTicks = Boolean.TRUE.equals(randomization.getValue()) ? computeRandomizedDelayTicks() : 0;
-        nextAllowedLungeTick = clientTickCounter + Math.max(2, extraTicks + 1);
+        nextAllowedLungeTick = clientTickCounter + Math.max(1, extraTicks);
     }
 
     private void executeLegitVisibleSpearLunge(Minecraft client, int spearSlot) {
@@ -413,24 +405,16 @@ public class LungeHelper extends Module {
         }
         activeSpearSlot = spearSlot;
 
-        // If switching hotbar slots, select Spear on Tick 0 so vanilla gameMode.tick() sends C09 cleanly,
-        // then fire Action.STAB + swing on Tick 1 (WAIT_BEFORE_STAB) with zero same-tick packet burst.
+        // 1. Switch to Spear & flush C09 FIRST on this exact pre-motion tick (before LivingEntity.tick() resets attack bar)
         if (currentSlot != spearSlot) {
-            selectHotbarSlotWithPacket(client, spearSlot);
-            this.visibleHoldTicks = 0;
-            this.phase = LungePhase.WAIT_BEFORE_STAB;
-            return;
+            client.player.getInventory().setSelectedSlot(spearSlot);
+            if (client.gameMode != null) {
+                ((CarriedItemSyncInvoker) client.gameMode).attrium$ensureHasSentCarriedItem();
+            }
+            MaceTarget.ActionManager.getInstance().markHotbarSlotMutated();
         }
 
-        // Already holding Spear -> fire STAB + swing directly inside START_CLIENT_TICK
-        dispatchSpearStabNow(client);
-    }
-
-    private void dispatchSpearStabNow(Minecraft client) {
-        if (client == null || client.player == null || client.player.connection == null) {
-            this.phase = LungePhase.IDLE;
-            return;
-        }
+        // 2. Dispatch 1.21.11 Spear Lunge jab immediately after C09 while attackStrengthTicker is still 100% charged
         client.player.connection.send(new ServerboundPlayerActionPacket(
                 ServerboundPlayerActionPacket.Action.STAB,
                 BlockPos.ZERO,
@@ -438,9 +422,13 @@ public class LungeHelper extends Module {
         ));
         client.player.swing(InteractionHand.MAIN_HAND);
         client.player.resetAttackStrengthTicker();
+
+        // 3. Swap back to Cooldown Slot / original slot on Tick +1 via vanilla gameMode.tick() (no double-C09)
         this.visibleHoldTicks = 0;
         this.phase = LungePhase.HOLD_VISIBLE_SPEAR_BEFORE_SWAP_BACK;
     }
+
+
 
     /**
      * Called between lunges while the keybind is STILL held (Hold To Spam).
@@ -501,19 +489,25 @@ public class LungeHelper extends Module {
         if (client == null || client.player == null || client.player.getInventory() == null) {
             return -1;
         }
-        int fallbackSpear = -1;
+        int bestEnchantedFallback = -1;
+        int plainFallback = -1;
         for (int i = 0; i < 9; i++) {
             ItemStack stack = client.player.getInventory().getItem(i);
-            if (isSpearItem(stack)) {
-                if (!stack.getEnchantments().isEmpty()) {
+            if (!isSpearItem(stack)) {
+                continue;
+            }
+            for (var holder : stack.getEnchantments().keySet()) {
+                if (holder.getRegisteredName().toLowerCase(Locale.ROOT).contains("lunge")) {
                     return i;
                 }
-                if (fallbackSpear == -1) {
-                    fallbackSpear = i;
-                }
+            }
+            if (!stack.getEnchantments().isEmpty() && bestEnchantedFallback == -1) {
+                bestEnchantedFallback = i;
+            } else if (plainFallback == -1) {
+                plainFallback = i;
             }
         }
-        return fallbackSpear;
+        return bestEnchantedFallback != -1 ? bestEnchantedFallback : plainFallback;
     }
 
     private boolean isSpearItem(ItemStack stack) {

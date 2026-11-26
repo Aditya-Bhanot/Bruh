@@ -8,6 +8,8 @@ import attrium.ru.mixin.accessor.CarriedItemSyncInvoker;
 import attrium.ru.api.module.impl.misc.ElytraHelper;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.network.protocol.game.ServerboundPlayerActionPacket;
 import it.unimi.dsi.fastutil.objects.Object2IntMap;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.minecraft.client.KeyMapping;
@@ -817,7 +819,7 @@ public class MaceTarget extends Module {
             if (client == null || client.player == null || client.level == null || target == null || !target.isAlive()) {
                 return false;
             }
-            double legalReach = Math.min(3.0D, Math.max(1.0D, requestedReach));
+            double legalReach = Math.min(4.5D, Math.max(1.0D, requestedReach));
             Vec3 eyePos = client.player.getEyePosition(1.0F);
             Vec3 lookVec = customLookVec != null ? customLookVec.normalize() : client.player.getViewVector(1.0F);
             Vec3 rayEnd = eyePos.add(lookVec.scale(legalReach));
@@ -1062,6 +1064,8 @@ public class MaceTarget extends Module {
     private int spearTrackPrevHurtTime = 0;
     private float spearTrackPrevHealth = -1.0F;
     private int lastSpearAutoPopTick = -100;
+    private float spearTrackPrevAbsorption = 0.0F;
+    private int spearSuppressKeyUseUntilTick = -100;
 
     private double prevYawError = 0.0D;
     private double prevPitchError = 0.0D;
@@ -1223,9 +1227,19 @@ public class MaceTarget extends Module {
                     beginSpearTwoPopMaceFollowup(client, target);
                     return;
                 }
-                // While actively charging a Spear, wait for the Spear charge hit before swapping to Mace
+                // While actively charging a Spear (holding right-click), wait for charge impact before swapping
                 if (client.player.isUsingItem()) {
                     return;
+                }
+                // Direct drop Spear jab (2.0m-4.3m reach): fire real Action.STAB first, then Mace after 0/2 ticks
+                if (!ActionManager.getInstance().isSwapInProgress()
+                        && isFallingForSmash(client)
+                        && distToTarget >= 2.0D && distToTarget <= 4.3D
+                        && cooldownTimer.finished(cooldownMs.getValue())) {
+                    if (tryFireSpearJabOpeningHit(client, target)) {
+                        beginSpearTwoPopMaceFollowup(client, target);
+                        return;
+                    }
                 }
             } else {
                 resetSpearHitTracker();
@@ -1861,14 +1875,13 @@ public class MaceTarget extends Module {
             return;
         }
 
-        // Spear 2-Pop: when dropping while holding a Spear, land the Spear hit first then smash with Mace after 0 or 2 ticks
+        // Spear 2-Pop: fire real 1.21.11 Spear Action.STAB if outside the 2.0m jab deadzone; if <2.0m smash directly with Mace
         if (spearTwoPop.getValue() && isSpearStack(client.player.getMainHandItem()) && targetMaceSlot != -1 && autoSwitch.getValue()) {
-            if (performThrottledAttack(client, targetEntity)) {
-                lastSpearAutoPopTick = ActionManager.getInstance().getClientTick();
+            double dist = getPrecisionDistanceToTarget(client, targetEntity);
+            if (dist >= 2.0D && tryFireSpearJabOpeningHit(client, targetEntity)) {
                 beginSpearTwoPopMaceFollowup(client, targetEntity);
                 return;
             }
-            return;
         }
 
         if (targetMaceSlot != -1 && currentSlot != targetMaceSlot && autoSwitch.getValue()) {
@@ -2510,18 +2523,25 @@ public class MaceTarget extends Module {
                     return;
                 }
                 int curTick = ActionManager.getInstance().getClientTick();
-                if (curTick < spearTwoPopReadyTick) {
-                    return;
+                // Keep Spear released during the 2-tick wait so holding right-click cannot restart charging
+                if (curTick <= spearSuppressKeyUseUntilTick && client.options != null) {
+                    client.options.keyUse.setDown(false);
                 }
                 if (client.player.isUsingItem() && client.gameMode != null) {
                     client.gameMode.releaseUsingItem(client.player);
                 }
+                if (curTick < spearTwoPopReadyTick) {
+                    return;
+                }
                 double dist = getPrecisionDistanceToTarget(client, target);
-                if (!"Silent".equalsIgnoreCase(aimMode.getValue()) && dist <= swingRange.getValue() + 1.5D) {
+                if (!"Silent".equalsIgnoreCase(aimMode.getValue()) && dist <= swingRange.getValue() + 2.0D) {
                     if (!ActionManager.verifyStrict3mAttackRaycast(client, target, swingRange.getValue(), client.player.getViewVector(1.0F))) {
                         alignCameraOntoHitboxForStrike(client, target);
                     }
+                } else if ("Silent".equalsIgnoreCase(aimMode.getValue()) && dist <= swingRange.getValue() + 2.0D) {
+                    queueSilentServerRotation(computeExactCenterAimAngle(client, target));
                 }
+
                 int maceSlot = targetMaceSlot != -1 ? targetMaceSlot : resolveMaceSlot(client);
                 if (maceSlot != -1 && dist <= swingRange.getValue()) {
                     if (client.player.getInventory().getSelectedSlot() != maceSlot) {
@@ -2530,13 +2550,13 @@ public class MaceTarget extends Module {
                             ((CarriedItemSyncInvoker) client.gameMode).attrium$ensureHasSentCarriedItem();
                         }
                     }
-                    if (performSpearTwoPopMaceAttack(client, target, getSpearTwoPopDelayTicks() == 0)) {
+                    if (performSpearTwoPopMaceAttack(client, target, true)) {
                         cooldownTimer.reset();
                         transitionToSwapBackRestore(client);
                         return;
                     }
                 }
-                if (curTick > spearTwoPopReadyTick + 6 || stateTickTimer.finished(350.0D)) {
+                if (curTick > spearTwoPopReadyTick + 6 || stateTickTimer.finished(400.0D)) {
                     transitionToSwapBackRestore(client);
                 }
             }
@@ -2667,6 +2687,10 @@ public class MaceTarget extends Module {
                 || client.player.isInLava()
                 || client.player.getAbilities().flying) {
             return true;
+        }
+        // Keep aim & attack active during the 2-tick Spear -> Mace follow-up even if touching ground
+        if (smashState == SmashSequenceState.STEP_SPEAR_2POP_WAIT_MACE && groundedAfterDiveTicks <= 4) {
+            return false;
         }
         // Never aim while ascending (e.g. Wind Burst upward launch or Rocket climb)
         if (client.player.getDeltaMovement().y >= -0.04D) {
@@ -3035,6 +3059,45 @@ public class MaceTarget extends Module {
     /**
      * Detects when a Spear charge hit or manual Spear hit just connected on the target while dropping.
      */
+    private boolean tryFireSpearJabOpeningHit(Minecraft client, LivingEntity candidate) {
+        if (client == null || client.player == null || client.player.connection == null || candidate == null) {
+            return false;
+        }
+        if (client.player.isUsingItem() || client.player.isFallFlying() || isWearingElytra(client)) {
+            return false;
+        }
+        if (!ActionManager.getInstance().isSafePreMotionTick()) {
+            return false;
+        }
+        if (client.player.getAttackStrengthScale(0.5F) < 0.95F) {
+            return false;
+        }
+        Vec3 activeLookVec = "Silent".equalsIgnoreCase(aimMode.getValue()) && AngleConnection.INSTANCE.getCurrentAngle() != null
+                ? AngleConnection.INSTANCE.getCurrentAngle().toVector()
+                : client.player.getViewVector(1.0F);
+        // Verify raycast hits the enemy within 1.21.11 Spear jab reach (4.3m)
+        if (!ActionManager.verifyStrict3mAttackRaycast(client, candidate, 4.3D, activeLookVec)) {
+            if (!"Silent".equalsIgnoreCase(aimMode.getValue())) {
+                alignCameraOntoHitboxForStrike(client, candidate);
+            }
+            if (!ActionManager.verifyStrict3mAttackRaycast(client, candidate, 4.3D, client.player.getViewVector(1.0F))) {
+                return false;
+            }
+        }
+        if (client.gameMode != null) {
+            ((CarriedItemSyncInvoker) client.gameMode).attrium$ensureHasSentCarriedItem();
+        }
+        client.player.connection.send(new ServerboundPlayerActionPacket(
+                ServerboundPlayerActionPacket.Action.STAB,
+                BlockPos.ZERO,
+                Direction.DOWN
+        ));
+        client.player.swing(InteractionHand.MAIN_HAND);
+        client.player.resetAttackStrengthTicker();
+        lastSpearAutoPopTick = ActionManager.getInstance().getClientTick();
+        return true;
+    }
+
     private boolean detectSpearHitOnTarget(Minecraft client, LivingEntity candidate, double distToTarget) {
         if (client == null || client.player == null || candidate == null || !candidate.isAlive()) {
             resetSpearHitTracker();
@@ -3042,30 +3105,34 @@ public class MaceTarget extends Module {
         }
         int curTick = ActionManager.getInstance().getClientTick();
         int curHurtTime = candidate.hurtTime;
-        float curTotalHp = candidate.getHealth() + candidate.getAbsorptionAmount();
+        float curAbsorb = candidate.getAbsorptionAmount();
+        float curTotalHp = candidate.getHealth() + curAbsorb;
 
         if (candidate.getId() != spearTrackTargetId) {
             spearTrackTargetId = candidate.getId();
             spearTrackPrevHurtTime = curHurtTime;
             spearTrackPrevHealth = curTotalHp;
+            spearTrackPrevAbsorption = curAbsorb;
             return false;
         }
 
-        boolean hurtSpike = curHurtTime > spearTrackPrevHurtTime && curHurtTime >= 7;
-        boolean hpDrop = spearTrackPrevHealth > 0.0F && curTotalHp < (spearTrackPrevHealth - 0.1F) && curHurtTime >= 5;
+        boolean hurtSpike = curHurtTime > spearTrackPrevHurtTime && curHurtTime >= 6;
+        boolean hpDrop = spearTrackPrevHealth > 0.0F && curTotalHp < (spearTrackPrevHealth - 0.1F) && curHurtTime >= 4;
+        boolean totemPop = (curAbsorb > spearTrackPrevAbsorption + 3.0F && candidate.getHealth() <= 4.0F);
         boolean manualSpearSwing = !client.player.isUsingItem()
                 && client.player.swinging
                 && client.player.swingTime <= 1
-                && distToTarget <= swingRange.getValue() + 0.5D;
+                && distToTarget <= 4.5D;
 
         spearTrackPrevHurtTime = curHurtTime;
         spearTrackPrevHealth = curTotalHp;
+        spearTrackPrevAbsorption = curAbsorb;
 
         if ((curTick - lastSpearAutoPopTick) <= 6) {
             return false;
         }
         double maxDetectDist = Math.max(4.6D, swingRange.getValue() + 1.6D);
-        if (distToTarget <= maxDetectDist && (hurtSpike || hpDrop || manualSpearSwing)) {
+        if (distToTarget <= maxDetectDist && (hurtSpike || hpDrop || totemPop || manualSpearSwing)) {
             lastSpearAutoPopTick = curTick;
             return true;
         }
@@ -3090,19 +3157,25 @@ public class MaceTarget extends Module {
         }
         targetMaceSlot = maceSlot;
 
+        int curTick = ActionManager.getInstance().getClientTick();
+        int delayTicks = getSpearTwoPopDelayTicks();
+
+        // Release Spear charge and suppress keyUse across the follow-up window so handleKeybinds doesn't re-charge
+        if (client.options != null) {
+            client.options.keyUse.setDown(false);
+        }
         if (client.player.isUsingItem() && client.gameMode != null) {
             client.gameMode.releaseUsingItem(client.player);
         }
+        spearSuppressKeyUseUntilTick = curTick + Math.max(1, delayTicks + 1);
 
-        int curTick = ActionManager.getInstance().getClientTick();
         CombatStateManager.acquireMaceSmashLock();
         lastActiveGlideDiveTick = curTick;
         postUnequipSmashEndTick = Math.max(postUnequipSmashEndTick, curTick + 25);
 
-        int delayTicks = getSpearTwoPopDelayTicks();
         if (delayTicks <= 0) {
             double dist = getPrecisionDistanceToTarget(client, targetEntity);
-            if (!"Silent".equalsIgnoreCase(aimMode.getValue()) && dist <= swingRange.getValue() + 1.5D) {
+            if (!"Silent".equalsIgnoreCase(aimMode.getValue()) && dist <= swingRange.getValue() + 2.0D) {
                 if (!ActionManager.verifyStrict3mAttackRaycast(client, targetEntity, swingRange.getValue(), client.player.getViewVector(1.0F))) {
                     alignCameraOntoHitboxForStrike(client, targetEntity);
                 }
@@ -3120,7 +3193,6 @@ public class MaceTarget extends Module {
                     return;
                 }
             }
-            // Fallback: if Spear hit slightly outside 3.0m, land the Mace smash on the next tick inside reach
             spearTwoPopReadyTick = curTick;
             stateCommittedTick = curTick;
             stateTickTimer.reset();
@@ -3128,7 +3200,7 @@ public class MaceTarget extends Module {
             return;
         }
 
-        // 2-tick delay: stay on Spear for 2 ticks, then swap to Mace and smash on curTick + 2
+        // 2-tick delay: wait 2 full ticks, then swap to optimal Mace and smash on curTick + 2
         spearTwoPopReadyTick = curTick + delayTicks;
         stateCommittedTick = curTick;
         stateTickTimer.reset();
