@@ -135,7 +135,7 @@ public class GlassClickGuiScreen extends Screen {
     };
 
     private static final String[] CATEGORY_PILLS = new String[]{
-            "All", "Combat", "Movement", "Render", "Player", "World", "Misc"
+            "All", "Combat", "Movement", "Render", "Player", "Misc"
     };
 
     // =========================================================================
@@ -1951,6 +1951,28 @@ public class GlassClickGuiScreen extends Screen {
                     rightEdge = px - 3;
                 }
             }
+            case 4 -> {
+                StringSetting ss = (StringSetting) se.setting;
+                boolean focused = (activeStringSettingEntry == se);
+                int boxW = 132;
+                int boxH = 18;
+                int boxX = drawerX + drawerW - boxW - 14;
+                int boxY = curY + 4;
+                boolean hovered = mouseInsideViewport && isHovered(mouseX, mouseY, boxX, boxY, boxW, boxH);
+                int bg = focused ? COLOR_SEARCH_BG_FOCUSED : (hovered ? COLOR_BIND_BG_HOVER : COLOR_BIND_BG);
+                if (focused) {
+                    drawRoundedRect(boxX - 1, boxY - 1, boxW + 2, boxH + 2, 5, ClientThemeManager.getAccentWithAlpha(0.55F));
+                }
+                drawRoundedRect(boxX, boxY, boxW, boxH, 4, bg);
+                String rawVal = ss.getValue() != null ? ss.getValue() : "";
+                boolean blink = focused && ((System.currentTimeMillis() / 500L) % 2L == 0L);
+                String disp = rawVal.isEmpty() && !focused ? "Type name..." : (rawVal + (blink ? "|" : ""));
+                if (disp.length() > 18) {
+                    disp = disp.substring(disp.length() - 18);
+                }
+                int fg = rawVal.isEmpty() && !focused ? COLOR_TEXT_DIMMED_GRAY : COLOR_TEXT_BRIGHT_WHITE;
+                enqueueComponentText(Component.literal(disp).withStyle(nunitoRegularStyle), boxX + 6, boxY + 5, fg);
+            }
         }
     }
 
@@ -2152,6 +2174,9 @@ public class GlassClickGuiScreen extends Screen {
         boolean added = FriendManager.addFriendByNameOrAliasInput(trimmed);
         friendInputText = "";
         lastRenderedFriendInputString = "";
+        if (added) {
+            saveConfigNow();
+        }
         SoundUtil.playTogglePop(added);
     }
 
@@ -2258,12 +2283,6 @@ public class GlassClickGuiScreen extends Screen {
                 // Player: Head & shoulders silhouette (14x14)
                 drawRoundedRect(ix + 4, iy + 1, 6, 6, 3, color);
                 drawRoundedRect(ix + 2, iy + 8, 10, 5, 2, dimColor);
-            }
-            case 5 -> {
-                // World: Isometric block / globe grid (14x14)
-                drawRoundedRect(ix + 2, iy + 2, 10, 10, 3, dimColor);
-                enqueueBgQuad(ix + 4, iy + 6, ix + 10, iy + 8, color);
-                enqueueBgQuad(ix + 6, iy + 4, ix + 8, iy + 10, color);
             }
             default -> {
                 // Misc / Utility: 4-node module spark grid (14x14)
@@ -2982,10 +3001,7 @@ public class GlassClickGuiScreen extends Screen {
         if (name.contains("PLAYER")) {
             return 4;
         }
-        if (name.contains("WORLD")) {
-            return 5;
-        }
-        return 6;
+        return 5;
     }
 
     private void ensureGlfwCallbacksHooked() {
@@ -3190,6 +3206,7 @@ public class GlassClickGuiScreen extends Screen {
             }
             if (key == GLFW.GLFW_KEY_ENTER || key == GLFW.GLFW_KEY_KP_ENTER || key == GLFW.GLFW_KEY_ESCAPE) {
                 activeStringSettingEntry = null;
+                saveConfigNow();
                 return true;
             }
             if (key == GLFW.GLFW_KEY_SPACE) {
@@ -3886,6 +3903,7 @@ public class GlassClickGuiScreen extends Screen {
                     boolean curState = (raw instanceof Boolean b) ? b : (raw instanceof Number n && n.intValue() > 0);
                     boolean nextState = !curState;
                     bs.setValue(nextState);
+                    saveConfigNow();
                     SoundUtil.playTogglePop(nextState);
                 }
             }
@@ -3918,6 +3936,7 @@ public class GlassClickGuiScreen extends Screen {
                     int py = curY + 4;
                     if (isHovered(mouseX, mouseY, px, py, pw, 18)) {
                         ms.setValue(modeLabel);
+                        saveConfigNow();
                         SoundUtil.playClick();
                         return;
                     }
@@ -3927,6 +3946,7 @@ public class GlassClickGuiScreen extends Screen {
                     List<String> modes = ms.getModes();
                     int idx = modes.indexOf(ms.getValue());
                     ms.setValue(modes.get((idx + 1) % modes.size()));
+                    saveConfigNow();
                     SoundUtil.playClick();
                 }
             }
@@ -3940,6 +3960,7 @@ public class GlassClickGuiScreen extends Screen {
                     int py = curY + 4;
                     if (isHovered(mouseX, mouseY, px, py, pw, 18)) {
                         toggleMultiModeOption(mms, opt);
+                        saveConfigNow();
                         SoundUtil.playTogglePop(mms.isSelected(opt));
                         return;
                     }
@@ -4559,9 +4580,7 @@ public class GlassClickGuiScreen extends Screen {
         }
         if (root.has("activeCategoryIndex") && root.get("activeCategoryIndex").isJsonPrimitive()) {
             int idx = root.get("activeCategoryIndex").getAsInt();
-            if (idx >= 0 && idx < CATEGORY_PILLS.length) {
-                activeCategoryIndex = idx;
-            }
+            activeCategoryIndex = Mth.clamp(idx, 0, CATEGORY_PILLS.length - 1);
         }
         Integer loadedFriendBind = (root.has("friendBindKey") && root.get("friendBindKey").isJsonPrimitive())
                 ? root.get("friendBindKey").getAsInt() : null;
@@ -4775,9 +4794,18 @@ public class GlassClickGuiScreen extends Screen {
             if (!targetPath.equals(getConfigFilePath())) {
                 recordLastLoadedPointer(safe, targetPath);
             }
+            try {
+                attrium.ru.manager.Manager mgr = attrium.ru.manager.Manager.getInstance();
+                if (mgr != null && mgr.getConfigManager() != null) {
+                    mgr.getConfigManager().markDirty();
+                }
+            } catch (Throwable ignored) {
+            }
             refreshSavedConfigList(true);
             return true;
-        } catch (Throwable ignored) {
+        } catch (Throwable ex) {
+            System.err.println("[Attrium Config] Failed to save config '" + safe + "': " + ex);
+            ex.printStackTrace();
             return false;
         }
     }
@@ -4880,7 +4908,9 @@ public class GlassClickGuiScreen extends Screen {
             applyConfigJsonObject(toApply);
             activeConfigName = rememberedName;
             refreshSavedConfigList(true);
-        } catch (Throwable ignored) {
+        } catch (Throwable ex) {
+            System.err.println("[Attrium Config] Failed to load config: " + ex);
+            ex.printStackTrace();
         }
     }
 
