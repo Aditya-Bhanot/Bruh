@@ -304,6 +304,7 @@ public class GlassClickGuiScreen extends Screen {
     private CachedSettingEntry clientTabUiVolumeEntry;
 
     private boolean windowGeometryDirty = true;
+        guiOpenSpringTimer = 0.0F;
     private boolean stringWidthsDirty = true;
     private boolean filterDirty = true;
     private boolean layoutDirty = true;
@@ -624,9 +625,94 @@ public class GlassClickGuiScreen extends Screen {
         return false;
     }
 
+    // [ATTRIUM-VISUAL-POLISH-GUI]
+    private static boolean nativeBlurLookupInit = false;
+    private static Method cachedBlurGuiMethod = null;
+    private static Method cachedBlurFloatMethod = null;
+    private static Method cachedBlurNoArgMethod = null;
+    private float guiOpenSpringTimer = 0.0F;
+
+    private void invokeNativeBlurSafe(GuiGraphics guiGraphics, float partialTick) {
+        if (!nativeBlurLookupInit) {
+            nativeBlurLookupInit = true;
+            try {
+                Class<?> cls = Screen.class;
+                for (Method m : cls.getDeclaredMethods()) {
+                    String n = m.getName();
+                    if ("renderBlurredBackground".equals(n)) {
+                        m.setAccessible(true);
+                        Class<?>[] pt = m.getParameterTypes();
+                        if (pt.length == 1 && GuiGraphics.class.isAssignableFrom(pt[0])) {
+                            cachedBlurGuiMethod = m;
+                            break;
+                        } else if (pt.length == 1 && pt[0] == float.class) {
+                            cachedBlurFloatMethod = m;
+                        } else if (pt.length == 0) {
+                            cachedBlurNoArgMethod = m;
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        try {
+            if (cachedBlurGuiMethod != null) {
+                cachedBlurGuiMethod.invoke(this, guiGraphics);
+            } else if (cachedBlurFloatMethod != null) {
+                cachedBlurFloatMethod.invoke(this, partialTick);
+            } else if (cachedBlurNoArgMethod != null) {
+                cachedBlurNoArgMethod.invoke(this);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static void drawSubtleBackdropVignette(GuiGraphics g, int w, int h, float strength) {
+        if (strength <= 0.02F || w <= 0 || h <= 0) return;
+        int bands = 4;
+        int edgeH = Math.max(18, h / 7);
+        int edgeW = Math.max(18, w / 9);
+        for (int i = 0; i < bands; i++) {
+            float frac = 1.0F - (float) i / (float) bands;
+            int a = Mth.clamp(Math.round(34.0F * frac * frac * strength), 0, 72);
+            if (a <= 1) continue;
+            int col = (a << 24);
+            int sh = Math.max(2, edgeH / bands);
+            int sw = Math.max(2, edgeW / bands);
+            g.fill(0, i * sh, w, (i + 1) * sh, col);
+            g.fill(0, h - (i + 1) * sh, w, h - i * sh, col);
+            g.fill(i * sw, edgeH, (i + 1) * sw, h - edgeH, col);
+            g.fill(w - (i + 1) * sw, edgeH, w - i * sw, h - edgeH, col);
+        }
+    }
+
+    private static void drawScrollEdgeFades(GuiGraphics g, int x1, int y1, int x2, int y2, boolean topFade, boolean bottomFade) {
+        if (x2 <= x1 || y2 <= y1) return;
+        int baseRgb = ClientThemeManager.getWindowBgColor() & 0x00FFFFFF;
+        int steps = 6;
+        int stepH = 2; // 12px smooth fade
+        if (topFade) {
+            for (int i = 0; i < steps; i++) {
+                float frac = 1.0F - (float) i / (float) steps;
+                int a = Mth.clamp(Math.round(215.0F * frac * frac), 0, 235);
+                g.fill(x1, y1 + i * stepH, x2, y1 + (i + 1) * stepH, (a << 24) | baseRgb);
+            }
+        }
+        if (bottomFade) {
+            for (int i = 0; i < steps; i++) {
+                float frac = 1.0F - (float) i / (float) steps;
+                int a = Mth.clamp(Math.round(215.0F * frac * frac), 0, 235);
+                int by2 = y2 - i * stepH;
+                g.fill(x1, by2 - stepH, x2, by2, (a << 24) | baseRgb);
+            }
+        }
+    }
+
     @Override
     public void renderBackground(GuiGraphics guiGraphics, int mouseX, int mouseY, float partialTick) {
-        // Zero background blur shader overhead
+        if (!HudManager.isLayoutEditorActive()) {
+            invokeNativeBlurSafe(guiGraphics, partialTick);
+        }
     }
 
     public void onMouseScroll(double verticalDelta) {
@@ -1442,6 +1528,11 @@ public class GlassClickGuiScreen extends Screen {
                     && isHovered(mouseX, mouseY, bindPillX, bindPillY, bindPillW, bindPillH);
             row.bindHoverAnim = Mth.clamp(row.bindHoverAnim + (bindHovered ? hoverStep : -hoverStep), 0.0F, 1.0F);
 
+            if (isBindingThis) {
+                float bindPulse = 0.28F + 0.24F * (float) Math.sin(System.currentTimeMillis() * 0.008D);
+                drawRoundedRect(bindPillX - 1, bindPillY - 1, bindPillW + 2, bindPillH + 2, 7,
+                        ClientThemeManager.getAccentWithAlpha(bindPulse));
+            }
             int bindBg = isBindingThis
                     ? COLOR_BIND_LISTENING
                     : lerpColor(COLOR_BIND_BG, COLOR_BIND_BG_HOVER, row.bindHoverAnim);
@@ -1552,9 +1643,15 @@ public class GlassClickGuiScreen extends Screen {
                 int fillW = Math.max(2, (int) Math.round(trackW * ratio));
                 drawRoundedRect(trackX, trackY, fillW, trackH, 2, COLOR_PILL_ACTIVE_BG);
 
-                int knobX = trackX + fillW - 4;
-                int knobY = trackY - 2;
-                drawRoundedRect(knobX, knobY, 8, 8, 4, COLOR_TOGGLE_KNOB_ON);
+                boolean isDraggingThis = (activeDraggingSliderEntry == se);
+                int thumbSize = isDraggingThis ? 10 : 8;
+                int knobX = trackX + fillW - (thumbSize / 2);
+                int knobY = trackY + (trackH - thumbSize) / 2;
+                if (isDraggingThis) {
+                    drawRoundedRect(knobX - 2, knobY - 2, thumbSize + 4, thumbSize + 4, (thumbSize + 4) / 2,
+                            ClientThemeManager.getAccentWithAlpha(0.32F));
+                }
+                drawRoundedRect(knobX, knobY, thumbSize, thumbSize, thumbSize / 2, COLOR_TOGGLE_KNOB_ON);
 
                 if (activeDraggingSliderEntry == se) {
                     activeSliderTrackX = trackX;

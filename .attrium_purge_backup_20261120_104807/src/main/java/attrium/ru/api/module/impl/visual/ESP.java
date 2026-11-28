@@ -136,14 +136,14 @@ public class ESP extends Module {
             "Mode",
             "ESP rendering mode: native Minecraft Shader Glow or 2D Screen-Space Box.",
             "2D Box",
-            "Glow", "2D Box"
+            "Glow", "2D Box", "Corner Box"
     ));
 
     private final ModeSetting espColorTheme = register(new ModeSetting(
             "ESP Color Theme",
             "Predefined aesthetic color preset or Custom RGB sliders.",
             "Purple",
-            "White", "Red", "Purple", "Blue", "Green", "Custom"
+            "Theme Accent", "White", "Red", "Purple", "Blue", "Green", "Custom"
     ));
 
     private final NumberSetting espRed = register(new NumberSetting(
@@ -174,6 +174,13 @@ public class ESP extends Module {
             "Line Thickness",
             "Controls the border width of the 2D Screen-Space Box (1.0 - 3.0).",
             1.0D, 1.0D, 3.0D, 0.1D
+    ));
+
+    // [ATTRIUM-VISUAL-POLISH-ESP]
+    private final BooleanSetting healthBar = register(new BooleanSetting(
+            "Health Bar",
+            "Draws a compact 2px vertical health strip on the left edge of 2D/Corner boxes.",
+            true
     ));
 
     private final MultiModeSetting targets = register(new MultiModeSetting(
@@ -264,7 +271,12 @@ public class ESP extends Module {
     }
 
     public boolean is2DBoxMode() {
-        return "2D Box".equalsIgnoreCase(mode.getValue());
+        String m = mode.getValue();
+        return "2D Box".equalsIgnoreCase(m) || "Corner Box".equalsIgnoreCase(m);
+    }
+
+    public boolean isCornerBoxMode() {
+        return "Corner Box".equalsIgnoreCase(mode.getValue());
     }
 
     public float getGlowIntensityValue() {
@@ -284,6 +296,9 @@ public class ESP extends Module {
             return THEME_PURPLE_RGB;
         }
         switch (theme.trim().toLowerCase(Locale.ROOT)) {
+            case "theme accent" -> {
+                return attrium.ru.manager.ClientThemeManager.getAccentArgb() & 0x00FFFFFF;
+            }
             case "white" -> {
                 return THEME_WHITE_RGB;
             }
@@ -624,7 +639,14 @@ public class ESP extends Module {
             }
 
             int argbColor = esp.resolveEntityColorARGB(entity, entry.isFriend);
-            draw2DBoxWithTranslucentFill(graphics, x1, y1, x2, y2, thickness, argbColor);
+            if (esp.isCornerBoxMode()) {
+                drawCornerBracketBox(graphics, x1, y1, x2, y2, thickness, argbColor);
+            } else {
+                draw2DBoxWithTranslucentFill(graphics, x1, y1, x2, y2, thickness, argbColor);
+            }
+            if (Boolean.TRUE.equals(esp.healthBar.getValue()) && entity instanceof LivingEntity living) {
+                drawCompactHealthBar(graphics, x1, y1, y2, living);
+            }
         }
     }
 
@@ -632,6 +654,68 @@ public class ESP extends Module {
      * Draws the 2D ESP Box with a translucent inner fill (Alpha clamped to 0x40 / ~25% opacity)
      * and a solid outer border of configurable Line Thickness (1.0 - 3.0).
      */
+    private static void drawCornerBracketBox(
+            GuiGraphics g,
+            int x1,
+            int y1,
+            int x2,
+            int y2,
+            float thickness,
+            int argbColor
+    ) {
+        int corePx = Mth.clamp((int) Math.floor(thickness), 1, 3);
+        int w = x2 - x1;
+        int h = y2 - y1;
+        int lenX = Math.max(corePx + 2, Math.min(18, Math.round(w * 0.26F)));
+        int lenY = Math.max(corePx + 2, Math.min(22, Math.round(h * 0.24F)));
+        int outline = 0xCC0A0D12;
+
+        // 1px dark outline behind all 4 L-brackets for crisp readability
+        // Top-Left
+        g.fill(x1 - 1, y1 - 1, x1 + lenX + 1, y1 + corePx + 1, outline);
+        g.fill(x1 - 1, y1 - 1, x1 + corePx + 1, y1 + lenY + 1, outline);
+        // Top-Right
+        g.fill(x2 - lenX - 1, y1 - 1, x2 + 1, y1 + corePx + 1, outline);
+        g.fill(x2 - corePx - 1, y1 - 1, x2 + 1, y1 + lenY + 1, outline);
+        // Bottom-Left
+        g.fill(x1 - 1, y2 - corePx - 1, x1 + lenX + 1, y2 + 1, outline);
+        g.fill(x1 - 1, y2 - lenY - 1, x1 + corePx + 1, y2 + 1, outline);
+        // Bottom-Right
+        g.fill(x2 - lenX - 1, y2 - corePx - 1, x2 + 1, y2 + 1, outline);
+        g.fill(x2 - corePx - 1, y2 - lenY - 1, x2 + 1, y2 + 1, outline);
+
+        // Foreground colored L-brackets
+        // Top-Left
+        g.fill(x1, y1, x1 + lenX, y1 + corePx, argbColor);
+        g.fill(x1, y1, x1 + corePx, y1 + lenY, argbColor);
+        // Top-Right
+        g.fill(x2 - lenX, y1, x2, y1 + corePx, argbColor);
+        g.fill(x2 - corePx, y1, x2, y1 + lenY, argbColor);
+        // Bottom-Left
+        g.fill(x1, y2 - corePx, x1 + lenX, y2, argbColor);
+        g.fill(x1, y2 - lenY, x1 + corePx, y2, argbColor);
+        // Bottom-Right
+        g.fill(x2 - lenX, y2 - corePx, x2, y2, argbColor);
+        g.fill(x2 - corePx, y2 - lenY, x2, y2, argbColor);
+    }
+
+    private static void drawCompactHealthBar(GuiGraphics g, int boxX1, int y1, int y2, LivingEntity living) {
+        int h = y2 - y1;
+        if (h < 6) return;
+        float maxHp = Math.max(1.0F, living.getMaxHealth());
+        float hp = Math.max(0.0F, living.getHealth());
+        float ratio = Mth.clamp(hp / maxHp, 0.0F, 1.0F);
+        int fillH = Math.max(1, Math.round(h * ratio));
+
+        int barX1 = boxX1 - 5;
+        int barX2 = boxX1 - 3;
+        int hpCol = ratio > 0.60F ? 0xFF34D399 : (ratio > 0.30F ? 0xFFFBBF24 : 0xFFF87171);
+
+        // 1px dark backing frame + 2px vertical health strip
+        g.fill(barX1 - 1, y1 - 1, barX2 + 1, y2 + 1, 0xCC0A0D12);
+        g.fill(barX1, y2 - fillH, barX2, y2, hpCol);
+    }
+
     private static void draw2DBoxWithTranslucentFill(
             GuiGraphics g,
             int x1,
