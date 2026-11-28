@@ -1,46 +1,43 @@
-# Attrium Maximum Flat-Package Obfuscation Rules (Fabric 1.21.11 + Java 21 + FoldCraftLauncher Safe)
-# Your original source code in src/ is NEVER modified.
+# Attrium Maximum Flat-Package Obfuscation Rules (Runs on Mojang-mapped JAR before Loom remapJar)
 -dontshrink
 -dontoptimize
+-dontpreverify
 -dontwarn **
 -ignorewarnings
 -useuniqueclassmembernames
 -overloadaggressively
 -allowaccessmodification
 
-# Fresh randomized dictionaries + random flat package generated every build by Gradle
+# Fresh randomized dictionaries generated every build by Gradle
 -obfuscationdictionary build/proguard-dict.txt
 -classobfuscationdictionary build/proguard-class-dict.txt
 
 # Strip ALL debug metadata (SourceFile, LineNumberTable, LocalVariableTable, MethodParameters)
 -keepattributes *Annotation*,Signature,InnerClasses,EnclosingMethod
 
-# 1. Keep ONLY Fabric Entrypoints (required by fabric.mod.json)
+# 1. Keep Fabric Entrypoints (required by fabric.mod.json)
 -keep class * implements net.fabricmc.api.ModInitializer { *; }
 -keep class * implements net.fabricmc.api.ClientModInitializer { *; }
 -keep class * implements net.fabricmc.api.DedicatedServerModInitializer { *; }
 
-# 2. Keep ONLY Mixin stubs (required by SpongePowered Mixin runtime; all called managers/modules ARE flattened!)
+# 2. Keep Mixin stubs (required by SpongePowered Mixin; all called managers/modules ARE flattened!)
 -keep @org.spongepowered.asm.mixin.Mixin class * { *; }
 -keep class attrium.ru.mixin.** { *; }
 
-# 3. Keep ONLY minimal reflection anchors (so ClickGUI module/setting discovery & EventBus never break)
--keep class attrium.ru.Main { *; }
+# 3. Keep minimal reflection & EventBus anchors
 -keep class attrium.ru.manager.Manager { *; }
 -keep class attrium.ru.api.module.ModuleManager { *; }
--keep class attrium.ru.manager.ModuleManager { *; }
--keep class attrium.ru.api.module.ModuleRepository { *; }
 -keep class attrium.ru.api.module.Module { public *; protected *; }
 -keep class attrium.ru.api.module.ModuleCategory { *; }
 -keep class attrium.ru.api.settings.** { *; }
+-keep class attrium.ru.api.events.** { *; }
 
-# Keep event handler methods annotated with any custom Event annotation (e.g. @EventTarget / @Subscribe)
+# Keep @EventHandler / custom-annotated event listener methods while still flattening the module classes
 -keepclassmembers class * {
     @attrium.ru.** <methods>;
 }
 
-# Keep ElytraHelper static macro methods & ArrayList suffix hook invoked via reflection
-# (the classes themselves ARE STILL RENAMED & FLATTENED into the random package!)
+# Keep reflection-invoked static macro methods & ArrayList suffix hooks
 -keepclassmembers class * {
     public static void tickMacroGlobal(...);
     public static void setMacroBoundKey(int);
@@ -51,19 +48,7 @@
     public java.lang.String getDisplayInfo();
 }
 
-# Keep Minecraft Screen override signatures on obfuscated screen classes (GlassClickGuiScreen, AuthLoginScreen)
--keepclassmembers class * extends net.minecraft.client.gui.screens.Screen {
-    public void render(...);
-    public void renderBackground(...);
-    protected void init();
-    public void tick();
-    public void onClose();
-    public boolean shouldCloseOnEsc();
-    public boolean isPauseScreen();
-    public boolean mouseScrolled(...);
-}
-
-# Keep enum values()/valueOf() for any internal enums that get flattened
+# Keep enum values()/valueOf() for any flattened internal enums
 -keepclassmembers enum * {
     public static **[] values();
     public static ** valueOf(java.lang.String);

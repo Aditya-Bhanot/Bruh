@@ -164,14 +164,14 @@ tasks.register('generateObfDictionaries') {
 }
 
 tasks.register('obfuscateJar', JavaExec) {
-    dependsOn tasks.named('remapJar'), tasks.named('generateObfDictionaries')
+    dependsOn tasks.named('jar'), tasks.named('generateObfDictionaries')
     classpath = configurations.attriumProguard
     mainClass = 'proguard.ProGuard'
 
     doFirst {
         def baseName = project.findProperty('archives_base_name') ?: project.name
-        def inJar = tasks.named('remapJar').get().archiveFile.get().asFile
-        def outJar = layout.buildDirectory.file("libs/${baseName}-${project.version}-obf-raw.jar").get().asFile
+        def inJar = tasks.named('jar').get().archiveFile.get().asFile
+        def outJar = layout.buildDirectory.file("libs/${baseName}-${project.version}-obf-dev.jar").get().asFile
         outJar.parentFile.mkdirs()
         if (outJar.exists()) {
             outJar.delete()
@@ -206,10 +206,19 @@ tasks.register('obfuscateJar', JavaExec) {
     }
 }
 
-tasks.register('scrubObfJar') {
+tasks.register('remapObfJar', net.fabricmc.loom.task.RemapJarTask) {
     dependsOn tasks.named('obfuscateJar')
+    def baseName = project.findProperty('archives_base_name') ?: project.name
+    inputFile.set(layout.buildDirectory.file("libs/${baseName}-${project.version}-obf-dev.jar"))
+    archiveFileName.set("${baseName}-${project.version}-obf-raw.jar")
+    addNestedDependencies.set(true)
+}
+
+tasks.register('scrubObfJar') {
+    dependsOn tasks.named('remapObfJar')
     doLast {
         def baseName = project.findProperty('archives_base_name') ?: project.name
+        def devJar = layout.buildDirectory.file("libs/${baseName}-${project.version}-obf-dev.jar").get().asFile
         def rawJar = layout.buildDirectory.file("libs/${baseName}-${project.version}-obf-raw.jar").get().asFile
         def finalJar = layout.buildDirectory.file("libs/${baseName}-${project.version}-obf.jar").get().asFile
         int flattenedCount = 0
@@ -244,6 +253,7 @@ tasks.register('scrubObfJar') {
             zos.close()
         }
         rawJar.delete()
+        devJar.delete()
         println "[Attrium Obfuscator] Ready: ${finalJar.name} (${flattenedCount}/${totalClasses} classes flattened into random package)"
     }
 }
