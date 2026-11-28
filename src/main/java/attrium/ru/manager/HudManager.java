@@ -1,5 +1,6 @@
 package attrium.ru.manager;
 
+import attrium.ru.auth.AuthService;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.Font;
@@ -198,6 +199,7 @@ public final class HudManager {
     // Main In-Game HUD Render Hook (Called from InGameHudMixin)
     // =========================================================================
     public static void renderInGameHud(GuiGraphics guiGraphics, DeltaTracker deltaTracker) {
+        if (!AuthService.isAuthorized()) { return; }
         Minecraft mc = Minecraft.getInstance();
         TotemPopManager.tickCleanup(mc);
         if (mc == null || mc.player == null || mc.level == null || mc.font == null || guiGraphics == null) {

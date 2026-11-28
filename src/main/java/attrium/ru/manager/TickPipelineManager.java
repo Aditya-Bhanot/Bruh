@@ -1,5 +1,7 @@
 package attrium.ru.manager;
 
+import attrium.ru.auth.AuthLoginScreen;
+import attrium.ru.auth.AuthService;
 import net.minecraft.client.Minecraft;
 import net.minecraft.network.protocol.Packet;
 import attrium.ru.screens.GlassClickGuiScreen;
@@ -54,6 +56,15 @@ public final class TickPipelineManager {
     }
 
     public synchronized void beginTickPhase1And2(Minecraft mc) {
+        AuthService.bootstrapAsync();
+        if (!AuthService.isAuthorized()) {
+            AuthService.Status st = AuthService.getStatus();
+            if ((st == AuthService.Status.LOGIN_REQUIRED || st == AuthService.Status.NETWORK_ERROR || st == AuthService.Status.LOCKED_OUT)
+                    && !(mc.screen instanceof AuthLoginScreen)) {
+                mc.setScreen(new AuthLoginScreen());
+            }
+            return;
+        }
         if (mc == null || mc.player == null || mc.level == null) {
             resetPipeline();
             return;

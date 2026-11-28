@@ -1,5 +1,6 @@
 package attrium.ru.screens;
 
+import attrium.ru.auth.AuthService;
 import com.mojang.blaze3d.platform.InputConstants;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.KeyMapping;
@@ -548,6 +549,7 @@ public class GlassClickGuiScreen extends Screen {
     }
 
     public static void openClickGuiFromBind(Minecraft mc) {
+        if (!AuthService.isAuthorized()) { return; }
         if (mc == null || mc.player == null || mc.level == null || mc.screen != null) {
             return;
         }
@@ -1386,6 +1388,7 @@ public class GlassClickGuiScreen extends Screen {
 
     @Override
     public void render(GuiGraphics guiGraphics, int mouseX, int mouseY, float partialTick) {
+        if (!AuthService.isAuthorized()) { return; }
         long nowNs = System.nanoTime();
         float dtSeconds = lastFrameTimeNs == 0L
                 ? 0.016F

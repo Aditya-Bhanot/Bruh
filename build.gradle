@@ -1,3 +1,12 @@
+buildscript {
+    repositories {
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.guardsquare:proguard-gradle:7.6.1'
+    }
+}
+
 plugins {
 	id 'fabric-loom' version "${loom_version}"
 	id 'maven-publish'
@@ -121,4 +130,27 @@ tasks.withType(AbstractArchiveTask).configureEach {
     preserveFileTimestamps = false
     reproducibleFileOrder = true
     exclude "**/*.html", "**/*.psd", "**/*.bak", "**/*.md"
+}
+
+// --- Attrium Step 5: Hardened Release JAR Obfuscation (ProGuard 7.6.1 / Java 21) ---
+tasks.register('obfuscateJar', proguard.gradle.ProGuardTask) {
+    dependsOn tasks.named('remapJar')
+    configuration file('proguard-rules.pro')
+
+    injars tasks.named('remapJar').flatMap { it.archiveFile }
+    outjars layout.buildDirectory.file("libs/${project.archives_base_name}-${project.version}-obf.jar")
+
+    doFirst {
+        def javaHome = System.getProperty('java.home')
+        def jmodsDir = file("${javaHome}/jmods")
+        if (jmodsDir.exists()) {
+            jmodsDir.listFiles().each { f ->
+                if (f.name.endsWith('.jmod')) {
+                    libraryjars(f, filter: '!**.jar;!module-info.class')
+                }
+            }
+        }
+        libraryjars configurations.compileClasspath
+        libraryjars configurations.runtimeClasspath
+    }
 }
