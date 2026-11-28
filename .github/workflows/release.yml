@@ -1,4 +1,4 @@
-name: Build & Publish Hardened Release
+name: Build & Publish Flattened Hardened Release
 
 on:
   push:
@@ -12,7 +12,7 @@ jobs:
   build-and-release:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
+      - name: Checkout clean source
         uses: actions/checkout@v4
 
       - name: Set up JDK 21
@@ -24,21 +24,17 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Build & Obfuscate Release JAR
+      - name: Build, Flatten & Scrub Release JAR
         run: |
           chmod +x gradlew
-          ./gradlew clean build obfuscateJar --no-daemon
-
-      - name: Verify Hardened JAR Exists
-        run: |
-          ls -lh build/libs/*-obf.jar
+          ./gradlew clean build scrubObfJar --no-daemon
 
       - name: Publish Rolling Latest Release (Hardened JAR Only)
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
           name: Attrium Latest Release
-          body: "Automated hardened build from commit `${{ github.sha }}`."
+          body: "Automated flattened & obfuscated build from commit `${{ github.sha }}`."
           prerelease: false
           make_latest: true
           files: build/libs/*-obf.jar

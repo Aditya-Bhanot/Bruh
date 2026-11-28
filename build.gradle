@@ -136,6 +136,7 @@ tasks.withType(AbstractArchiveTask).configureEach {
 tasks.register('generateObfDictionaries') {
     doLast {
         def rng = new java.security.SecureRandom()
+        def lower = 'abcdefghijklmnopqrstuvwxyz'
         def alpha = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
         def writeDict = { File target, int count, int minLen, int maxLen ->
             target.parentFile.mkdirs()
@@ -150,18 +151,27 @@ tasks.register('generateObfDictionaries') {
             }
             target.text = seen.join('\n') + '\n'
         }
-        writeDict(file('build/proguard-dict.txt'), 1200, 3, 7)
-        writeDict(file('build/proguard-class-dict.txt'), 600, 4, 8)
-        writeDict(file('build/proguard-pkg-dict.txt'), 120, 2, 5)
+        writeDict(file('build/proguard-dict.txt'), 2000, 3, 7)
+        writeDict(file('build/proguard-class-dict.txt'), 800, 4, 8)
+
+        // Pick a fresh random flat package name every single build (e.g. "k7x" / "q2m")
+        def pkgSb = new StringBuilder(3)
+        for (int i = 0; i < 3; i++) {
+            pkgSb.append(lower.charAt(rng.nextInt(lower.length())))
+        }
+        def flatPkg = pkgSb.toString()
+        file('build/proguard-dynamic.pro').text = "-repackageclasses '${flatPkg}'\n-flattenpackagehierarchy '${flatPkg}'\n"
+        println "[Attrium Obfuscator] Generated fresh random flat package: ${flatPkg}/"
     }
 }
 
 tasks.register('obfuscateJar', proguard.gradle.ProGuardTask) {
     dependsOn tasks.named('remapJar'), tasks.named('generateObfDictionaries')
     configuration file('proguard-rules.pro')
+    configuration file('build/proguard-dynamic.pro')
 
     injars tasks.named('remapJar').flatMap { it.archiveFile }
-    outjars layout.buildDirectory.file("libs/${project.archives_base_name}-${project.version}-obf.jar")
+    outjars layout.buildDirectory.file("libs/${project.archives_base_name}-${project.version}-obf-raw.jar")
 
     doFirst {
         def javaHome = System.getProperty('java.home')
@@ -175,5 +185,46 @@ tasks.register('obfuscateJar', proguard.gradle.ProGuardTask) {
         }
         libraryjars configurations.compileClasspath
         libraryjars configurations.runtimeClasspath
+    }
+}
+
+tasks.register('scrubObfJar') {
+    dependsOn tasks.named('obfuscateJar')
+    doLast {
+        def rawJar = layout.buildDirectory.file("libs/${project.archives_base_name}-${project.version}-obf-raw.jar").get().asFile
+        def finalJar = layout.buildDirectory.file("libs/${project.archives_base_name}-${project.version}-obf.jar").get().asFile
+        int flattenedCount = 0
+        int totalClasses = 0
+        def zis = new java.util.zip.ZipInputStream(new FileInputStream(rawJar))
+        def zos = new java.util.zip.ZipOutputStream(new FileOutputStream(finalJar))
+        try {
+            def entry
+            def buf = new byte[8192]
+            while ((entry = zis.nextEntry) != null) {
+                def name = entry.name
+                if (name.endsWith('.java') || name.endsWith('.bak') || name.endsWith('.map')) {
+                    continue
+                }
+                if (name.endsWith('.class')) {
+                    totalClasses++
+                    if (!name.startsWith('attrium/')) {
+                        flattenedCount++
+                    }
+                }
+                def cleanEntry = new java.util.zip.ZipEntry(name)
+                cleanEntry.setTime(0L)
+                zos.putNextEntry(cleanEntry)
+                int len
+                while ((len = zis.read(buf)) > 0) {
+                    zos.write(buf, 0, len)
+                }
+                zos.closeEntry()
+            }
+        } finally {
+            zis.close()
+            zos.close()
+        }
+        rawJar.delete()
+        println "[Attrium Obfuscator] Ready: ${finalJar.name} (${flattenedCount}/${totalClasses} classes flattened into random package)"
     }
 }
