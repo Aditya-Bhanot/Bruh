@@ -1,3 +1,4 @@
+-target 21
 # Attrium Maximum Flat-Package Obfuscation Rules (Runs on Mojang-mapped JAR before Loom remapJar)
 -dontshrink
 -dontoptimize
@@ -12,7 +13,7 @@
 -classobfuscationdictionary build/proguard-class-dict.txt
 
 # Strip ALL debug metadata (SourceFile, LineNumberTable, LocalVariableTable, MethodParameters)
--keepattributes *Annotation*,Signature,InnerClasses,EnclosingMethod
+-keepattributes *Annotation*,Signature,InnerClasses,EnclosingMethod,StackMapTable
 
 # 1. Keep Fabric Entrypoints (required by fabric.mod.json)
 -keep class * implements net.fabricmc.api.ModInitializer { *; }
