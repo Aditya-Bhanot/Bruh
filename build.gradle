@@ -1,12 +1,3 @@
-buildscript {
-    repositories {
-        mavenCentral()
-    }
-    dependencies {
-        classpath 'com.guardsquare:proguard-gradle:7.6.1'
-    }
-}
-
 plugins {
 	id 'fabric-loom' version "${loom_version}"
 	id 'maven-publish'
@@ -133,6 +124,14 @@ tasks.withType(AbstractArchiveTask).configureEach {
 }
 
 // --- Attrium Automated Randomized Release Obfuscation (Zero Source Modification) ---
+configurations {
+    attriumProguard
+}
+
+dependencies {
+    attriumProguard 'com.guardsquare:proguard-base:7.6.1'
+}
+
 tasks.register('generateObfDictionaries') {
     doLast {
         def rng = new java.security.SecureRandom()
@@ -159,32 +158,51 @@ tasks.register('generateObfDictionaries') {
             pkgSb.append(lower.charAt(rng.nextInt(lower.length())))
         }
         def flatPkg = pkgSb.toString()
-        file('build/proguard-dynamic.pro').text = "-repackageclasses '${flatPkg}'\n-flattenpackagehierarchy '${flatPkg}'\n"
+        file('build/proguard-dynamic.pro').text = "-repackageclasses '${flatPkg}'\n"
         println "[Attrium Obfuscator] Generated fresh random flat package: ${flatPkg}/"
     }
 }
 
-tasks.register('obfuscateJar', proguard.gradle.ProGuardTask) {
+tasks.register('obfuscateJar', JavaExec) {
     dependsOn tasks.named('remapJar'), tasks.named('generateObfDictionaries')
-
-    def baseName = project.findProperty('archives_base_name') ?: project.name
-    injars tasks.named('remapJar').flatMap { it.archiveFile }
-    outjars layout.buildDirectory.file("libs/${baseName}-${project.version}-obf-raw.jar")
+    classpath = configurations.attriumProguard
+    mainClass = 'proguard.ProGuard'
 
     doFirst {
-        configuration file('proguard-rules.pro')
-        configuration file('build/proguard-dynamic.pro')
+        def baseName = project.findProperty('archives_base_name') ?: project.name
+        def inJar = tasks.named('remapJar').get().archiveFile.get().asFile
+        def outJar = layout.buildDirectory.file("libs/${baseName}-${project.version}-obf-raw.jar").get().asFile
+        outJar.parentFile.mkdirs()
+        if (outJar.exists()) {
+            outJar.delete()
+        }
+
+        def pgArgs = [
+            '-injars', inJar.absolutePath,
+            '-outjars', outJar.absolutePath,
+            '-include', file('proguard-rules.pro').absolutePath,
+            '-include', file('build/proguard-dynamic.pro').absolutePath
+        ]
+
         def javaHome = System.getProperty('java.home')
         def jmodsDir = file("${javaHome}/jmods")
         if (jmodsDir.exists()) {
             jmodsDir.listFiles().each { f ->
                 if (f.name.endsWith('.jmod')) {
-                    libraryjars(f, filter: '!**.jar;!module-info.class')
+                    pgArgs.add('-libraryjars')
+                    pgArgs.add("${f.absolutePath}(!**.jar;!module-info.class)")
                 }
             }
         }
-        libraryjars configurations.compileClasspath
-        libraryjars configurations.runtimeClasspath
+
+        def seenLibs = new LinkedHashSet<String>()
+        configurations.compileClasspath.files.each { f ->
+            if (f.exists() && seenLibs.add(f.absolutePath)) {
+                pgArgs.add('-libraryjars')
+                pgArgs.add(f.absolutePath)
+            }
+        }
+        args = pgArgs
     }
 }
 
