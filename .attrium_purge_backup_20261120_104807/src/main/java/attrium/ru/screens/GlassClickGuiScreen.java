@@ -3185,21 +3185,23 @@ public class GlassClickGuiScreen extends Screen {
             return;
         }
 
+        // [ATTRIUM-DOUBLECLICK-FIX]
         boolean leftDown = GLFW.glfwGetMouseButton(windowHandle, GLFW.GLFW_MOUSE_BUTTON_LEFT) == GLFW.GLFW_PRESS;
         boolean rightDown = GLFW.glfwGetMouseButton(windowHandle, GLFW.GLFW_MOUSE_BUTTON_RIGHT) == GLFW.GLFW_PRESS;
         boolean cbLeft = pendingLeftClickFromCallback;
         boolean cbRight = pendingRightClickFromCallback;
         pendingLeftClickFromCallback = false;
         pendingRightClickFromCallback = false;
-        boolean leftClicked = (leftDown && !wasLeftMouseDown) || cbLeft;
-        boolean rightClicked = (rightDown && !wasRightMouseDown) || cbRight;
-        // Synchronize pressed state immediately when callback fired so next polled frame never double-triggers
+
+        // Edge-trigger ONLY on rising edge (!wasDown) so a delayed GLFW callback never double-fires a tap
+        boolean leftClicked = !wasLeftMouseDown && (leftDown || cbLeft);
+        boolean rightClicked = !wasRightMouseDown && (rightDown || cbRight);
         wasLeftMouseDown = leftDown || cbLeft;
         wasRightMouseDown = rightDown || cbRight;
 
         if (leftClicked || rightClicked) {
             long nowClickMs = System.currentTimeMillis();
-            if (nowClickMs - lastClickTime < 50L) {
+            if (nowClickMs - lastClickTime < 150L) {
                 leftClicked = false;
                 rightClicked = false;
             } else {

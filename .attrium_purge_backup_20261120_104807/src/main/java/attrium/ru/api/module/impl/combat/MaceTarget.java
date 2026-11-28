@@ -1244,7 +1244,7 @@ public class MaceTarget extends Module {
         checkWorldOrRespawnChange(client);
         ActionManager.getInstance().ensureTickSynchronized(client);
 
-        if (!client.player.isAlive() || client.player.getHealth() <= 0.0F || client.screen != null) {
+        if (!client.player.isAlive() || client.player.getHealth() <= 0.0F || client.screen != null || isPlayerInCobweb(client)) {
             if (smashState != SmashSequenceState.IDLE) {
                 executeSafeLegitSwapBack(client);
                 smashState = SmashSequenceState.IDLE;
@@ -1523,7 +1523,7 @@ public class MaceTarget extends Module {
         if (client.player == null) {
             return;
         }
-        if (client.player.isInWater() || client.player.isInLava()) {
+        if (client.player.isInWater() || client.player.isInLava() || isPlayerInCobweb(client)) {
             lastActiveGlideDiveTick = -100;
             postUnequipSmashEndTick = -100;
             return;
@@ -2160,13 +2160,54 @@ public class MaceTarget extends Module {
      * Prevents aiming or attacking when grounded or ascending on a normal jump,
      * while allowing genuine Elytra / Rocket Mace dives.
      */
+    // [ATTRIUM-COBWEB-LOCKOUT-FIX]
+    private final net.minecraft.core.BlockPos.MutableBlockPos cobwebProbePos = new net.minecraft.core.BlockPos.MutableBlockPos();
+    private int lastCobwebCheckTick = -1;
+    private boolean cachedInCobweb = false;
+
+    /**
+     * Zero-allocation once-per-tick cobweb check across the player's bounding box.
+     * Prevents endless dive/attack/raycast loops and FPS drops when stuck in cobwebs.
+     */
+    private boolean isPlayerInCobweb(Minecraft client) {
+        if (client == null || client.player == null || client.level == null) {
+            return false;
+        }
+        int tick = client.player.tickCount;
+        if (tick == lastCobwebCheckTick) {
+            return cachedInCobweb;
+        }
+        lastCobwebCheckTick = tick;
+        AABB box = client.player.getBoundingBox();
+        int minX = Mth.floor(box.minX + 0.001D);
+        int maxX = Mth.floor(box.maxX - 0.001D);
+        int minY = Mth.floor(box.minY + 0.001D);
+        int maxY = Mth.floor(box.maxY - 0.001D);
+        int minZ = Mth.floor(box.minZ + 0.001D);
+        int maxZ = Mth.floor(box.maxZ - 0.001D);
+        for (int x = minX; x <= maxX; x++) {
+            for (int y = minY; y <= maxY; y++) {
+                for (int z = minZ; z <= maxZ; z++) {
+                    cobwebProbePos.set(x, y, z);
+                    if (client.level.getBlockState(cobwebProbePos).is(net.minecraft.world.level.block.Blocks.COBWEB)) {
+                        cachedInCobweb = true;
+                        return true;
+                    }
+                }
+            }
+        }
+        cachedInCobweb = false;
+        return false;
+    }
+
     private boolean isGroundedOrAscendingLockout(Minecraft client) {
         if (client.player == null) {
             return true;
         }
         if (client.player.isInWater()
                 || client.player.isInLava()
-                || client.player.getAbilities().flying) {
+                || client.player.getAbilities().flying
+                || isPlayerInCobweb(client)) {
             return true;
         }
         // Never aim while ascending (e.g. Wind Burst upward launch or Rocket climb)
@@ -2344,7 +2385,7 @@ public class MaceTarget extends Module {
             airbornePeakY = Double.NaN;
             return;
         }
-        if (client.player.onGround() || client.player.isInWater() || client.player.isInLava()) {
+        if (client.player.onGround() || client.player.isInWater() || client.player.isInLava() || isPlayerInCobweb(client)) {
             airbornePeakY = client.player.getY();
         } else {
             double y = client.player.getY();
