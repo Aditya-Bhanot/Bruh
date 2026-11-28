@@ -132,9 +132,32 @@ tasks.withType(AbstractArchiveTask).configureEach {
     exclude "**/*.html", "**/*.psd", "**/*.bak", "**/*.md"
 }
 
-// --- Attrium Step 5: Hardened Release JAR Obfuscation (ProGuard 7.6.1 / Java 21) ---
+// --- Attrium Automated Randomized Release Obfuscation (Zero Source Modification) ---
+tasks.register('generateObfDictionaries') {
+    doLast {
+        def rng = new java.security.SecureRandom()
+        def alpha = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
+        def writeDict = { File target, int count, int minLen, int maxLen ->
+            target.parentFile.mkdirs()
+            def seen = new LinkedHashSet<String>()
+            while (seen.size() < count) {
+                int len = minLen + rng.nextInt(maxLen - minLen + 1)
+                def sb = new StringBuilder(len)
+                for (int i = 0; i < len; i++) {
+                    sb.append(alpha.charAt(rng.nextInt(alpha.length())))
+                }
+                seen.add(sb.toString())
+            }
+            target.text = seen.join('\n') + '\n'
+        }
+        writeDict(file('build/proguard-dict.txt'), 1200, 3, 7)
+        writeDict(file('build/proguard-class-dict.txt'), 600, 4, 8)
+        writeDict(file('build/proguard-pkg-dict.txt'), 120, 2, 5)
+    }
+}
+
 tasks.register('obfuscateJar', proguard.gradle.ProGuardTask) {
-    dependsOn tasks.named('remapJar')
+    dependsOn tasks.named('remapJar'), tasks.named('generateObfDictionaries')
     configuration file('proguard-rules.pro')
 
     injars tasks.named('remapJar').flatMap { it.archiveFile }

@@ -1,14 +1,9 @@
-name: Build & Auto-Versioned Release
+name: Build & Publish Hardened Release
 
 on:
   push:
-    branches: [ master ]
+    branches: [ "master" ]
   workflow_dispatch:
-    inputs:
-      release_notes:
-        description: "Optional extra changelog notes"
-        required: false
-        default: ""
 
 permissions:
   contents: write
@@ -16,99 +11,34 @@ permissions:
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
-          java-version: "21"
-          distribution: "temurin"
-          cache: "gradle"
+          java-version: '21'
+          distribution: 'temurin'
 
-      - name: Compute automatic version
-        id: ver
-        run: |
-          BASE_VER="1.0.${{ github.run_number }}"
-          TAG="v${BASE_VER}"
-          echo "version=${BASE_VER}" >> "$GITHUB_OUTPUT"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "Auto-versioning build as ${TAG}"
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
 
-      - name: Inject version into gradle.properties & fabric.mod.json
-        run: |
-          VER="${{ steps.ver.outputs.version }}"
-          if [ -f gradle.properties ]; then
-            sed -i "s/^mod_version=.*/mod_version=${VER}/" gradle.properties
-          fi
-          if [ -f src/main/resources/fabric.mod.json ]; then
-            python3 -c "
-          import json, pathlib
-          p = pathlib.Path('src/main/resources/fabric.mod.json')
-          data = json.loads(p.read_text(encoding='utf-8'))
-          data['version'] = '${VER}'
-          p.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
-          "
-          fi
-
-      - name: Build Fabric JAR
+      - name: Build & Obfuscate Release JAR
         run: |
           chmod +x gradlew
-          ./gradlew build --no-daemon
+          ./gradlew clean build obfuscateJar --no-daemon
 
-      - name: Stage versioned JAR artifact
+      - name: Verify Hardened JAR Exists
         run: |
-          mkdir -p dist
-          JAR_FILE=$(find build/libs -maxdepth 1 -type f -name '*.jar' ! -name '*-sources.jar' ! -name '*-dev.jar' | head -n 1)
-          if [ -z "$JAR_FILE" ]; then
-            echo "No built JAR found in build/libs!"
-            exit 1
-          fi
-          cp "$JAR_FILE" "dist/Attrium-${{ steps.ver.outputs.tag }}.jar"
-          ls -lh dist/
+          ls -lh build/libs/*-obf.jar
 
-      - name: Generate commit changelog
-        id: notes
-        run: |
-          PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-          if [ -n "$PREV_TAG" ]; then
-            CHANGES=$(git log "${PREV_TAG}..HEAD" --pretty=format:"- %s" -n 10)
-          else
-            CHANGES=$(git log -n 8 --pretty=format:"- %s")
-          fi
-          EXTRA="${{ github.event.inputs.release_notes }}"
-          {
-            echo "body<<EOF"
-            if [ -n "$EXTRA" ]; then
-              echo "$EXTRA"
-              echo ""
-            fi
-            echo "$CHANGES"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Create GitHub Release
+      - name: Publish Rolling Latest Release (Hardened JAR Only)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.ver.outputs.tag }}
-          name: "Attrium ${{ steps.ver.outputs.tag }}"
-          body: ${{ steps.notes.outputs.body }}
-          generate_release_notes: false
-          files: dist/Attrium-${{ steps.ver.outputs.tag }}.jar
+          tag_name: latest
+          name: Attrium Latest Release
+          body: "Automated hardened build from commit `${{ github.sha }}`."
+          prerelease: false
           make_latest: true
-          
-
-      - name: Keep only latest 3 releases
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release list --limit 100 --json tagName,createdAt --jq 'sort_by(.createdAt) | reverse | .[3:] | .[].tagName' | while read -r TAG; do
-            if [ -n "$TAG" ]; then
-              echo "Deleting old release & tag: $TAG"
-              gh release delete "$TAG" --yes --cleanup-tag
-            fi
-          done
+          files: build/libs/*-obf.jar
