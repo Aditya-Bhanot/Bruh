@@ -213,6 +213,10 @@ public final class HudManager {
         }
         GlassClickGuiScreen.pollGlobalKeybinds();
         boolean previewMode = (mc.screen instanceof GlassClickGuiScreen gui) && gui.isHudTabActive();
+
+        float pt = (deltaTracker != null) ? deltaTracker.getGameTimeDeltaPartialTick(false) : 1.0F;
+        try { attrium.ru.api.module.impl.visual.BlockOverlayModule.renderOverlay(mc, guiGraphics, pt); } catch (Throwable t) { RenderSafeGuard.onRenderFailure(attrium.ru.api.module.impl.visual.BlockOverlayModule.getInstance(), t); }
+        try { attrium.ru.api.module.impl.visual.TrailsModule.renderTrails(mc, guiGraphics, pt); } catch (Throwable t) { RenderSafeGuard.onRenderFailure(attrium.ru.api.module.impl.visual.TrailsModule.getInstance(), t); }
         renderAllWidgets(mc, guiGraphics, previewMode, false);
         ClientThemeManager.tick(lastDtSeconds, mc.screen instanceof GlassClickGuiScreen);
         int screenW = guiGraphics.guiWidth();

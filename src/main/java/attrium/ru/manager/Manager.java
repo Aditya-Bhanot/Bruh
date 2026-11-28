@@ -3,6 +3,7 @@ package attrium.ru.manager;
 
 
 import attrium.ru.api.module.impl.misc.ElytraHelper;
+import attrium.ru.api.module.impl.combat.AutoPearlCatch;
 import attrium.ru.api.module.impl.movement.LungeHelper;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.minecraft.client.Minecraft;
@@ -67,6 +68,7 @@ public class Manager {
                 postEvent(new TickEvent.Pre(client));
                 ElytraHelper.tickMacroGlobal(client, ElytraHelper.getMacroBoundKey());
                 LungeHelper.tickMacroGlobal(client, LungeHelper.getMacroBoundKey());
+                AutoPearlCatch.tickMacroGlobal(client, AutoPearlCatch.getMacroBoundKey());
             } finally {
                 inStartClientTick = false;
             }

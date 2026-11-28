@@ -38,6 +38,7 @@ import attrium.ru.manager.HudManager;
 import attrium.ru.utils.render.AnimationUtil;
 import attrium.ru.manager.FriendManager.FriendRecord;
 import attrium.ru.api.module.ModuleCategory;
+import attrium.ru.api.module.impl.combat.AutoPearlCatch;
 import attrium.ru.api.module.impl.combat.MaceTarget;
 import attrium.ru.api.module.impl.combat.SilentAura;
 import attrium.ru.api.module.impl.movement.ElytraTarget;
@@ -812,10 +813,12 @@ public class GlassClickGuiScreen extends Screen {
             return false;
         }
         return (row.module instanceof LungeHelper)
+                || (row.module instanceof AutoPearlCatch)
                 || "LungeHelper".equalsIgnoreCase(row.name)
                 || "AutoLunge".equalsIgnoreCase(row.name)
                 || "Lunge".equalsIgnoreCase(row.name)
-                || "ElytraHelper".equalsIgnoreCase(row.name);
+                || "ElytraHelper".equalsIgnoreCase(row.name)
+                || "AutoPearlCatch".equalsIgnoreCase(row.name);
     }
 
     @Override
@@ -938,12 +941,10 @@ public class GlassClickGuiScreen extends Screen {
             // Action Macros (LungeHelper & ElytraHelper): sync bound key ONLY; ticking runs strictly in Manager START_CLIENT_TICK
             if (isActionMacroRow(row)) {
                 if (key != -1 && key != 0 && key != GLFW.GLFW_KEY_UNKNOWN) {
-                    if (isElytraHelperRow(row)) {
-                        invokeStaticMacroSetKey(row.module, key);
-                    } else {
-                        lungeRowHandled = true;
-                        LungeHelper.setMacroBoundKey(key);
-                    }
+                    invokeStaticMacroSetKey(row.module, key);
+                }
+                if (row.module instanceof LungeHelper) {
+                    lungeRowHandled = true;
                 }
                 continue;
             }
@@ -1035,11 +1036,7 @@ public class GlassClickGuiScreen extends Screen {
             if (isActionMacroRow(row)) {
                 int boundMacro = resolveEffectiveBindKey(row);
                 if (boundMacro == key) {
-                    if (isElytraHelperRow(row)) {
-                        invokeStaticMacroCallback(row.module, key);
-                    } else {
-                        LungeHelper.onMacroKeyPressedFromCallback(key);
-                    }
+                    invokeStaticMacroCallback(row.module, key);
                 }
                 continue;
             }
@@ -2364,7 +2361,7 @@ public class GlassClickGuiScreen extends Screen {
             if (macroKey != -1 && macroKey != 0 && macroKey != GLFW.GLFW_KEY_UNKNOWN) {
                 return macroKey;
             }
-        } else if ("ElytraHelper".equalsIgnoreCase(mod.getClass().getSimpleName())) {
+        } else if ("ElytraHelper".equalsIgnoreCase(mod.getClass().getSimpleName()) || mod instanceof AutoPearlCatch) {
             int macroKey = invokeStaticMacroGetKey(mod);
             if (macroKey != -1 && macroKey != 0 && macroKey != GLFW.GLFW_KEY_UNKNOWN) {
                 return macroKey;
@@ -2410,7 +2407,7 @@ public class GlassClickGuiScreen extends Screen {
         }
         if (mod instanceof LungeHelper) {
             LungeHelper.setMacroBoundKey(key);
-        } else if ("ElytraHelper".equalsIgnoreCase(mod.getClass().getSimpleName())) {
+        } else if ("ElytraHelper".equalsIgnoreCase(mod.getClass().getSimpleName()) || mod instanceof AutoPearlCatch) {
             invokeStaticMacroSetKey(mod, key);
         }
         initModuleKeyReflection();
@@ -2472,11 +2469,7 @@ public class GlassClickGuiScreen extends Screen {
             PERSISTENT_MODULE_BINDS.put(row.name.toLowerCase(Locale.ROOT), normalized);
         }
         if (isActionMacroRow(row)) {
-            if (isElytraHelperRow(row)) {
-                invokeStaticMacroSetKey(row.module, normalized);
-            } else {
-                LungeHelper.setMacroBoundKey(normalized);
-            }
+            invokeStaticMacroSetKey(row.module, normalized);
         }
         setModuleBindKey(row.module, normalized);
         if ("ClickGUI".equalsIgnoreCase(row.name) || "ClickGui".equalsIgnoreCase(row.name)) {
@@ -4680,11 +4673,7 @@ public class GlassClickGuiScreen extends Screen {
                     row.boundKey = (k == 0 || k == GLFW.GLFW_KEY_UNKNOWN) ? -1 : k;
                     PERSISTENT_MODULE_BINDS.put(row.name.toLowerCase(Locale.ROOT), row.boundKey);
                     if (isActionMacroRow(row)) {
-                        if (isElytraHelperRow(row)) {
-                            invokeStaticMacroSetKey(row.module, row.boundKey);
-                        } else {
-                            LungeHelper.setMacroBoundKey(row.boundKey);
-                        }
+                        invokeStaticMacroSetKey(row.module, row.boundKey);
                     }
                     setModuleBindKey(row.module, row.boundKey);
                     refreshModuleBindLabelIfNeeded(row, true);

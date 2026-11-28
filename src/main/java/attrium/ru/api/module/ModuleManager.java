@@ -12,6 +12,8 @@ import attrium.ru.api.module.impl.misc.ChatUtilsModule;
 import attrium.ru.api.module.impl.visual.ArrayListModule;
 import attrium.ru.api.module.impl.visual.NotificationsModule;
 import attrium.ru.api.module.impl.visual.TargetHUDModule;
+import attrium.ru.api.module.impl.visual.TrailsModule;
+import attrium.ru.api.module.impl.visual.BlockOverlayModule;
 import attrium.ru.api.module.impl.visual.PlayerRadarModule;
 import attrium.ru.api.module.impl.visual.KeybindsModule;
 import attrium.ru.api.module.impl.combat.SilentAura;
@@ -208,6 +210,8 @@ public final class ModuleManager {
         register(new ChatUtilsModule());
         register(new KeybindsModule());
         register(new TargetHUDModule());
+        register(new TrailsModule());
+        register(new BlockOverlayModule());
         register(new PlayerRadarModule());
         register(new NotificationsModule());
         register(new ArrayListModule());
