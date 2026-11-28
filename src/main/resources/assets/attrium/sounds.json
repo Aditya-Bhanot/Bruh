@@ -1,1 +1,32 @@
-{}
+{
+  "ui.click": {
+    "sounds": [
+      { "name": "attrium:click", "stream": false }
+    ]
+  },
+  "ui.collapse": {
+    "sounds": [
+      { "name": "attrium:collapse", "stream": false }
+    ]
+  },
+  "ui.hover": {
+    "sounds": [
+      { "name": "attrium:hover", "stream": false }
+    ]
+  },
+  "ui.keypress": {
+    "sounds": [
+      { "name": "attrium:keypress", "stream": false }
+    ]
+  },
+  "ui.scroll": {
+    "sounds": [
+      { "name": "attrium:scroll", "stream": false }
+    ]
+  },
+  "ui.toggle": {
+    "sounds": [
+      { "name": "attrium:toggle", "stream": false }
+    ]
+  }
+}

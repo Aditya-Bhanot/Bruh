@@ -719,6 +719,8 @@ public class GlassClickGuiScreen extends Screen {
         if (verticalDelta == 0.0D) {
             return;
         }
+        // [ATTRIUM-CUSTOM-UI-SOUNDS]
+        SoundUtil.playScroll();
         float step = (float) (-verticalDelta * 36.0D);
         if (activeTopTabIndex == 1) {
             configTargetScrollOffset = Mth.clamp(configTargetScrollOffset + step, 0.0F, configMaxScrollOffset);
@@ -2831,7 +2833,7 @@ public class GlassClickGuiScreen extends Screen {
         if (configInputFocused && activeTopTabIndex == 1) {
             if (key == GLFW.GLFW_KEY_BACKSPACE) {
                 if (!configInputText.isEmpty()) {
-                    configInputText = configInputText.substring(0, configInputText.length() - 1);
+                    configInputText = configInputText.substring(0, configInputText.length() - 1); SoundUtil.playKeypress();
                 }
                 return true;
             }
@@ -2870,7 +2872,7 @@ public class GlassClickGuiScreen extends Screen {
             String curVal = activeSs.getValue() != null ? activeSs.getValue() : "";
             if (key == GLFW.GLFW_KEY_BACKSPACE) {
                 if (!curVal.isEmpty()) {
-                    activeSs.setValue(curVal.substring(0, curVal.length() - 1));
+                    activeSs.setValue(curVal.substring(0, curVal.length() - 1)); SoundUtil.playKeypress();
                 }
                 return true;
             }
@@ -2925,7 +2927,7 @@ public class GlassClickGuiScreen extends Screen {
         if (friendInputFocused && activeTopTabIndex == 3) {
             if (key == GLFW.GLFW_KEY_BACKSPACE) {
                 if (!friendInputText.isEmpty()) {
-                    friendInputText = friendInputText.substring(0, friendInputText.length() - 1);
+                    friendInputText = friendInputText.substring(0, friendInputText.length() - 1); SoundUtil.playKeypress();
                 }
                 return true;
             }
@@ -3035,6 +3037,7 @@ public class GlassClickGuiScreen extends Screen {
 
 
     private boolean handleGlfwCharCallback(int codepoint) {
+        if (codepoint >= 32 && codepoint != 127 && (searchFocused || configInputFocused || friendInputFocused || activeStringSettingEntry != null)) { SoundUtil.playKeypress(); }
         if (configInputFocused && activeTopTabIndex == 1) {
             if (codepoint < 32 || codepoint == 127) {
                 return true;
@@ -3430,7 +3433,7 @@ public class GlassClickGuiScreen extends Screen {
                     if ((leftClicked || rightClicked) && row.settings.length > 0) {
                         row.expanded = !row.expanded;
                         layoutDirty = true;
-                        SoundUtil.playClick();
+                        SoundUtil.playCollapse(row.expanded);
                     }
                     return;
                 }
@@ -3439,7 +3442,7 @@ public class GlassClickGuiScreen extends Screen {
                 if (leftClicked && row.settings.length > 0 && isHovered(mouseX, mouseY, rowChevronX - 4, rowTop + 8, 16, ROW_HEIGHT - 16)) {
                     row.expanded = !row.expanded;
                     layoutDirty = true;
-                    SoundUtil.playClick();
+                    SoundUtil.playCollapse(row.expanded);
                     return;
                 }
 
@@ -3455,7 +3458,7 @@ public class GlassClickGuiScreen extends Screen {
                     if (row.settings.length > 0) {
                         row.expanded = !row.expanded;
                         layoutDirty = true;
-                        SoundUtil.playClick();
+                        SoundUtil.playCollapse(row.expanded);
                     }
                     return;
                 }
@@ -4407,7 +4410,7 @@ public class GlassClickGuiScreen extends Screen {
                     if (row.settings.length > 0) {
                         row.expanded = !row.expanded;
                         layoutDirty = true;
-                        SoundUtil.playClick();
+                        SoundUtil.playCollapse(row.expanded);
                     }
                     return;
                 }
