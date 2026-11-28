@@ -892,6 +892,10 @@ public class GlassClickGuiScreen extends Screen {
             wasClickGuiKeyDownInGame = true;
             if (FreelookManager.isFreelooking() && FreelookManager.isHoldMode()) {
                 FreelookManager.deactivate(mc);
+                attrium.ru.api.module.impl.player.FreeLook fl = attrium.ru.api.module.impl.player.FreeLook.getInstance();
+                if (fl != null && fl.isEnabled()) {
+                    fl.setEnabled(false);
+                }
             }
             // Never tick LungeHelper from pollGlobalKeybinds() (causes GrimAC Post flags)
             return;
@@ -3658,6 +3662,10 @@ public class GlassClickGuiScreen extends Screen {
         if (leftClicked) {
             for (int i = 0; i < TOP_TABS.length; i++) {
                 if (isHovered(mouseX, mouseY, topTabX[i], navContainerY, topTabW[i], navContainerH)) {
+                    if (activeStringSettingEntry != null) {
+                        activeStringSettingEntry = null;
+                        saveConfigNow();
+                    }
                     if (activeTopTabIndex != i) {
                         activeTopTabIndex = i;
                         SoundUtil.playClick();
@@ -3790,6 +3798,7 @@ public class GlassClickGuiScreen extends Screen {
                 int remY = rowTop + (friendRowH - remH) / 2;
                 if (isHovered(mouseX, mouseY, remX, remY, remW, remH)) {
                     FriendManager.removeFriend(rec.uuid);
+                    saveConfigNow();
                     SoundUtil.playTogglePop(false);
                     return;
                 }
@@ -4145,7 +4154,13 @@ public class GlassClickGuiScreen extends Screen {
         if (parent != null) {
             Files.createDirectories(parent);
         }
-        Files.writeString(path, CONFIG_GSON.toJson(root), StandardCharsets.UTF_8);
+        Path tmp = path.resolveSibling(path.getFileName().toString() + ".tmp");
+        Files.writeString(tmp, CONFIG_GSON.toJson(root), StandardCharsets.UTF_8);
+        try {
+            Files.move(tmp, path, java.nio.file.StandardCopyOption.REPLACE_EXISTING, java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+        } catch (java.io.IOException atomicErr) {
+            Files.move(tmp, path, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        }
     }
 
     private static JsonObject readUnifiedRootOrEmpty() {
@@ -4852,6 +4867,13 @@ public class GlassClickGuiScreen extends Screen {
             }
             refreshSavedConfigList(true);
         } catch (Throwable ignored) {
+        }
+    }
+
+    public static void trySaveConfigStatic() {
+        GlassClickGuiScreen g = instance;
+        if (g != null && g.allModuleRows != null && g.allModuleRows.length > 0) {
+            g.saveConfigNow();
         }
     }
 

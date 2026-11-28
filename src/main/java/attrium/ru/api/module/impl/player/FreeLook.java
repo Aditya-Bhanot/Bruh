@@ -1,5 +1,6 @@
 package attrium.ru.api.module.impl.player;
 
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.minecraft.client.Minecraft;
 import attrium.ru.api.module.Module;
 import attrium.ru.api.module.ModuleCategory;
@@ -44,6 +45,21 @@ public class FreeLook extends Module {
         super("Freelook", "Orbits camera freely without altering movement or rotations", ModuleCategory.VISUAL);
         instance = this;
         syncSettingsToManager();
+        ClientTickEvents.START_CLIENT_TICK.register(client -> {
+            syncSettingsToManager();
+            if (isEnabled()) {
+                if (client == null || client.player == null || client.level == null) {
+                    FreelookManager.deactivate(client);
+                    return;
+                }
+                if (!FreelookManager.isFreelooking() && (client.screen == null || !FreelookManager.isHoldMode())) {
+                    FreelookManager.activate(client);
+                }
+                FreelookManager.tickSafety(client);
+            } else if (FreelookManager.isFreelooking()) {
+                FreelookManager.deactivate(client);
+            }
+        });
     }
 
     public static FreeLook getInstance() {

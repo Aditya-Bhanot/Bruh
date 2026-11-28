@@ -78,7 +78,10 @@
     "TickPipelineMixin",
     "ChatUtilsMixin",
     "FreelookCameraMixin",
-    "FreelookEntityMixin"
+    "FreelookEntityMixin",
+    "NameProtectChatMixin",
+    "NameProtectGuiOverlayMixin",
+    "NameProtectPlayerNameMixin"
   ],
   "injectors": {
     "defaultRequire": 1

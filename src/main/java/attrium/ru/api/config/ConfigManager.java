@@ -33,7 +33,7 @@ public final class ConfigManager {
 
     public ConfigManager(ModuleManager moduleManager) {
         this.systemDirectory = systemDirectory();
-        this.modulesFile = systemDirectory.resolve("acc.json");
+        this.modulesFile = systemDirectory.resolve("acc_storage.json");
         this.moduleStorage = new ModuleConfigStorage(moduleManager);
     }
 
@@ -103,7 +103,6 @@ public final class ConfigManager {
     private void loadModules() {
         Path file = resolveModulesFileForRead();
         if (!Files.exists(file)) {
-            saveModules();
             return;
         }
 
@@ -111,11 +110,15 @@ public final class ConfigManager {
             JsonObject root = JsonParser.parseReader(reader).getAsJsonObject();
             moduleStorage.load(root);
         } catch (Exception exception) {
-            throw new ConfigException("Failed to load module config: " + file, exception);
+            System.err.println("[Attrium ConfigManager] Skipped incompatible storage file " + file + ": " + exception);
         }
     }
 
     private void saveModules() {
+        try {
+            attrium.ru.screens.GlassClickGuiScreen.trySaveConfigStatic();
+        } catch (Throwable ignored) {
+        }
         try {
             Files.createDirectories(systemDirectory);
             Path tmpFile = modulesFile.resolveSibling(modulesFile.getFileName().toString() + ".tmp");
@@ -128,7 +131,7 @@ public final class ConfigManager {
                 Files.move(tmpFile, modulesFile, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
             }
         } catch (IOException exception) {
-            throw new ConfigException("Failed to save module config: " + modulesFile, exception);
+            System.err.println("[Attrium ConfigManager] Failed to save module storage " + modulesFile + ": " + exception);
         }
     }
 

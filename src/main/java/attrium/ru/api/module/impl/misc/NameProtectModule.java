@@ -4,6 +4,8 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.network.chat.Style;
+import attrium.ru.api.events.annotation.SubscribeEvent;
+import attrium.ru.api.events.impl.TextFactoryEvent;
 import attrium.ru.api.module.Module;
 import attrium.ru.api.module.ModuleCategory;
 import attrium.ru.api.settings.impl.BooleanSetting;
@@ -63,10 +65,10 @@ public class NameProtectModule extends Module {
     private static boolean defaultSkinResolved = false;
 
     private final StringSetting customAlias = register(new StringSetting(
-            "Custom Alias",
-            "Replacement username shown instead of your real IGN across chat, tab, nametags, and HUD.",
+            "Custom Name",
+            "Custom replacement username shown everywhere (chat mentions, tablist, nametags, scoreboard, and HUD).",
             "AttriumUser",
-            24
+            32
     ).onChange(NameProtectModule::invalidateCache));
 
     private final BooleanSetting protectFriends = register(new BooleanSetting(
@@ -113,6 +115,28 @@ public class NameProtectModule extends Module {
         }
         ModuleCategory[] vals = ModuleCategory.values();
         return vals.length > 0 ? vals[vals.length - 1] : ModuleCategory.VISUAL;
+    }
+
+    @SubscribeEvent
+    public void onTextFactory(TextFactoryEvent event) {
+        if (!isEnabled() || event == null) {
+            return;
+        }
+        String localName = getLocalUsername();
+        String alias = getCustomAliasValue();
+        if (!localName.isEmpty() && !localName.equals(alias)) {
+            event.replaceText(localName, alias);
+        }
+        if (isProtectFriendsActive()) {
+            List<FriendManager.FriendRecord> friends = FriendManager.getSortedFriends();
+            for (int i = 0; i < friends.size(); i++) {
+                FriendManager.FriendRecord rec = friends.get(i);
+                if (rec == null || rec.username == null || rec.username.isEmpty()) continue;
+                String replacement = (rec.alias != null && !rec.alias.isEmpty()
+                        && !rec.alias.equalsIgnoreCase(rec.username)) ? rec.alias : "Friend";
+                event.replaceText(rec.username, replacement);
+            }
+        }
     }
 
     public static NameProtectModule getInstance() {

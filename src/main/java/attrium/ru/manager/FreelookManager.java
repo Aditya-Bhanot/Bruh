@@ -58,6 +58,26 @@ public final class FreelookManager {
         return cameraPitch;
     }
 
+    private static void applyCameraTypeWithRefresh(Minecraft mc, CameraType targetType) {
+        if (mc == null || mc.options == null || targetType == null) {
+            return;
+        }
+        CameraType prev = mc.options.getCameraType();
+        if (prev == targetType) {
+            return;
+        }
+        mc.options.setCameraType(targetType);
+        try {
+            if (prev.isFirstPerson() != targetType.isFirstPerson() && mc.gameRenderer != null) {
+                mc.gameRenderer.checkEntityPostEffect(targetType.isFirstPerson() ? mc.getCameraEntity() : null);
+            }
+            if (mc.levelRenderer != null) {
+                mc.levelRenderer.needsUpdate();
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
     public static void activate(Minecraft mc) {
         if (mc == null || mc.player == null || mc.level == null) {
             return;
@@ -66,14 +86,20 @@ public final class FreelookManager {
             cameraYaw = mc.player.getYRot();
             cameraPitch = mc.player.getXRot();
             if (autoThirdPerson && mc.options != null) {
-                savedCameraType = mc.options.getCameraType();
-                if (savedCameraType != CameraType.THIRD_PERSON_BACK) {
-                    mc.options.setCameraType(CameraType.THIRD_PERSON_BACK);
+                CameraType current = mc.options.getCameraType();
+                if (savedCameraType == null) {
+                    savedCameraType = current;
                 }
+                applyCameraTypeWithRefresh(mc, CameraType.THIRD_PERSON_BACK);
             } else {
                 savedCameraType = null;
             }
             active = true;
+        } else if (autoThirdPerson && mc.options != null && mc.options.getCameraType() != CameraType.THIRD_PERSON_BACK) {
+            if (savedCameraType == null) {
+                savedCameraType = mc.options.getCameraType();
+            }
+            applyCameraTypeWithRefresh(mc, CameraType.THIRD_PERSON_BACK);
         }
     }
 
@@ -83,7 +109,7 @@ public final class FreelookManager {
         }
         active = false;
         if (savedCameraType != null && mc != null && mc.options != null) {
-            mc.options.setCameraType(savedCameraType);
+            applyCameraTypeWithRefresh(mc, savedCameraType);
         }
         savedCameraType = null;
     }

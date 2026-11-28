@@ -51,7 +51,6 @@ import attrium.ru.api.module.impl.player.ChestStealer;
 import attrium.ru.api.module.impl.player.ClickPearl;
 import attrium.ru.api.module.impl.misc.ServerRPSpoofer;
 import attrium.ru.api.module.impl.player.NoEntityTrace;
-import attrium.ru.api.module.impl.player.NameProtect;
 import attrium.ru.api.module.impl.player.ItemScroller;
 import attrium.ru.api.module.impl.player.FreeLook;
 import attrium.ru.api.module.impl.player.FreeCam;
@@ -239,7 +238,6 @@ public final class ModuleManager {
         register(new TargetESP());
 
         register(new NoEntityTrace());
-        register(new NameProtect());
         register(new ItemScroller());
         register(new FreeLook());
         register(new FreeCam());
