@@ -378,16 +378,43 @@ public final class AuthService {
         statusMessage = msg;
     }
 
-    private static boolean tryRestoreSignedSession(String fp) {
-        try {
-            Path cfg = ClientThemeManager.getUnifiedConfigPath();
-            if (!Files.exists(cfg)) return false;
-            JsonElement parsed = JsonParser.parseString(Files.readString(cfg, StandardCharsets.UTF_8));
-            if (!parsed.isJsonObject()) return false;
-            JsonObject root = parsed.getAsJsonObject();
-            if (!root.has("cacheSeed") || !root.get("cacheSeed").isJsonPrimitive()) return false;
+    private static Path getSessionCachePath() {
+        Path cfg = ClientThemeManager.getUnifiedConfigPath();
+        Path dir = (cfg != null && cfg.getParent() != null) ? cfg.getParent() : Path.of("config");
+        return dir.resolve(".attrium_cache.dat");
+    }
 
-            String token = root.get("cacheSeed").getAsString();
+    private static boolean tryRestoreSignedSession(String fp) {
+        String token = null;
+        try {
+            Path cacheFile = getSessionCachePath();
+            if (Files.exists(cacheFile)) {
+                String raw = Files.readString(cacheFile, StandardCharsets.UTF_8).trim();
+                if (!raw.isEmpty()) {
+                    token = raw;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        if (token == null) {
+            try {
+                Path cfg = ClientThemeManager.getUnifiedConfigPath();
+                if (Files.exists(cfg)) {
+                    JsonElement parsed = JsonParser.parseString(Files.readString(cfg, StandardCharsets.UTF_8));
+                    if (parsed != null && parsed.isJsonObject()) {
+                        JsonObject root = parsed.getAsJsonObject();
+                        if (root.has("cacheSeed") && root.get("cacheSeed").isJsonPrimitive()) {
+                            token = root.get("cacheSeed").getAsString().trim();
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        if (token == null || token.isEmpty()) {
+            return false;
+        }
+        try {
             String decoded = new String(B64_DEC.decode(token), StandardCharsets.UTF_8);
             String[] parts = decoded.split("\\|");
             if (parts.length != 4) return false;
@@ -416,36 +443,20 @@ public final class AuthService {
 
     private static void saveSignedSessionSeed(String fp, long issuedAt, long expiry, byte[] sig) {
         try {
-            Path cfg = ClientThemeManager.getUnifiedConfigPath();
-            Path parent = cfg.getParent();
+            Path cacheFile = getSessionCachePath();
+            Path parent = cacheFile.getParent();
             if (parent != null) Files.createDirectories(parent);
 
-            JsonObject root = new JsonObject();
-            if (Files.exists(cfg)) {
-                try {
-                    JsonElement el = JsonParser.parseString(Files.readString(cfg, StandardCharsets.UTF_8));
-                    if (el != null && el.isJsonObject()) root = el.getAsJsonObject();
-                } catch (Throwable ignored) {
-                }
-            }
             String raw = fp + "|" + issuedAt + "|" + expiry + "|" + B64_ENC.encodeToString(sig);
-            root.addProperty("cacheSeed", B64_ENC.encodeToString(raw.getBytes(StandardCharsets.UTF_8)));
-            Files.writeString(cfg, GSON.toJson(root), StandardCharsets.UTF_8);
+            String encoded = B64_ENC.encodeToString(raw.getBytes(StandardCharsets.UTF_8));
+            Files.writeString(cacheFile, encoded, StandardCharsets.UTF_8);
         } catch (Throwable ignored) {
         }
     }
 
     private static void clearStoredSessionSeed() {
         try {
-            Path cfg = ClientThemeManager.getUnifiedConfigPath();
-            if (!Files.exists(cfg)) return;
-            JsonElement el = JsonParser.parseString(Files.readString(cfg, StandardCharsets.UTF_8));
-            if (el != null && el.isJsonObject()) {
-                JsonObject root = el.getAsJsonObject();
-                if (root.remove("cacheSeed") != null) {
-                    Files.writeString(cfg, GSON.toJson(root), StandardCharsets.UTF_8);
-                }
-            }
+            Files.deleteIfExists(getSessionCachePath());
         } catch (Throwable ignored) {
         }
     }

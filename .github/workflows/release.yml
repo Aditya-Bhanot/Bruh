@@ -30,13 +30,16 @@ jobs:
           ./gradlew clean build scrubObfJar --no-daemon --stacktrace
           ls -lh build/libs/*-obf.jar
 
-      - name: Delete Previous Latest Release & Tag
+      - name: Remove All Old Releases & Old JARs
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release delete latest --yes --cleanup-tag || true
+          for tag in $(gh release list --limit 100 --json tagName --jq '.[].tagName'); do
+            echo "Deleting old release: $tag"
+            gh release delete "$tag" --yes --cleanup-tag || true
+          done
 
-      - name: Publish Fresh Rolling Latest Release (Hardened JAR Only)
+      - name: Publish Fresh Latest Release (Hardened JAR Only)
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
