@@ -368,21 +368,121 @@ public class TrailsModule extends Module {
         }
     }
 
+    // [ATTRIUM-STEP2-SPAN-BATCH-TRAILS]
+    private static final int MAX_SEG_SPANS = 128;
+    private static final int[] SEG_X1 = new int[MAX_SEG_SPANS];
+    private static final int[] SEG_Y1 = new int[MAX_SEG_SPANS];
+    private static final int[] SEG_X2 = new int[MAX_SEG_SPANS];
+    private static final int[] SEG_Y2 = new int[MAX_SEG_SPANS];
+
+    private static int collectMergedSegmentSpans(int ix1, int iy1, int ix2, int iy2) {
+        int adx = Math.abs(ix2 - ix1);
+        int ady = Math.abs(iy2 - iy1);
+        int count = 0;
+
+        if (adx >= ady) {
+            if (ix1 > ix2) {
+                int tx = ix1; ix1 = ix2; ix2 = tx;
+                int ty = iy1; iy1 = iy2; iy2 = ty;
+            }
+            int sy = iy1 <= iy2 ? 1 : -1;
+            int err = adx >> 1;
+            int y = iy1;
+            int runStartX = ix1;
+            int runY = y;
+
+            for (int x = ix1; x <= ix2; x++) {
+                if (y != runY) {
+                    if (count < MAX_SEG_SPANS) {
+                        SEG_X1[count] = runStartX;
+                        SEG_Y1[count] = runY;
+                        SEG_X2[count] = x - 1;
+                        SEG_Y2[count] = runY;
+                        count++;
+                    }
+                    runStartX = x;
+                    runY = y;
+                }
+                err -= ady;
+                if (err < 0) {
+                    y += sy;
+                    err += adx;
+                }
+            }
+            if (count < MAX_SEG_SPANS) {
+                SEG_X1[count] = runStartX;
+                SEG_Y1[count] = runY;
+                SEG_X2[count] = ix2;
+                SEG_Y2[count] = runY;
+                count++;
+            }
+        } else {
+            if (iy1 > iy2) {
+                int tx = ix1; ix1 = ix2; ix2 = tx;
+                int ty = iy1; iy1 = iy2; iy2 = ty;
+            }
+            int sx = ix1 <= ix2 ? 1 : -1;
+            int err = ady >> 1;
+            int x = ix1;
+            int runStartY = iy1;
+            int runX = x;
+
+            for (int y = iy1; y <= iy2; y++) {
+                if (x != runX) {
+                    if (count < MAX_SEG_SPANS) {
+                        SEG_X1[count] = runX;
+                        SEG_Y1[count] = runStartY;
+                        SEG_X2[count] = runX;
+                        SEG_Y2[count] = y - 1;
+                        count++;
+                    }
+                    runStartY = y;
+                    runX = x;
+                }
+                err -= adx;
+                if (err < 0) {
+                    x += sx;
+                    err += ady;
+                }
+            }
+            if (count < MAX_SEG_SPANS) {
+                SEG_X1[count] = runX;
+                SEG_Y1[count] = runStartY;
+                SEG_X2[count] = runX;
+                SEG_Y2[count] = iy2;
+                count++;
+            }
+        }
+        return count;
+    }
+
     private void drawRibbonSegment(GuiGraphics g, float x1, float y1, float x2, float y2, int rad, int auraCol, int coreCol, int hotCol) {
+        boolean drawAura = (auraCol >>> 24) > 3;
+        boolean drawCore = (coreCol >>> 24) > 3;
+        boolean drawHot = (hotCol >>> 24) > 3;
+        if (!drawAura && !drawCore && !drawHot) return;
+
         float dx = x2 - x1;
         float dy = y2 - y1;
-        float dist = Mth.sqrt(dx * dx + dy * dy);
-        if (dist < 0.4F || dist > 450.0F) return;
+        float distSq = dx * dx + dy * dy;
+        if (distSq < 0.16F || distSq > 202500.0F) return;
 
-        int steps = Math.min(28, Math.max(1, Math.round(dist * 0.45F)));
-        float inv = 1.0F / steps;
-        for (int i = 0; i <= steps; i++) {
-            float t = i * inv;
-            int px = Math.round(x1 + dx * t);
-            int py = Math.round(y1 + dy * t);
-            g.fill(px - rad - 1, py - rad - 1, px + rad + 2, py + rad + 2, auraCol);
-            g.fill(px - rad, py - rad, px + rad + 1, py + rad + 1, coreCol);
-            g.fill(px, py, px + 1, py + 1, hotCol);
+        int spans = collectMergedSegmentSpans(Math.round(x1), Math.round(y1), Math.round(x2), Math.round(y2));
+        if (drawAura) {
+            int rOuter = rad + 1;
+            for (int i = 0; i < spans; i++) {
+                g.fill(SEG_X1[i] - rOuter, SEG_Y1[i] - rOuter, SEG_X2[i] + rOuter + 1, SEG_Y2[i] + rOuter + 1, auraCol);
+            }
+        }
+        if (drawCore) {
+            for (int i = 0; i < spans; i++) {
+                g.fill(SEG_X1[i] - rad, SEG_Y1[i] - rad, SEG_X2[i] + rad + 1, SEG_Y2[i] + rad + 1, coreCol);
+            }
+        }
+        if (drawHot) {
+            for (int i = 0; i < spans; i++) {
+                g.fill(SEG_X1[i], SEG_Y1[i], SEG_X2[i] + 1, SEG_Y2[i] + 1, hotCol);
+            }
         }
     }
 

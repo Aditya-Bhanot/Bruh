@@ -111,12 +111,18 @@ public final class FriendManager {
         return FRIENDS;
     }
 
-    public static synchronized void ensureLoaded() {
+    // [ATTRIUM-STEP3-LOCKFREE-FRIEND]
+    public static void ensureLoaded() {
         if (initialized) {
             return;
         }
-        initialized = true;
-        loadFromFile();
+        synchronized (FriendManager.class) {
+            if (initialized) {
+                return;
+            }
+            loadFromFile();
+            initialized = true;
+        }
     }
 
     // =========================================================================
@@ -141,16 +147,19 @@ public final class FriendManager {
             return false;
         }
         try {
+            if (entityUuid != null) {
+                if (mc.getConnection().getPlayerInfo(entityUuid) != null) {
+                    return true;
+                }
+                Collection<PlayerInfo> online = mc.getConnection().getOnlinePlayers();
+                return online == null || online.isEmpty();
+            }
             Collection<PlayerInfo> online = mc.getConnection().getOnlinePlayers();
             if (online == null || online.isEmpty()) {
                 return true;
             }
             for (PlayerInfo info : online) {
-                if (info == null || info.getProfile() == null) {
-                    continue;
-                }
-                GameProfile tabProf = info.getProfile();
-                if (entityUuid != null && entityUuid.equals(tabProf.id())) {
+                if (info != null && info.getProfile() != null && profileName.equalsIgnoreCase(info.getProfile().name())) {
                     return true;
                 }
             }

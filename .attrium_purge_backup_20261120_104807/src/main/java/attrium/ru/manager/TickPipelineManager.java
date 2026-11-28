@@ -36,7 +36,8 @@ public final class TickPipelineManager {
 
     private final PostMotionSlot[] postMotionPool = new PostMotionSlot[MAX_QUEUED_POST_ACTIONS];
     private int queuedPostMotionCount = 0;
-    private TickPhase currentPhase = TickPhase.IDLE;
+    // [ATTRIUM-STEP3-LOCKFREE-TICK]
+    private volatile TickPhase currentPhase = TickPhase.IDLE;
     private long lastPhase1GameTime = -1L;
 
     private TickPipelineManager() {
@@ -53,7 +54,7 @@ public final class TickPipelineManager {
         return currentPhase;
     }
 
-    public synchronized void beginTickPhase1And2(Minecraft mc) {
+    public void beginTickPhase1And2(Minecraft mc) {
         if (mc == null || mc.player == null || mc.level == null) {
             resetPipeline();
             return;
@@ -81,7 +82,7 @@ public final class TickPipelineManager {
         RotationManager.getInstance().onClientTick(mc);
     }
 
-    public synchronized boolean enqueuePostMotionPacket(
+    public boolean enqueuePostMotionPacket(
             int requiredHotbarSlot,
             Packet<?> actionPacket,
             boolean restoreSlotAfter
@@ -96,7 +97,7 @@ public final class TickPipelineManager {
         return true;
     }
 
-    public synchronized boolean enqueuePostMotionTask(
+    public boolean enqueuePostMotionTask(
             int requiredHotbarSlot,
             boolean restoreSlotAfter,
             Runnable postMotionTask
@@ -114,7 +115,7 @@ public final class TickPipelineManager {
     public void notifyMovementPacketDispatched() {
     }
 
-    public synchronized void completeTickPhase3And4(Minecraft mc) {
+    public void completeTickPhase3And4(Minecraft mc) {
         if (mc == null || mc.player == null || mc.level == null || mc.player.connection == null) {
             resetPipeline();
             return;
@@ -149,7 +150,7 @@ public final class TickPipelineManager {
         queuedPostMotionCount = 0;
     }
 
-    public synchronized void resetPipeline() {
+    public void resetPipeline() {
         clearPostMotionQueue();
         currentPhase = TickPhase.IDLE;
         lastPhase1GameTime = -1L;

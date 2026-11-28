@@ -274,37 +274,128 @@ public class BlockOverlayModule extends Module {
         }
     }
 
+    // [ATTRIUM-STEP2-SPAN-BATCH-BLOCK]
+    private static final int MAX_LINE_SPANS = 256;
+    private static final int[] SPAN_X1 = new int[MAX_LINE_SPANS];
+    private static final int[] SPAN_Y1 = new int[MAX_LINE_SPANS];
+    private static final int[] SPAN_X2 = new int[MAX_LINE_SPANS];
+    private static final int[] SPAN_Y2 = new int[MAX_LINE_SPANS];
+
+    private static int collectMergedLineSpans(int ix1, int iy1, int ix2, int iy2) {
+        int adx = Math.abs(ix2 - ix1);
+        int ady = Math.abs(iy2 - iy1);
+        int count = 0;
+
+        if (adx >= ady) {
+            if (ix1 > ix2) {
+                int tx = ix1; ix1 = ix2; ix2 = tx;
+                int ty = iy1; iy1 = iy2; iy2 = ty;
+            }
+            int sy = iy1 <= iy2 ? 1 : -1;
+            int err = adx >> 1;
+            int y = iy1;
+            int runStartX = ix1;
+            int runY = y;
+
+            for (int x = ix1; x <= ix2; x++) {
+                if (y != runY) {
+                    if (count < MAX_LINE_SPANS) {
+                        SPAN_X1[count] = runStartX;
+                        SPAN_Y1[count] = runY;
+                        SPAN_X2[count] = x - 1;
+                        SPAN_Y2[count] = runY;
+                        count++;
+                    }
+                    runStartX = x;
+                    runY = y;
+                }
+                err -= ady;
+                if (err < 0) {
+                    y += sy;
+                    err += adx;
+                }
+            }
+            if (count < MAX_LINE_SPANS) {
+                SPAN_X1[count] = runStartX;
+                SPAN_Y1[count] = runY;
+                SPAN_X2[count] = ix2;
+                SPAN_Y2[count] = runY;
+                count++;
+            }
+        } else {
+            if (iy1 > iy2) {
+                int tx = ix1; ix1 = ix2; ix2 = tx;
+                int ty = iy1; iy1 = iy2; iy2 = ty;
+            }
+            int sx = ix1 <= ix2 ? 1 : -1;
+            int err = ady >> 1;
+            int x = ix1;
+            int runStartY = iy1;
+            int runX = x;
+
+            for (int y = iy1; y <= iy2; y++) {
+                if (x != runX) {
+                    if (count < MAX_LINE_SPANS) {
+                        SPAN_X1[count] = runX;
+                        SPAN_Y1[count] = runStartY;
+                        SPAN_X2[count] = runX;
+                        SPAN_Y2[count] = y - 1;
+                        count++;
+                    }
+                    runStartY = y;
+                    runX = x;
+                }
+                err -= adx;
+                if (err < 0) {
+                    x += sx;
+                    err += ady;
+                }
+            }
+            if (count < MAX_LINE_SPANS) {
+                SPAN_X1[count] = runX;
+                SPAN_Y1[count] = runStartY;
+                SPAN_X2[count] = runX;
+                SPAN_Y2[count] = iy2;
+                count++;
+            }
+        }
+        return count;
+    }
+
     private void drawGlowLine(GuiGraphics g, float x1, float y1, float x2, float y2, int coreCol, int glowCol, boolean glow) {
         float dx = x2 - x1;
         float dy = y2 - y1;
-        float dist = Mth.sqrt(dx * dx + dy * dy);
-        if (dist < 0.5F || dist > 900.0F) return;
+        float distSq = dx * dx + dy * dy;
+        if (distSq < 0.25F || distSq > 810000.0F) return;
 
-        int steps = Math.min(96, Math.max(2, Math.round(dist * 0.65F)));
-        float inv = 1.0F / steps;
-        for (int i = 0; i <= steps; i++) {
-            float t = i * inv;
-            int px = Math.round(x1 + dx * t);
-            int py = Math.round(y1 + dy * t);
-            if (glow) {
-                g.fill(px - 1, py - 1, px + 2, py + 2, glowCol);
+        int ix1 = Math.round(x1);
+        int iy1 = Math.round(y1);
+        int ix2 = Math.round(x2);
+        int iy2 = Math.round(y2);
+        int spans = collectMergedLineSpans(ix1, iy1, ix2, iy2);
+
+        if (glow && ((glowCol >>> 24) > 2)) {
+            for (int i = 0; i < spans; i++) {
+                g.fill(SPAN_X1[i] - 1, SPAN_Y1[i] - 1, SPAN_X2[i] + 2, SPAN_Y2[i] + 2, glowCol);
             }
-            g.fill(px, py, px + 1, py + 1, coreCol);
+        }
+        if ((coreCol >>> 24) > 2) {
+            for (int i = 0; i < spans; i++) {
+                g.fill(SPAN_X1[i], SPAN_Y1[i], SPAN_X2[i] + 1, SPAN_Y2[i] + 1, coreCol);
+            }
         }
     }
 
     private void drawThinLine(GuiGraphics g, float x1, float y1, float x2, float y2, int col) {
+        if ((col >>> 24) <= 2) return;
         float dx = x2 - x1;
         float dy = y2 - y1;
-        float dist = Mth.sqrt(dx * dx + dy * dy);
-        if (dist < 0.5F || dist > 900.0F) return;
-        int steps = Math.min(80, Math.max(2, Math.round(dist * 0.6F)));
-        float inv = 1.0F / steps;
-        for (int i = 0; i <= steps; i++) {
-            float t = i * inv;
-            int px = Math.round(x1 + dx * t);
-            int py = Math.round(y1 + dy * t);
-            g.fill(px, py, px + 1, py + 1, col);
+        float distSq = dx * dx + dy * dy;
+        if (distSq < 0.25F || distSq > 810000.0F) return;
+
+        int spans = collectMergedLineSpans(Math.round(x1), Math.round(y1), Math.round(x2), Math.round(y2));
+        for (int i = 0; i < spans; i++) {
+            g.fill(SPAN_X1[i], SPAN_Y1[i], SPAN_X2[i] + 1, SPAN_Y2[i] + 1, col);
         }
     }
 
