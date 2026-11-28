@@ -154,7 +154,6 @@ tasks.register('generateObfDictionaries') {
         writeDict(file('build/proguard-dict.txt'), 2000, 3, 7)
         writeDict(file('build/proguard-class-dict.txt'), 800, 4, 8)
 
-        // Pick a fresh random flat package name every single build (e.g. "k7x" / "q2m")
         def pkgSb = new StringBuilder(3)
         for (int i = 0; i < 3; i++) {
             pkgSb.append(lower.charAt(rng.nextInt(lower.length())))
@@ -167,13 +166,14 @@ tasks.register('generateObfDictionaries') {
 
 tasks.register('obfuscateJar', proguard.gradle.ProGuardTask) {
     dependsOn tasks.named('remapJar'), tasks.named('generateObfDictionaries')
-    configuration file('proguard-rules.pro')
-    configuration file('build/proguard-dynamic.pro')
 
+    def baseName = project.findProperty('archives_base_name') ?: project.name
     injars tasks.named('remapJar').flatMap { it.archiveFile }
-    outjars layout.buildDirectory.file("libs/${project.archives_base_name}-${project.version}-obf-raw.jar")
+    outjars layout.buildDirectory.file("libs/${baseName}-${project.version}-obf-raw.jar")
 
     doFirst {
+        configuration file('proguard-rules.pro')
+        configuration file('build/proguard-dynamic.pro')
         def javaHome = System.getProperty('java.home')
         def jmodsDir = file("${javaHome}/jmods")
         if (jmodsDir.exists()) {
@@ -191,8 +191,9 @@ tasks.register('obfuscateJar', proguard.gradle.ProGuardTask) {
 tasks.register('scrubObfJar') {
     dependsOn tasks.named('obfuscateJar')
     doLast {
-        def rawJar = layout.buildDirectory.file("libs/${project.archives_base_name}-${project.version}-obf-raw.jar").get().asFile
-        def finalJar = layout.buildDirectory.file("libs/${project.archives_base_name}-${project.version}-obf.jar").get().asFile
+        def baseName = project.findProperty('archives_base_name') ?: project.name
+        def rawJar = layout.buildDirectory.file("libs/${baseName}-${project.version}-obf-raw.jar").get().asFile
+        def finalJar = layout.buildDirectory.file("libs/${baseName}-${project.version}-obf.jar").get().asFile
         int flattenedCount = 0
         int totalClasses = 0
         def zis = new java.util.zip.ZipInputStream(new FileInputStream(rawJar))

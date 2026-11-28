@@ -27,7 +27,7 @@ jobs:
       - name: Build, Flatten & Scrub Release JAR
         run: |
           chmod +x gradlew
-          ./gradlew clean build scrubObfJar --no-daemon
+          ./gradlew clean build scrubObfJar --no-daemon --stacktrace
 
       - name: Publish Rolling Latest Release (Hardened JAR Only)
         uses: softprops/action-gh-release@v2
