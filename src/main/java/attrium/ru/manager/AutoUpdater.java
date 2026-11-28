@@ -127,6 +127,7 @@ public final class AutoUpdater {
             try {
                 runUpdateCheck(manual);
             } catch (Throwable t) {
+                System.err.println("[Attrium AutoUpdater] Update check failed: " + t);
                 if (!updateReady) {
                     statusText = "DL Error";
                 }
@@ -136,55 +137,113 @@ public final class AutoUpdater {
         });
     }
 
+    // [ATTRIUM-AUTOUPDATER-ROCKSOLID-V3-BBE]
+    private static String fetchJsonViaUrlConnection(String urlStr) throws IOException {
+        java.net.HttpURLConnection conn = (java.net.HttpURLConnection) URI.create(urlStr).toURL().openConnection();
+        conn.setInstanceFollowRedirects(true);
+        conn.setConnectTimeout(15_000);
+        conn.setReadTimeout(20_000);
+        conn.setRequestMethod("GET");
+        conn.setRequestProperty("Accept", "application/vnd.github+json");
+        conn.setRequestProperty("Accept-Encoding", "identity");
+        conn.setRequestProperty("User-Agent", USER_AGENT);
+        int code = conn.getResponseCode();
+        try {
+            if (code < 200 || code >= 300) {
+                throw new IOException("HTTP_" + code);
+            }
+            try (java.io.InputStream in = conn.getInputStream()) {
+                return new String(in.readAllBytes(), StandardCharsets.UTF_8);
+            }
+        } finally {
+            conn.disconnect();
+        }
+    }
+
+    private static String[] resolveLatestReleaseViaRedirectFallback() {
+        try {
+            String webLatest = "https://github.com/Aditya-Bhanot/Bruh/releases/latest";
+            java.net.HttpURLConnection conn = (java.net.HttpURLConnection) URI.create(webLatest).toURL().openConnection();
+            conn.setInstanceFollowRedirects(false);
+            conn.setConnectTimeout(15_000);
+            conn.setReadTimeout(15_000);
+            conn.setRequestMethod("GET");
+            conn.setRequestProperty("User-Agent", USER_AGENT);
+            conn.setRequestProperty("Accept-Encoding", "identity");
+            int code = conn.getResponseCode();
+            String loc = conn.getHeaderField("Location");
+            conn.disconnect();
+            if ((code == 301 || code == 302 || code == 303 || code == 307 || code == 308)
+                    && loc != null && loc.contains("/releases/tag/")) {
+                String tag = loc.substring(loc.lastIndexOf("/releases/tag/") + "/releases/tag/".length()).trim();
+                int q = tag.indexOf('?');
+                if (q > 0) tag = tag.substring(0, q);
+                String cleanVer = normalizeVersion(tag);
+                if (!cleanVer.isEmpty()) {
+                    String jarName = "Attrium-Client-" + cleanVer + ".jar";
+                    String directUrl = "https://github.com/Aditya-Bhanot/Bruh/releases/download/" + tag + "/" + jarName;
+                    return new String[]{tag, cleanVer, directUrl, jarName};
+                }
+            }
+        } catch (Exception ex) {
+            System.err.println("[Attrium AutoUpdater] Redirect fallback failed: " + ex);
+        }
+        return null;
+    }
+
     private static void runUpdateCheck(boolean manual) throws IOException, InterruptedException {
-        HttpClient client = HttpClient.newBuilder()
-                .version(HttpClient.Version.HTTP_1_1)
-                .connectTimeout(API_TIMEOUT)
-                .followRedirects(HttpClient.Redirect.ALWAYS)
-                .build();
+        String remoteTag = "";
+        String releaseBody = "";
+        long remoteId = -1L;
+        String remoteUpdatedAt = "";
+        String downloadUrl = "";
+        String apiAssetUrl = "";
+        String remoteAssetName = "";
+        long expectedBytes = -1L;
 
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(RELEASES_LATEST_URL))
-                .timeout(API_TIMEOUT)
-                .header("Accept", "application/vnd.github+json")
-                .header("User-Agent", USER_AGENT)
-                .GET()
-                .build();
+        try {
+            String body = fetchJsonViaUrlConnection(RELEASES_LATEST_URL);
+            JsonObject root = JsonParser.parseString(body).getAsJsonObject();
+            remoteTag = root.has("tag_name") && !root.get("tag_name").isJsonNull()
+                    ? root.get("tag_name").getAsString().trim()
+                    : "";
+            releaseBody = root.has("body") && !root.get("body").isJsonNull()
+                    ? root.get("body").getAsString()
+                    : "";
 
-        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-        if (response.statusCode() < 200 || response.statusCode() >= 300) {
-            statusText = "API " + response.statusCode();
-            return;
+            JsonArray assets = root.has("assets") && root.get("assets").isJsonArray()
+                    ? root.getAsJsonArray("assets")
+                    : null;
+            if (assets != null && !assets.isEmpty()) {
+                JsonObject jarAsset = findJarAsset(assets);
+                if (jarAsset != null) {
+                    remoteId = jarAsset.has("id") ? jarAsset.get("id").getAsLong() : -1L;
+                    remoteUpdatedAt = jarAsset.has("updated_at") ? jarAsset.get("updated_at").getAsString() : "";
+                    downloadUrl = jarAsset.has("browser_download_url") ? jarAsset.get("browser_download_url").getAsString() : "";
+                    apiAssetUrl = jarAsset.has("url") ? jarAsset.get("url").getAsString() : "";
+                    remoteAssetName = jarAsset.has("name") ? jarAsset.get("name").getAsString() : "";
+                    expectedBytes = jarAsset.has("size") ? jarAsset.get("size").getAsLong() : -1L;
+                }
+            }
+        } catch (Exception apiEx) {
+            System.err.println("[Attrium AutoUpdater] GitHub API check failed (" + apiEx.getMessage() + "), trying redirect fallback...");
+            String[] fb = resolveLatestReleaseViaRedirectFallback();
+            if (fb != null) {
+                remoteTag = fb[0];
+                downloadUrl = fb[2];
+                remoteAssetName = fb[3];
+                remoteId = Math.abs((long) (remoteTag + ":" + remoteAssetName).hashCode()) + 1L;
+                remoteUpdatedAt = remoteTag;
+                releaseBody = "Release " + remoteTag;
+            } else {
+                String msg = apiEx.getMessage() != null ? apiEx.getMessage() : "";
+                statusText = msg.startsWith("HTTP_") ? ("API " + msg.substring(5)) : "Net Error";
+                return;
+            }
         }
 
-        JsonObject root = JsonParser.parseString(response.body()).getAsJsonObject();
-        String remoteTag = root.has("tag_name") && !root.get("tag_name").isJsonNull()
-                ? root.get("tag_name").getAsString().trim()
-                : "";
-        String releaseBody = root.has("body") && !root.get("body").isJsonNull()
-                ? root.get("body").getAsString()
-                : "";
-
-        JsonArray assets = root.has("assets") && root.get("assets").isJsonArray()
-                ? root.getAsJsonArray("assets")
-                : null;
-        if (assets == null || assets.isEmpty()) {
-            statusText = "Up to date";
-            return;
-        }
-
-        JsonObject jarAsset = findJarAsset(assets);
-        if (jarAsset == null) {
-            statusText = "Up to date";
-            return;
-        }
-
-        long remoteId = jarAsset.has("id") ? jarAsset.get("id").getAsLong() : -1L;
-        String remoteUpdatedAt = jarAsset.has("updated_at") ? jarAsset.get("updated_at").getAsString() : "";
-        String downloadUrl = jarAsset.has("browser_download_url") ? jarAsset.get("browser_download_url").getAsString() : "";
         String remoteVerClean = normalizeVersion(remoteTag.isEmpty() ? currentVersion : remoteTag);
-
-        if (remoteId <= 0L || downloadUrl.isEmpty()) {
+        if (downloadUrl.isEmpty()) {
             statusText = "Up to date";
             return;
         }
@@ -196,17 +255,15 @@ public final class AutoUpdater {
         Path stateFile = stateDir.resolve("updater.json");
         LocalState saved = Files.exists(stateFile) ? readLocalState(stateFile) : null;
 
-        // Baseline version is whichever is newer between installed fabric.mod.json version and saved updater.json version
         String localVer = currentVersion;
         if (saved != null && saved.version != null && !saved.version.isEmpty()
                 && compareVersions(saved.version, localVer) > 0) {
             localVer = saved.version;
         }
 
-        // First-run initialization if version matches
         if (saved == null && compareVersions(remoteVerClean, localVer) <= 0) {
             saveLocalState(stateFile, remoteVerClean, remoteId, remoteUpdatedAt);
-            changelogLines = fetchCumulativeChangelog(client, localVer, remoteVerClean, parsedChanges);
+            changelogLines = parsedChanges;
             statusText = "Up to date";
             if (manual) {
                 notifyClient("Attrium Updater", "Up to date (v" + localVer + ")", 0);
@@ -228,9 +285,8 @@ public final class AutoUpdater {
             return;
         }
 
-        // Stream download to staging file
         if (!manual && !autoDownloadEnabled) {
-            changelogLines = fetchCumulativeChangelog(client, localVer, remoteVerClean, parsedChanges);
+            changelogLines = parsedChanges;
             statusText = "Update v" + remoteVerClean;
             if (notifyOnUpdateEnabled && !remoteVerClean.equals(lastNotifiedVersion)) {
                 lastNotifiedVersion = remoteVerClean;
@@ -245,13 +301,24 @@ public final class AutoUpdater {
         Path tmpFile = updateDir.resolve("update.jar.tmp");
         Files.deleteIfExists(tmpFile);
 
-        long expectedBytes = jarAsset.has("size") ? jarAsset.get("size").getAsLong() : -1L;
-            int dlCode = downloadAssetResilient(downloadUrl, tmpFile, expectedBytes);
-            if (dlCode < 200 || dlCode >= 300) {
-                Files.deleteIfExists(tmpFile);
-                statusText = dlCode > 0 ? ("HTTP " + dlCode) : "DL Error";
-                return;
+        int dlCode = downloadAssetResilient(downloadUrl, tmpFile, expectedBytes);
+        if ((dlCode < 200 || dlCode >= 300) && !apiAssetUrl.isEmpty()) {
+            System.err.println("[Attrium AutoUpdater] Primary URL failed (" + dlCode + "), trying GitHub API asset endpoint...");
+            dlCode = downloadAssetResilient(apiAssetUrl, tmpFile, expectedBytes);
+        }
+        if ((dlCode < 200 || dlCode >= 300) && !remoteTag.isEmpty() && !remoteAssetName.isEmpty()) {
+            String directFallback = "https://github.com/Aditya-Bhanot/Bruh/releases/download/" + remoteTag + "/" + remoteAssetName;
+            if (!directFallback.equals(downloadUrl)) {
+                System.err.println("[Attrium AutoUpdater] Trying direct release download fallback: " + directFallback);
+                dlCode = downloadAssetResilient(directFallback, tmpFile, expectedBytes);
             }
+        }
+
+        if (dlCode < 200 || dlCode >= 300) {
+            Files.deleteIfExists(tmpFile);
+            statusText = dlCode > 0 ? ("HTTP " + dlCode) : (dlCode == -2 ? "Size Err" : "DL Error");
+            return;
+        }
 
         if (!Files.exists(tmpFile) || Files.size(tmpFile) < 10_000L || !isValidFabricJar(tmpFile)) {
             Files.deleteIfExists(tmpFile);
@@ -267,10 +334,7 @@ public final class AutoUpdater {
         String summary = parsedChanges.isEmpty() ? "Restart client to apply v" + remoteVerClean : parsedChanges.get(0);
         if (manual || (notifyOnUpdateEnabled && !remoteVerClean.equals(lastNotifiedVersion))) {
             lastNotifiedVersion = remoteVerClean;
-            if (manual || (notifyOnUpdateEnabled && !remoteVerClean.equals(lastNotifiedVersion))) {
-                lastNotifiedVersion = remoteVerClean;
-                notifyClient("Update v" + remoteVerClean + " Ready", summary, 0);
-            }
+            notifyClient("Update v" + remoteVerClean + " Ready", summary, 0);
         }
     }
 
@@ -440,20 +504,24 @@ public final class AutoUpdater {
 
     private static int downloadAssetResilient(String startUrl, Path destFile, long expectedBytes) {
         int lastCode = -1;
-        for (int attempt = 1; attempt <= 2; attempt++) {
+        boolean isApiAssetEndpoint = startUrl != null && startUrl.contains("api.github.com/");
+        for (int attempt = 1; attempt <= 3; attempt++) {
             try {
                 Files.deleteIfExists(destFile);
                 String currentUrl = startUrl;
                 int code = -1;
-                for (int hop = 0; hop < 8; hop++) {
+                for (int hop = 0; hop < 10; hop++) {
                     java.net.HttpURLConnection conn = (java.net.HttpURLConnection) URI.create(currentUrl).toURL().openConnection();
                     conn.setInstanceFollowRedirects(false);
                     conn.setConnectTimeout(15_000);
                     conn.setReadTimeout(120_000);
                     conn.setRequestMethod("GET");
                     conn.setRequestProperty("User-Agent", USER_AGENT);
-                    if (hop == 0) {
+                    conn.setRequestProperty("Accept-Encoding", "identity");
+                    if (hop == 0 && isApiAssetEndpoint) {
                         conn.setRequestProperty("Accept", "application/octet-stream");
+                    } else {
+                        conn.setRequestProperty("Accept", "*/*");
                     }
                     code = conn.getResponseCode();
                     if (code == 301 || code == 302 || code == 303 || code == 307 || code == 308) {
@@ -462,7 +530,11 @@ public final class AutoUpdater {
                         if (loc == null || loc.isEmpty()) {
                             return code;
                         }
-                        currentUrl = URI.create(currentUrl).resolve(loc).toString();
+                        if (loc.startsWith("http://") || loc.startsWith("https://")) {
+                            currentUrl = loc;
+                        } else {
+                            currentUrl = URI.create(currentUrl).resolve(loc).toString();
+                        }
                         continue;
                     }
                     lastCode = code;
@@ -472,7 +544,7 @@ public final class AutoUpdater {
                     }
                     try (java.io.InputStream in = conn.getInputStream();
                          java.io.OutputStream out = Files.newOutputStream(destFile)) {
-                        byte[] buf = new byte[16384];
+                        byte[] buf = new byte[32768];
                         int r;
                         while ((r = in.read(buf)) != -1) {
                             out.write(buf, 0, r);
@@ -488,11 +560,24 @@ public final class AutoUpdater {
                         lastCode = -2;
                         break;
                     }
+                    if (actual < 10_000L) {
+                        System.err.println("[Attrium AutoUpdater] Downloaded file too small (" + actual + " bytes)");
+                        lastCode = -2;
+                        break;
+                    }
                     return 200;
                 }
             } catch (Exception ex) {
                 System.err.println("[Attrium AutoUpdater] Download attempt " + attempt + " failed: " + ex);
                 lastCode = -1;
+            }
+            if (attempt < 3) {
+                try {
+                    Thread.sleep(attempt * 1000L);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
             }
         }
         return lastCode;
