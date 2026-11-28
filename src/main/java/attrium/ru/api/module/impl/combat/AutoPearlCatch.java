@@ -4,12 +4,15 @@ import attrium.ru.api.events.annotation.SubscribeEvent;
 import attrium.ru.api.events.impl.TickEvent;
 import attrium.ru.api.module.Module;
 import attrium.ru.api.module.ModuleCategory;
+import attrium.ru.api.module.impl.misc.ElytraHelper;
 import attrium.ru.api.settings.impl.BooleanSetting;
 import attrium.ru.api.settings.impl.ModeSetting;
 import attrium.ru.api.settings.impl.NumberSetting;
+import attrium.ru.manager.Manager;
 import attrium.ru.manager.RotationManager;
 import attrium.ru.mixin.accessor.CarriedItemSyncInvoker;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.multiplayer.PlayerInfo;
 import net.minecraft.util.Mth;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
@@ -20,36 +23,37 @@ import net.minecraft.world.item.Items;
 import net.minecraft.world.phys.Vec3;
 
 /**
- * Exact 3D Kinematic AutoPearlCatch for Attrium (Minecraft 1.21.11 Official Mojang Mappings).
+ * Revamped Ping-Compensated 3D Kinematic AutoPearlCatch (Minecraft 1.21.11 Official Mojang Mappings).
  *
- * Vanilla 1.21.11 Projectile Physics:
- * - ThrownEnderpearl: speed 1.5, drag 0.99/tick, gravity -0.03/tick, INHERITS playerVel.
- * - WindCharge:       speed 1.5, inertia 1.0 (no drag), gravity 0.0, does NOT inherit playerVel.
- * - Snowball / Egg:   speed 1.5, drag 0.99/tick, gravity -0.03/tick, INHERITS playerVel.
- *
- * Searches t in [0.5, maxInterceptTicks] (default 40 ticks, 0.25-tick steps, zero heap allocations)
- * to find the exact chord time t* where required launch speed |L(t*)| == 1.5.
+ * - Exact 1.21.11 projectile physics:
+ *   * ThrownEnderpearl: spawn eyeY-0.1, speed 1.5, drag 0.99/tick, gravity -0.03/tick, inherits playerVel.
+ *   * WindCharge:       spawn eyeY,     speed 1.5, inertia 1.0,    gravity  0.0/tick,  inherits playerVel.
+ *   * Snowball / Egg:   spawn eyeY-0.1, speed 1.5, drag 0.99/tick, gravity -0.03/tick, inherits playerVel.
+ * - Fast-forwards live server pearl positions by RTT (pingMs / 50 ticks) so high-ping catches stay accurate.
+ * - GrimAC-safe: runs strictly in Manager.START_CLIENT_TICK, respects ActionManager catch-up/slot mutex,
+ *   and never mutates hotbar slots from onDisable().
+ * - Zero idle entity scanning in public lobbies (gated by Ender Pearl cooldown in On Manual Throw mode).
  */
 public class AutoPearlCatch extends Module {
 
     private static final int STATE_IDLE = 0;
     private static final int STATE_THROW_PEARL = 1;
     private static final int STATE_AIM_AND_SWAP = 2;
-    private static final int STATE_FIRE_CATCH = 3;
-    private static final int STATE_REVERT = 4;
+    private static final int STATE_REVERT = 3;
 
     private static final double PROJECTILE_SPEED = 1.5D;
     private static final double PEARL_DRAG = 0.99D;
     private static final double PEARL_GRAVITY = 0.03D;
+    private static final ItemStack PEARL_PROBE = new ItemStack(Items.ENDER_PEARL);
 
     private final ModeSetting triggerMode = register(new ModeSetting(
             "Trigger Mode",
-            "Keybind (throws pearl and catches it when toggled/pressed) or On Manual Throw",
+            "Keybind (throws pearl and catches it when enabled) or On Manual Throw",
             "Keybind", "Keybind", "On Manual Throw"
     ));
     private final ModeSetting catchItem = register(new ModeSetting(
             "Catch Item",
-            "Projectile used to intercept the thrown Ender Pearl (Auto picks best for speed)",
+            "Projectile used to intercept the thrown Ender Pearl (Auto picks lowest-error projectile)",
             "Auto", "Wind Charge", "Snowball / Egg", "Auto"
     ));
     private final NumberSetting fireDelay = register(new NumberSetting(
@@ -59,12 +63,17 @@ public class AutoPearlCatch extends Module {
     ));
     private final NumberSetting maxInterceptTicks = register(new NumberSetting(
             "Max Intercept Ticks",
-            "Maximum ticks ahead the 3D solver searches for an exact diagonal/Elytra intercept",
+            "Maximum ticks ahead the 3D solver searches for an exact intercept",
             40.0D, 6.0D, 60.0D, 2.0D
+    ));
+    private final BooleanSetting pingCompensation = register(new BooleanSetting(
+            "Ping Compensation",
+            "Fast-forwards live server pearl positions by your ping (RTT) for accurate high-ping catches",
+            true
     ));
     private final BooleanSetting elytraCompensation = register(new BooleanSetting(
             "Elytra Compensation",
-            "Accounts for full 3D Elytra gliding velocity including vertical vy momentum",
+            "Accounts for full 3D airborne & Elytra gliding velocity (including vertical vy)",
             true
     ));
     private final ModeSetting rotationMode = register(new ModeSetting(
@@ -89,8 +98,9 @@ public class AutoPearlCatch extends Module {
     private int lastCaughtPearlEntityId = -1;
     private boolean keybindSequencePending = false;
     private boolean holdingSilentRotation = false;
+    private int lastProcessedStartTickId = -1;
 
-    // Fallback simulated pearl kinematics
+    // Fallback / live simulated pearl kinematics
     private double simPearlX = 0.0D;
     private double simPearlY = 0.0D;
     private double simPearlZ = 0.0D;
@@ -105,7 +115,7 @@ public class AutoPearlCatch extends Module {
     private boolean solvedValid = false;
 
     public AutoPearlCatch() {
-        super("AutoPearlCatch", "Exact 3D kinematic Ender Pearl interception (diagonal & Elytra-safe)", ModuleCategory.COMBAT);
+        super("AutoPearlCatch", "Ping-compensated 3D kinematic Ender Pearl catch (moving & Elytra-safe)", ModuleCategory.COMBAT);
     }
 
     @Override
@@ -118,11 +128,7 @@ public class AutoPearlCatch extends Module {
 
     @Override
     protected void onDisable() {
-        Minecraft mc = Minecraft.getInstance();
-        if (mc != null && mc.player != null && previousSlot >= 0 && previousSlot < 9
-                && Boolean.TRUE.equals(autoRevert.getValue())) {
-            selectSlotSynced(mc, previousSlot);
-        }
+        // Never mutate hotbar slots directly from GUI/onDisable (prevents GrimAC Post flags)
         releaseRotation();
         resetState();
     }
@@ -142,21 +148,32 @@ public class AutoPearlCatch extends Module {
 
     @SubscribeEvent
     public void onTick(TickEvent.Pre event) {
-        if (!this.isEnabled()) {
+        if (!this.isEnabled() || !Manager.isInStartClientTick()) {
             return;
         }
         Minecraft mc = event != null ? event.getClient() : Minecraft.getInstance();
         if (mc == null || mc.player == null || mc.level == null || mc.gameMode == null) {
+            lastProcessedStartTickId = -1;
             releaseRotation();
             resetState();
             return;
         }
+
+        int startTickId = Manager.getStartClientTickCount();
+        if (startTickId == lastProcessedStartTickId) {
+            return;
+        }
+        lastProcessedStartTickId = startTickId;
+
+        MaceTarget.ActionManager actionMgr = MaceTarget.ActionManager.getInstance();
+        actionMgr.onPreTickRender(mc);
+
         if (mc.screen != null) {
             return;
         }
 
-        // Advance fallback simulated pearl 1 tick
-        if (state == STATE_AIM_AND_SWAP || state == STATE_FIRE_CATCH) {
+        // Advance fallback simulated pearl 1 tick using exact vanilla order (pos += vel, then drag & gravity)
+        if (state == STATE_AIM_AND_SWAP) {
             simPearlX += simPearlVx;
             simPearlY += simPearlVy;
             simPearlZ += simPearlVz;
@@ -166,11 +183,10 @@ public class AutoPearlCatch extends Module {
         }
 
         switch (state) {
-            case STATE_IDLE -> handleIdle(mc);
-            case STATE_THROW_PEARL -> handleThrowPearl(mc);
-            case STATE_AIM_AND_SWAP -> handleAimAndSwap(mc);
-            case STATE_FIRE_CATCH -> handleFireCatch(mc);
-            case STATE_REVERT -> handleRevert(mc);
+            case STATE_IDLE -> handleIdle(mc, actionMgr);
+            case STATE_THROW_PEARL -> handleThrowPearl(mc, actionMgr);
+            case STATE_AIM_AND_SWAP -> handleAimAndSwap(mc, actionMgr);
+            case STATE_REVERT -> handleRevert(mc, actionMgr);
             default -> {
                 releaseRotation();
                 resetState();
@@ -178,7 +194,11 @@ public class AutoPearlCatch extends Module {
         }
     }
 
-    private void handleIdle(Minecraft mc) {
+    private void handleIdle(Minecraft mc, MaceTarget.ActionManager actionMgr) {
+        if (mc.player.isUsingItem() || ElytraHelper.isSwapBusy() || actionMgr.isSwapInProgress()) {
+            return;
+        }
+
         int catchSlot = findPreferredCatchSlot(mc);
         if (catchSlot < 0) {
             if ("Keybind".equalsIgnoreCase(triggerMode.getValue()) && keybindSequencePending) {
@@ -192,8 +212,11 @@ public class AutoPearlCatch extends Module {
             if (!keybindSequencePending) {
                 return;
             }
+            if (!actionMgr.isSafePreMotionTick() || !actionMgr.canMutateHotbarSlotThisTick()) {
+                return;
+            }
             int pearlSlot = findHotbarItem(mc, Items.ENDER_PEARL);
-            if (pearlSlot < 0) {
+            if (pearlSlot < 0 || mc.player.getCooldowns().isOnCooldown(PEARL_PROBE)) {
                 keybindSequencePending = false;
                 setEnabled(false);
                 return;
@@ -207,20 +230,28 @@ public class AutoPearlCatch extends Module {
             return;
         }
 
-        ThrownEnderpearl pearl = findOwnedRecentPearl(mc, 3.5D, 4);
+        // On Manual Throw: zero entity scanning unless player actually just threw an Ender Pearl (cooldown active)
+        if (!mc.player.getCooldowns().isOnCooldown(PEARL_PROBE)) {
+            return;
+        }
+
+        ThrownEnderpearl pearl = findOwnedRecentPearl(mc, 5.5D, 5);
         if (pearl != null && pearl.getId() != lastCaughtPearlEntityId) {
             previousSlot = mc.player.getInventory().getSelectedSlot();
             activeCatchSlot = catchSlot;
             activeCatchIsWindCharge = mc.player.getInventory().getItem(catchSlot).is(Items.WIND_CHARGE);
             trackedPearlEntityId = pearl.getId();
             lastCaughtPearlEntityId = pearl.getId();
-            captureLivePearlState(pearl);
+            captureLivePearlStateWithPing(mc, pearl);
             delayTicks = Math.max(1, fireDelay.getValue().intValue());
             state = STATE_AIM_AND_SWAP;
         }
     }
 
-    private void handleThrowPearl(Minecraft mc) {
+    private void handleThrowPearl(Minecraft mc, MaceTarget.ActionManager actionMgr) {
+        if (!actionMgr.isSafePreMotionTick()) {
+            return;
+        }
         mc.gameMode.useItem(mc.player, InteractionHand.MAIN_HAND);
         mc.player.swing(InteractionHand.MAIN_HAND);
 
@@ -232,7 +263,8 @@ public class AutoPearlCatch extends Module {
 
         Vec3 vel = mc.player.getDeltaMovement();
         double pVx = vel.x;
-        double pVy = (mc.player.onGround() || !Boolean.TRUE.equals(elytraCompensation.getValue())) ? 0.0D : vel.y;
+        double pVy = (!mc.player.onGround() && (Boolean.TRUE.equals(elytraCompensation.getValue()) || mc.player.isFallFlying()))
+                ? vel.y : 0.0D;
         double pVz = vel.z;
 
         simPearlX = mc.player.getX();
@@ -246,21 +278,25 @@ public class AutoPearlCatch extends Module {
         state = STATE_AIM_AND_SWAP;
     }
 
-    private void handleAimAndSwap(Minecraft mc) {
+    private void handleAimAndSwap(Minecraft mc, MaceTarget.ActionManager actionMgr) {
         delayTicks--;
         if (delayTicks > 0) {
             return;
         }
+        if (!actionMgr.isSafePreMotionTick() || !actionMgr.canMutateHotbarSlotThisTick()) {
+            return;
+        }
 
+        // Sync with live pearl entity if available, fast-forwarded by RTT so we aim at its true server position
         ThrownEnderpearl livePearl = findTrackedOrRecentPearl(mc);
         if (livePearl != null) {
             trackedPearlEntityId = livePearl.getId();
             lastCaughtPearlEntityId = livePearl.getId();
-            captureLivePearlState(livePearl);
+            captureLivePearlStateWithPing(mc, livePearl);
         }
 
         if (!chooseBestCatchSlotAndSolve(mc, false)) {
-            finishOrAbort(mc);
+            finishOrAbort(mc, actionMgr);
             return;
         }
         selectSlotSynced(mc, activeCatchSlot);
@@ -270,36 +306,22 @@ public class AutoPearlCatch extends Module {
         state = STATE_REVERT;
     }
 
-    private void handleFireCatch(Minecraft mc) {
-        ThrownEnderpearl livePearl = findTrackedOrRecentPearl(mc);
-        if (livePearl != null) {
-            captureLivePearlState(livePearl);
-        }
-
-        if (solveExact3DIntercept(mc, false, activeCatchIsWindCharge)) {
-            applySolvedRotation(mc);
-        }
-
-        if (activeCatchSlot >= 0 && activeCatchSlot < 9
-                && mc.player.getInventory().getSelectedSlot() != activeCatchSlot) {
-            selectSlotSynced(mc, activeCatchSlot);
-        }
-
-        fireWithSolvedAngle(mc);
-        revertTicks = 2;
-        state = STATE_REVERT;
-    }
-
-    private void handleRevert(Minecraft mc) {
+    private void handleRevert(Minecraft mc, MaceTarget.ActionManager actionMgr) {
         revertTicks--;
         if (revertTicks > 0) {
             return;
         }
-        finishOrAbort(mc);
+        if (!actionMgr.isSafePreMotionTick() || !actionMgr.canMutateHotbarSlotThisTick()) {
+            return;
+        }
+        finishOrAbort(mc, actionMgr);
     }
 
-    private void finishOrAbort(Minecraft mc) {
-        if (Boolean.TRUE.equals(autoRevert.getValue()) && previousSlot >= 0 && previousSlot < 9) {
+    private void finishOrAbort(Minecraft mc, MaceTarget.ActionManager actionMgr) {
+        if (Boolean.TRUE.equals(autoRevert.getValue())
+                && previousSlot >= 0 && previousSlot < 9
+                && actionMgr.isSafePreMotionTick()
+                && actionMgr.canMutateHotbarSlotThisTick()) {
             selectSlotSynced(mc, previousSlot);
         }
         releaseRotation();
@@ -311,8 +333,7 @@ public class AutoPearlCatch extends Module {
     }
 
     /**
-     * In "Auto" mode, compares Wind Charge vs Snowball/Egg intercept accuracy (crucial during
-     * fast Elytra flight where Snowball/Egg inherits Elytra speed while Wind Charge does not).
+     * In "Auto" mode, compares Wind Charge vs Snowball/Egg intercept accuracy and picks the cleaner match.
      */
     private boolean chooseBestCatchSlotAndSolve(Minecraft mc, boolean predictOneTickAhead) {
         String mode = catchItem.getValue();
@@ -335,13 +356,12 @@ public class AutoPearlCatch extends Module {
             return solveExact3DIntercept(mc, predictOneTickAhead, false);
         }
 
-        // Auto: try Wind Charge first; if Snowball/Egg is also available and gives a much better intercept, pick it
         boolean wcOk = wcSlot >= 0 && solveExact3DIntercept(mc, predictOneTickAhead, true);
         double wcErr = wcOk ? lastSolvedSpeedErr : Double.MAX_VALUE;
         float wcYaw = solvedYaw;
         float wcPitch = solvedPitch;
 
-        if (sbSlot >= 0 && (!wcOk || wcErr > 0.12D)) {
+        if (sbSlot >= 0 && (!wcOk || wcErr > 0.10D)) {
             boolean sbOk = solveExact3DIntercept(mc, predictOneTickAhead, false);
             if (sbOk && lastSolvedSpeedErr < wcErr) {
                 activeCatchSlot = sbSlot;
@@ -362,9 +382,9 @@ public class AutoPearlCatch extends Module {
     }
 
     /**
-     * Exact Continuous-Time 3D Interception Solver (zero heap allocations):
-     * - WindCharge: inertia = 1.0, gravity = 0.0, NO playerVel inheritance.
-     * - Snowball/Egg: drag = 0.99, gravity = 0.03, INHERITS playerVel.
+     * Exact 3D Interception Solver (zero heap allocations):
+     * - WindCharge:   spawn eyeY,     inertia 1.0, gravity 0.0,  inherits playerVel.
+     * - Snowball/Egg: spawn eyeY-0.1, drag 0.99,   gravity 0.03, inherits playerVel.
      */
     private boolean solveExact3DIntercept(Minecraft mc, boolean predictOneTickAhead, boolean isWindCharge) {
         Vec3 vel = mc.player.getDeltaMovement();
@@ -373,8 +393,9 @@ public class AutoPearlCatch extends Module {
         double playerVy = (!mc.player.onGround() && (comp3D || mc.player.isFallFlying())) ? vel.y : 0.0D;
         double playerVz = vel.z;
 
+        double spawnYOffset = isWindCharge ? 0.0D : 0.1D;
         double eyeX = mc.player.getX() + (predictOneTickAhead ? playerVx : 0.0D);
-        double eyeY = (mc.player.getEyeY() - 0.1D) + (predictOneTickAhead ? playerVy : 0.0D);
+        double eyeY = (mc.player.getEyeY() - spawnYOffset) + (predictOneTickAhead ? playerVy : 0.0D);
         double eyeZ = mc.player.getZ() + (predictOneTickAhead ? playerVz : 0.0D);
 
         double startPx = simPearlX;
@@ -399,15 +420,9 @@ public class AutoPearlCatch extends Module {
         double bestReqVz = 0.0D;
         boolean found = false;
 
-        double prevPx = startPx;
-        double prevPy = startPy;
-        double prevPz = startPz;
-        double curPx = startPx;
-        double curPy = startPy;
-        double curPz = startPz;
-        double curPvx = startPvx;
-        double curPvy = startPvy;
-        double curPvz = startPvz;
+        double prevPx = startPx, prevPy = startPy, prevPz = startPz;
+        double curPx = startPx, curPy = startPy, curPz = startPz;
+        double curPvx = startPvx, curPvy = startPvy, curPvz = startPvz;
 
         for (int tick = 1; tick <= maxT; tick++) {
             prevPx = curPx;
@@ -434,12 +449,12 @@ public class AutoPearlCatch extends Module {
                 double reqVy;
                 double reqVz;
                 if (isWindCharge) {
-                    // WindCharge: constant speed 1.5, zero drag, zero gravity, NO player velocity inheritance
-                    reqVx = (px - eyeX) / t;
-                    reqVy = (py - eyeY) / t;
-                    reqVz = (pz - eyeZ) / t;
+                    // WindCharge: inertia 1.0, gravity 0.0, inherits shooter velocity via shootFromRotation()
+                    reqVx = ((px - eyeX) / t) - playerVx;
+                    reqVy = ((py - eyeY) / t) - playerVy;
+                    reqVz = ((pz - eyeZ) / t) - playerVz;
                 } else {
-                    // Snowball / Egg: drag 0.99, gravity 0.03, INHERITS player velocity
+                    // Snowball / Egg: drag 0.99, gravity 0.03, inherits shooter velocity
                     double dragIntegral = (1.0D - Math.pow(0.99D, t)) / 0.01D;
                     if (dragIntegral < 1.0E-4D) {
                         continue;
@@ -458,7 +473,6 @@ public class AutoPearlCatch extends Module {
                     bestReqVy = reqVy;
                     bestReqVz = reqVz;
                     found = true;
-                    // Early exit once we hit an exact earliest speed-matched intercept
                     if (err < 0.015D) {
                         break;
                     }
@@ -539,7 +553,11 @@ public class AutoPearlCatch extends Module {
         }
     }
 
-    private void captureLivePearlState(ThrownEnderpearl pearl) {
+    /**
+     * Captures a live ThrownEnderpearl and fast-forwards it by RTT (download + upload latency)
+     * so the catch projectile intercepts the pearl's true server-side position on arrival.
+     */
+    private void captureLivePearlStateWithPing(Minecraft mc, ThrownEnderpearl pearl) {
         simPearlX = pearl.getX();
         simPearlY = pearl.getY();
         simPearlZ = pearl.getZ();
@@ -547,6 +565,43 @@ public class AutoPearlCatch extends Module {
         simPearlVx = pv.x;
         simPearlVy = pv.y;
         simPearlVz = pv.z;
+
+        if (!Boolean.TRUE.equals(pingCompensation.getValue())) {
+            return;
+        }
+        double rttTicks = Mth.clamp(getLocalPingMs(mc) / 50.0D, 0.0D, 6.0D);
+        int full = (int) Math.floor(rttTicks);
+        double frac = rttTicks - full;
+        for (int i = 0; i < full; i++) {
+            simPearlX += simPearlVx;
+            simPearlY += simPearlVy;
+            simPearlZ += simPearlVz;
+            simPearlVx *= PEARL_DRAG;
+            simPearlVy = (simPearlVy * PEARL_DRAG) - PEARL_GRAVITY;
+            simPearlVz *= PEARL_DRAG;
+        }
+        if (frac > 1.0E-3D) {
+            simPearlX += simPearlVx * frac;
+            simPearlY += simPearlVy * frac;
+            simPearlZ += simPearlVz * frac;
+            double dragF = Math.pow(PEARL_DRAG, frac);
+            simPearlVx *= dragF;
+            simPearlVy = (simPearlVy * dragF) - (PEARL_GRAVITY * frac);
+            simPearlVz *= dragF;
+        }
+    }
+
+    private int getLocalPingMs(Minecraft mc) {
+        try {
+            if (mc != null && mc.player != null && mc.getConnection() != null) {
+                PlayerInfo info = mc.getConnection().getPlayerInfo(mc.player.getUUID());
+                if (info != null) {
+                    return Math.max(0, info.getLatency());
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return 0;
     }
 
     private ThrownEnderpearl findTrackedOrRecentPearl(Minecraft mc) {
@@ -615,15 +670,10 @@ public class AutoPearlCatch extends Module {
         if (mc.player.getInventory().getSelectedSlot() != targetSlot) {
             mc.player.getInventory().setSelectedSlot(targetSlot);
             ((CarriedItemSyncInvoker) mc.gameMode).attrium$ensureHasSentCarriedItem();
+            MaceTarget.ActionManager.getInstance().markHotbarSlotMutated();
         }
     }
 
-    /**
-     * In Minecraft 1.21.11, MultiPlayerGameMode.useItem() builds ServerboundUseItemPacket
-     * directly from mc.player.getYRot()/getXRot(). Temporarily applying the solved angle around
-     * useItem() ensures the catch projectile actually launches along the solved 3D intercept vector
-     * while keeping the visual camera untouched in Silent mode.
-     */
     private void fireWithSolvedAngle(Minecraft mc) {
         if (!solvedValid) {
             mc.gameMode.useItem(mc.player, InteractionHand.MAIN_HAND);
@@ -645,5 +695,4 @@ public class AutoPearlCatch extends Module {
             }
         }
     }
-
 }

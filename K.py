@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
 """
-Attrium Auth Key & Salted Hash Generator (Step 1)
-Generates unreadable PBKDF2-HMAC-SHA256 entries with random salts and noise padding
-for your GitHub raw auth list (safe for FoldCraftLauncher + cracked launchers).
-
-Format of emitted real entries (hidden inside noise lines):
-  <2-hex-noise><tag><salt_b64url>.<hash_b64url>.<4-hex-crc>
-  - tag "d1": Device Fingerprint entry (PBKDF2-HMAC-SHA256, 10,000 iters)
-  - tag "u2": Username:Password entry (PBKDF2-HMAC-SHA256, 50,000 iters)
+Attrium One-Command Gist Auth Manager (Termux)
+Automatically hashes new Device IDs (d1) or Username+Password pairs (u2)
+with salted PBKDF2-HMAC-SHA256 + decoy noise and pushes them directly to
+your GitHub Gist via the GitHub API—no browser needed!
 """
 import base64
 import hashlib
+import json
 import os
 import secrets
 import sys
+import urllib.error
+import urllib.request
 import zlib
+
+GIST_ID = "df6ca1c8b1a34a9503636e5cf145cc1e"
+GIST_FILE = "gistfile1.txt"
+TOKEN_PATH = os.path.expanduser("~/.attrium_gist_token")
 
 
 def b64url(data: bytes) -> str:
@@ -22,9 +25,7 @@ def b64url(data: bytes) -> str:
 
 
 def make_noise_line() -> str:
-    # Produces plausible-looking hex/base64 decoy lines that fail checksum validation
-    n = secrets.choice([24, 32, 40, 48])
-    return b64url(secrets.token_bytes(n))
+    return b64url(secrets.token_bytes(secrets.choice([24, 32, 40, 48])))
 
 
 def encode_entry(tag: str, secret_input: bytes, iterations: int) -> str:
@@ -32,56 +33,95 @@ def encode_entry(tag: str, secret_input: bytes, iterations: int) -> str:
     dk = hashlib.pbkdf2_hmac("sha256", secret_input, salt, iterations, dklen=32)
     payload = f"{tag}{b64url(salt)}.{b64url(dk)}"
     crc = f"{zlib.crc32(payload.encode('ascii')) & 0xFFFF:04x}"
-    prefix = secrets.token_hex(1)
-    return f"{prefix}{payload}.{crc}"
+    return f"{secrets.token_hex(1)}{payload}.{crc}"
 
 
-def make_device_entry(device_hash_hex: str) -> str:
-    clean = device_hash_hex.strip().lower()
-    if len(clean) != 64 or any(c not in "0123456789abcdef" for c in clean):
-        print("[WARN] Expected a 64-char SHA-256 hex device fingerprint; hashing input as-is.")
-    return encode_entry("d1", clean.encode("utf-8"), 10_000)
+def get_token() -> str:
+    env_tok = os.environ.get("GITHUB_TOKEN", "").strip()
+    if env_tok:
+        return env_tok
+    if os.path.isfile(TOKEN_PATH):
+        with open(TOKEN_PATH, "r", encoding="utf-8") as f:
+            tok = f.read().strip()
+            if tok:
+                return tok
+    print("\n[First-Time Setup] Create a GitHub Personal Access Token with ONLY the 'gist' scope:")
+    print("  https://github.com/settings/tokens/new?scopes=gist&description=AttriumAuth")
+    tok = input("Paste your GitHub Gist token (saved locally to ~/.attrium_gist_token): ").strip()
+    if not tok:
+        print("[ERROR] Token cannot be empty.")
+        sys.exit(1)
+    with open(TOKEN_PATH, "w", encoding="utf-8") as f:
+        f.write(tok + "\n")
+    os.chmod(TOKEN_PATH, 0o600)
+    print(f"[SAVED] Token saved securely to {TOKEN_PATH}")
+    return tok
 
 
-def make_user_entry(username: str, password: str) -> str:
-    cred = f"{username.strip().lower()}:{password}".encode("utf-8")
-    return encode_entry("u2", cred, 50_000)
+def api_request(method: str, url: str, token: str, payload: dict = None) -> dict:
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("Accept", "application/vnd.github+json")
+    req.add_header("User-Agent", "AttriumGistAdmin/1.0")
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8", "replace")
+        print(f"[HTTP {e.code}] GitHub API error: {err_body}")
+        sys.exit(1)
 
 
-def interactive_menu():
-    print("=== Attrium Auth Hash Generator (Step 1) ===")
-    print("1) Add Device Fingerprint (auto-login without password)")
-    print("2) Add Username + Password (24h session login)")
-    print("3) Generate decoy noise block (paste between real lines)")
+def main():
+    token = get_token()
+    gist_url = f"https://api.github.com/gists/{GIST_ID}"
+
+    print("\n=== Attrium Auto Gist Manager ===")
+    print("1) Auto-add Device ID (permanent auto-login)")
+    print("2) Auto-add Username + Password (24h session)")
+    print("3) Show Gist stats (count active Device IDs & Users)")
     choice = input("Choose [1/2/3]: ").strip()
 
+    gist = api_request("GET", gist_url, token)
+    files = gist.get("files", {})
+    target_name = GIST_FILE if GIST_FILE in files else (next(iter(files.keys())) if files else GIST_FILE)
+    current_content = files.get(target_name, {}).get("content", "")
+
+    if choice == "3":
+        lines = [l.strip() for l in current_content.splitlines() if l.strip()]
+        d_cnt = sum(1 for l in lines if len(l) > 40 and l[2:4] == "d1" and l.count(".") == 2)
+        u_cnt = sum(1 for l in lines if len(l) > 40 and l[2:4] == "u2" and l.count(".") == 2)
+        print(f"Gist file '{target_name}': {d_cnt} Device IDs, {u_cnt} User accounts, {len(lines)} total lines.")
+        return
+
     if choice == "1":
-        hwid = input("Paste 64-char Device Fingerprint SHA-256: ").strip()
-        line = make_device_entry(hwid)
-        print("\n--- Paste into your GitHub auth file ---")
-        print(make_noise_line())
-        print(line)
-        print(make_noise_line())
+        hwid = input("Paste 64-char Device ID: ").strip().lower()
+        if len(hwid) != 64 or any(c not in "0123456789abcdef" for c in hwid):
+            print("[WARN] Input doesn't look like a 64-char SHA-256 hex ID, continuing anyway...")
+        new_entry = encode_entry("d1", hwid.encode("utf-8"), 10_000)
+        label = f"Device ID ({hwid[:10]}...)"
     elif choice == "2":
-        user = input("Username: ").strip()
+        user = input("Username: ").strip().lower()
         pwd = input("Password: ").strip()
         if not user or not pwd:
             print("[ERROR] Username and password cannot be empty.")
             sys.exit(1)
-        line = make_user_entry(user, pwd)
-        print("\n--- Paste into your GitHub auth file ---")
-        print(make_noise_line())
-        print(line)
-        print(make_noise_line())
-    elif choice == "3":
-        count = input("How many noise lines? [default 6]: ").strip()
-        n = int(count) if count.isdigit() else 6
-        print("\n--- Decoy Noise Lines ---")
-        for _ in range(max(1, min(n, 50))):
-            print(make_noise_line())
+        new_entry = encode_entry("u2", f"{user}:{pwd}".encode("utf-8"), 50_000)
+        label = f"User '{user}'"
     else:
         print("Invalid choice.")
+        return
+
+    prefix = current_content.rstrip("\n")
+    addition = f"{make_noise_line()}\n{new_entry}\n{make_noise_line()}"
+    updated_content = (prefix + "\n" + addition + "\n") if prefix else (addition + "\n")
+
+    api_request("PATCH", gist_url, token, {"files": {target_name: {"content": updated_content}}})
+    print(f"[SUCCESS] Added {label} directly to your GitHub Gist! (Takes effect in ~30-60s)")
 
 
 if __name__ == "__main__":
-    interactive_menu()
+    main()
