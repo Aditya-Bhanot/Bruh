@@ -1,7 +1,6 @@
 # Attrium Maximum Flat-Package Obfuscation Rules (Runs on Mojang-mapped JAR before Loom remapJar)
 -dontshrink
 -dontoptimize
--dontpreverify
 -dontwarn **
 -ignorewarnings
 -useuniqueclassmembernames
