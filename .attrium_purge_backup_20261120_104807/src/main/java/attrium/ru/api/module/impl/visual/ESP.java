@@ -677,85 +677,23 @@ public class ESP extends Module {
      * from `mc.gameRenderer.getMainCamera()` so 2D Box projection works in 1st-person,
      * 3rd-person back, and 3rd-person front views.
      */
+    // [ATTRIUM-STEP1-DIRECT-CAMERA]
     private static void extractCameraLensPositionAndRotation(
             Minecraft mc,
             float partialTick,
             double[] outCamPos,
             float[] outPitchYaw
     ) {
-        if (!cameraReflectionInitialized) {
-            cameraReflectionInitialized = true;
-            try {
-                for (Method m : Camera.class.getDeclaredMethods()) {
-                    if (m.getParameterCount() == 0 && m.getReturnType() == Vec3.class) {
-                        m.setAccessible(true);
-                        cachedCameraPosMethod = m;
-                        break;
-                    }
-                }
-                if (cachedCameraPosMethod == null) {
-                    for (Field f : Camera.class.getDeclaredFields()) {
-                        if (f.getType() == Vec3.class) {
-                            f.setAccessible(true);
-                            cachedCameraPosField = f;
-                            break;
-                        }
-                    }
-                }
-                for (Method m : Camera.class.getDeclaredMethods()) {
-                    if (m.getParameterCount() == 0 && m.getReturnType() == float.class) {
-                        String n = m.getName().toLowerCase(Locale.ROOT);
-                        if (n.contains("xrot") || n.contains("pitch")) {
-                            m.setAccessible(true);
-                            cachedCameraXRotMethod = m;
-                        } else if (n.contains("yrot") || n.contains("yaw")) {
-                            m.setAccessible(true);
-                            cachedCameraYRotMethod = m;
-                        }
-                    }
-                }
-                for (Field f : Camera.class.getDeclaredFields()) {
-                    if (f.getType() == float.class) {
-                        String n = f.getName().toLowerCase(Locale.ROOT);
-                        if (n.contains("xrot") || n.contains("pitch")) {
-                            f.setAccessible(true);
-                            cachedCameraXRotField = f;
-                        } else if (n.contains("yrot") || n.contains("yaw")) {
-                            f.setAccessible(true);
-                            cachedCameraYRotField = f;
-                        }
-                    }
-                }
-            } catch (Throwable ignored) {
-            }
-        }
-
         Camera camera = mc.gameRenderer != null ? mc.gameRenderer.getMainCamera() : null;
-        Vec3 resolvedPos = null;
-        Float resolvedPitch = null;
-        Float resolvedYaw = null;
-
         if (camera != null) {
-            try {
-                if (cachedCameraPosMethod != null) {
-                    resolvedPos = (Vec3) cachedCameraPosMethod.invoke(camera);
-                } else if (cachedCameraPosField != null) {
-                    resolvedPos = (Vec3) cachedCameraPosField.get(camera);
-                }
-            } catch (Throwable ignored) {
-            }
-            try {
-                if (cachedCameraXRotMethod != null) {
-                    resolvedPitch = (Float) cachedCameraXRotMethod.invoke(camera);
-                } else if (cachedCameraXRotField != null) {
-                    resolvedPitch = cachedCameraXRotField.getFloat(camera);
-                }
-                if (cachedCameraYRotMethod != null) {
-                    resolvedYaw = (Float) cachedCameraYRotMethod.invoke(camera);
-                } else if (cachedCameraYRotField != null) {
-                    resolvedYaw = cachedCameraYRotField.getFloat(camera);
-                }
-            } catch (Throwable ignored) {
+            Vec3 pos = camera.position();
+            if (pos != null) {
+                outCamPos[0] = pos.x;
+                outCamPos[1] = pos.y;
+                outCamPos[2] = pos.z;
+                outPitchYaw[0] = camera.xRot();
+                outPitchYaw[1] = camera.yRot();
+                return;
             }
         }
 
@@ -763,34 +701,25 @@ public class ESP extends Module {
         float playerYaw = Mth.lerp(partialTick, mc.player.yRotO, mc.player.getYRot());
         CameraType camType = mc.options != null ? mc.options.getCameraType() : CameraType.FIRST_PERSON;
 
-        if (resolvedPitch == null || resolvedYaw == null) {
-            if (camType.isMirrored()) {
-                resolvedPitch = -playerPitch;
-                resolvedYaw = playerYaw + 180.0F;
-            } else {
-                resolvedPitch = playerPitch;
-                resolvedYaw = playerYaw;
-            }
-        }
+        float resolvedPitch = camType.isMirrored() ? -playerPitch : playerPitch;
+        float resolvedYaw = camType.isMirrored() ? (playerYaw + 180.0F) : playerYaw;
 
-        if (resolvedPos == null) {
-            Vec3 eye = mc.player.getEyePosition(partialTick);
-            if (!camType.isFirstPerson()) {
-                double radYaw = Math.toRadians(-resolvedYaw);
-                double radPitch = Math.toRadians(-resolvedPitch);
-                double cosPitch = Math.cos(radPitch);
-                double lookX = Math.sin(radYaw) * cosPitch;
-                double lookY = Math.sin(radPitch);
-                double lookZ = Math.cos(radYaw) * cosPitch;
-                resolvedPos = new Vec3(eye.x - lookX * 4.0D, eye.y - lookY * 4.0D, eye.z - lookZ * 4.0D);
-            } else {
-                resolvedPos = eye;
-            }
+        Vec3 eye = mc.player.getEyePosition(partialTick);
+        if (!camType.isFirstPerson()) {
+            double radYaw = Math.toRadians(-resolvedYaw);
+            double radPitch = Math.toRadians(-resolvedPitch);
+            double cosPitch = Math.cos(radPitch);
+            double lookX = Math.sin(radYaw) * cosPitch;
+            double lookY = Math.sin(radPitch);
+            double lookZ = Math.cos(radYaw) * cosPitch;
+            outCamPos[0] = eye.x - lookX * 4.0D;
+            outCamPos[1] = eye.y - lookY * 4.0D;
+            outCamPos[2] = eye.z - lookZ * 4.0D;
+        } else {
+            outCamPos[0] = eye.x;
+            outCamPos[1] = eye.y;
+            outCamPos[2] = eye.z;
         }
-
-        outCamPos[0] = resolvedPos.x;
-        outCamPos[1] = resolvedPos.y;
-        outCamPos[2] = resolvedPos.z;
         outPitchYaw[0] = resolvedPitch;
         outPitchYaw[1] = resolvedYaw;
     }

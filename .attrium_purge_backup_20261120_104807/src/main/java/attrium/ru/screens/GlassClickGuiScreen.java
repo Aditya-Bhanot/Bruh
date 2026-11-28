@@ -591,10 +591,46 @@ public class GlassClickGuiScreen extends Screen {
         return row.module != null && "ElytraHelper".equalsIgnoreCase(row.module.getClass().getSimpleName());
     }
 
+    // [ATTRIUM-STEP1-MACRO-CACHE]
+    private static final Method MISSING_MACRO_METHOD;
+    private static final java.util.IdentityHashMap<Class<?>, Method> MACRO_TICK_CACHE = new java.util.IdentityHashMap<>();
+    private static final java.util.IdentityHashMap<Class<?>, Method> MACRO_SET_KEY_CACHE = new java.util.IdentityHashMap<>();
+    private static final java.util.IdentityHashMap<Class<?>, Method> MACRO_GET_KEY_CACHE = new java.util.IdentityHashMap<>();
+    private static final java.util.IdentityHashMap<Class<?>, Method> MACRO_CALLBACK_CACHE = new java.util.IdentityHashMap<>();
+
+    static {
+        Method sentinel = null;
+        try {
+            sentinel = Object.class.getMethod("toString");
+        } catch (Throwable ignored) {
+        }
+        MISSING_MACRO_METHOD = sentinel;
+    }
+
+    private static Method resolveCachedMacroMethod(
+            java.util.IdentityHashMap<Class<?>, Method> cache,
+            Class<?> cls,
+            String name,
+            Class<?>... params
+    ) {
+        Method cached = cache.get(cls);
+        if (cached != null) {
+            return cached == MISSING_MACRO_METHOD ? null : cached;
+        }
+        Method found = null;
+        try {
+            found = cls.getMethod(name, params);
+        } catch (Throwable ignored) {
+        }
+        cache.put(cls, found != null ? found : MISSING_MACRO_METHOD);
+        return found;
+    }
+
     private static void invokeStaticMacroTick(Module mod, Minecraft mc, int key) {
         if (mod == null) return;
+        Method m = resolveCachedMacroMethod(MACRO_TICK_CACHE, mod.getClass(), "tickMacroGlobal", Minecraft.class, int.class);
+        if (m == null) return;
         try {
-            Method m = mod.getClass().getMethod("tickMacroGlobal", Minecraft.class, int.class);
             m.invoke(null, mc, key);
         } catch (Throwable ignored) {
         }
@@ -602,8 +638,9 @@ public class GlassClickGuiScreen extends Screen {
 
     private static void invokeStaticMacroSetKey(Module mod, int key) {
         if (mod == null) return;
+        Method m = resolveCachedMacroMethod(MACRO_SET_KEY_CACHE, mod.getClass(), "setMacroBoundKey", int.class);
+        if (m == null) return;
         try {
-            Method m = mod.getClass().getMethod("setMacroBoundKey", int.class);
             m.invoke(null, key);
         } catch (Throwable ignored) {
         }
@@ -611,8 +648,9 @@ public class GlassClickGuiScreen extends Screen {
 
     private static int invokeStaticMacroGetKey(Module mod) {
         if (mod == null) return -1;
+        Method m = resolveCachedMacroMethod(MACRO_GET_KEY_CACHE, mod.getClass(), "getMacroBoundKey");
+        if (m == null) return -1;
         try {
-            Method m = mod.getClass().getMethod("getMacroBoundKey");
             Object v = m.invoke(null);
             if (v instanceof Number n) return n.intValue();
         } catch (Throwable ignored) {
@@ -622,8 +660,9 @@ public class GlassClickGuiScreen extends Screen {
 
     private static void invokeStaticMacroCallback(Module mod, int key) {
         if (mod == null) return;
+        Method m = resolveCachedMacroMethod(MACRO_CALLBACK_CACHE, mod.getClass(), "onMacroKeyPressedFromCallback", int.class);
+        if (m == null) return;
         try {
-            Method m = mod.getClass().getMethod("onMacroKeyPressedFromCallback", int.class);
             m.invoke(null, key);
         } catch (Throwable ignored) {
         }
@@ -2152,11 +2191,19 @@ public class GlassClickGuiScreen extends Screen {
         return false;
     }
 
-    private static double extractNumberSettingStep(NumberSetting ns) {
-        if (ns == null) {
-            return 0.1D;
-        }
-        double range = Math.max(0.0001D, ns.getMax() - ns.getMin());
+    // [ATTRIUM-STEP1-SETTINGS-CACHE]
+    private static boolean settingStepCacheInit = false;
+    private static Method cachedNumberStepMethod = null;
+    private static Field cachedNumberStepField = null;
+    private static boolean multiModeCacheInit = false;
+    private static Method cachedMultiModeOptsMethod = null;
+    private static Field cachedMultiModeOptsField = null;
+    private static Method cachedMultiModeToggle1Method = null;
+    private static Method cachedMultiModeToggle2Method = null;
+
+    private static void ensureNumberStepCache() {
+        if (settingStepCacheInit) return;
+        settingStepCacheInit = true;
         try {
             for (Method m : NumberSetting.class.getDeclaredMethods()) {
                 String n = m.getName().toLowerCase(Locale.ROOT);
@@ -2164,13 +2211,8 @@ public class GlassClickGuiScreen extends Screen {
                         && (m.getReturnType() == double.class || m.getReturnType() == float.class || Number.class.isAssignableFrom(m.getReturnType()))
                         && (n.contains("step") || n.contains("inc"))) {
                     m.setAccessible(true);
-                    Object v = m.invoke(ns);
-                    if (v instanceof Number num) {
-                        double d = num.doubleValue();
-                        if (d > 0.0D && d <= range) {
-                            return d;
-                        }
-                    }
+                    cachedNumberStepMethod = m;
+                    return;
                 }
             }
             for (Field f : NumberSetting.class.getDeclaredFields()) {
@@ -2178,11 +2220,70 @@ public class GlassClickGuiScreen extends Screen {
                 if ((f.getType() == double.class || f.getType() == float.class)
                         && (n.contains("step") || n.contains("inc"))) {
                     f.setAccessible(true);
-                    double d = f.getDouble(ns);
-                    if (d > 0.0D && d <= range) {
-                        return d;
+                    cachedNumberStepField = f;
+                    return;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static void ensureMultiModeCache() {
+        if (multiModeCacheInit) return;
+        multiModeCacheInit = true;
+        try {
+            for (Method m : MultiModeSetting.class.getDeclaredMethods()) {
+                if (m.getParameterCount() == 0
+                        && (m.getReturnType() == String[].class || Collection.class.isAssignableFrom(m.getReturnType()))) {
+                    if (cachedMultiModeOptsMethod == null) {
+                        m.setAccessible(true);
+                        cachedMultiModeOptsMethod = m;
                     }
                 }
+                String n = m.getName().toLowerCase(Locale.ROOT);
+                if (cachedMultiModeToggle1Method == null
+                        && m.getParameterCount() == 1 && m.getParameterTypes()[0] == String.class
+                        && !n.startsWith("is") && !n.startsWith("get") && !n.startsWith("has")
+                        && (n.contains("toggle") || n.contains("click"))) {
+                    m.setAccessible(true);
+                    cachedMultiModeToggle1Method = m;
+                } else if (cachedMultiModeToggle2Method == null
+                        && m.getParameterCount() == 2
+                        && m.getParameterTypes()[0] == String.class
+                        && m.getParameterTypes()[1] == boolean.class) {
+                    m.setAccessible(true);
+                    cachedMultiModeToggle2Method = m;
+                }
+            }
+            if (cachedMultiModeOptsMethod == null) {
+                for (Field f : MultiModeSetting.class.getDeclaredFields()) {
+                    if (f.getType() == String[].class || Collection.class.isAssignableFrom(f.getType())) {
+                        f.setAccessible(true);
+                        cachedMultiModeOptsField = f;
+                        break;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static double extractNumberSettingStep(NumberSetting ns) {
+        if (ns == null) {
+            return 0.1D;
+        }
+        ensureNumberStepCache();
+        double range = Math.max(0.0001D, ns.getMax() - ns.getMin());
+        try {
+            if (cachedNumberStepMethod != null) {
+                Object v = cachedNumberStepMethod.invoke(ns);
+                if (v instanceof Number num) {
+                    double d = num.doubleValue();
+                    if (d > 0.0D && d <= range) return d;
+                }
+            } else if (cachedNumberStepField != null) {
+                double d = cachedNumberStepField.getDouble(ns);
+                if (d > 0.0D && d <= range) return d;
             }
         } catch (Throwable ignored) {
         }
@@ -2198,48 +2299,27 @@ public class GlassClickGuiScreen extends Screen {
         if (mms == null) {
             return new String[0];
         }
+        ensureMultiModeCache();
         try {
-            for (Method m : MultiModeSetting.class.getDeclaredMethods()) {
-                if (m.getParameterCount() == 0) {
-                    m.setAccessible(true);
-                    if (m.getReturnType() == String[].class) {
-                        String[] arr = (String[]) m.invoke(mms);
-                        if (arr != null && arr.length > 0) {
-                            return arr;
-                        }
-                    } else if (Collection.class.isAssignableFrom(m.getReturnType())) {
-                        Collection<?> col = (Collection<?>) m.invoke(mms);
-                        if (col != null && !col.isEmpty()) {
-                            List<String> out = new ArrayList<>(col.size());
-                            for (Object o : col) {
-                                if (o != null) {
-                                    out.add(o.toString());
-                                }
-                            }
-                            if (!out.isEmpty()) {
-                                return out.toArray(new String[0]);
-                            }
-                        }
-                    }
-                }
+            Object val = null;
+            if (cachedMultiModeOptsMethod != null) {
+                val = cachedMultiModeOptsMethod.invoke(mms);
+            } else if (cachedMultiModeOptsField != null) {
+                val = cachedMultiModeOptsField.get(mms);
             }
-            for (Field f : MultiModeSetting.class.getDeclaredFields()) {
-                f.setAccessible(true);
-                Object val = f.get(mms);
-                if (val instanceof String[] arr && arr.length > 0) {
-                    return arr;
-                }
-                if (val instanceof Collection<?> col && !col.isEmpty()) {
-                    List<String> out = new ArrayList<>(col.size());
-                    for (Object o : col) {
-                        if (o != null) {
-                            out.add(o.toString());
-                        }
-                    }
-                    if (!out.isEmpty()) {
-                        return out.toArray(new String[0]);
+            if (val instanceof String[] arr && arr.length > 0) {
+                return arr;
+            }
+            if (val instanceof Collection<?> col && !col.isEmpty()) {
+                String[] out = new String[col.size()];
+                int idx = 0;
+                for (Object o : col) {
+                    if (o != null) {
+                        out[idx++] = o.toString();
                     }
                 }
+                if (idx == out.length) return out;
+                if (idx > 0) return java.util.Arrays.copyOf(out, idx);
             }
         } catch (Throwable ignored) {
         }
@@ -2251,23 +2331,15 @@ public class GlassClickGuiScreen extends Screen {
         if (mms == null || opt == null) {
             return;
         }
+        ensureMultiModeCache();
         try {
-            for (Method m : MultiModeSetting.class.getDeclaredMethods()) {
-                String n = m.getName().toLowerCase(Locale.ROOT);
-                if (m.getParameterCount() == 1 && m.getParameterTypes()[0] == String.class
-                        && !n.startsWith("is") && !n.startsWith("get") && !n.startsWith("has")
-                        && (n.contains("toggle") || n.contains("click"))) {
-                    m.setAccessible(true);
-                    m.invoke(mms, opt);
-                    return;
-                }
-                if (m.getParameterCount() == 2
-                        && m.getParameterTypes()[0] == String.class
-                        && m.getParameterTypes()[1] == boolean.class) {
-                    m.setAccessible(true);
-                    m.invoke(mms, opt, !mms.isSelected(opt));
-                    return;
-                }
+            if (cachedMultiModeToggle1Method != null) {
+                cachedMultiModeToggle1Method.invoke(mms, opt);
+                return;
+            }
+            if (cachedMultiModeToggle2Method != null) {
+                cachedMultiModeToggle2Method.invoke(mms, opt, !mms.isSelected(opt));
+                return;
             }
             Object rawVal = mms.getValue();
             if (rawVal instanceof Collection<?> col) {
