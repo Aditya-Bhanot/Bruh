@@ -28,8 +28,15 @@ jobs:
         run: |
           chmod +x gradlew
           ./gradlew clean build scrubObfJar --no-daemon --stacktrace
+          ls -lh build/libs/*-obf.jar
 
-      - name: Publish Rolling Latest Release (Hardened JAR Only)
+      - name: Delete Previous Latest Release & Tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+
+      - name: Publish Fresh Rolling Latest Release (Hardened JAR Only)
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
@@ -37,4 +44,5 @@ jobs:
           body: "Automated flattened & obfuscated build from commit `${{ github.sha }}`."
           prerelease: false
           make_latest: true
+          fail_on_unmatched_files: true
           files: build/libs/*-obf.jar
