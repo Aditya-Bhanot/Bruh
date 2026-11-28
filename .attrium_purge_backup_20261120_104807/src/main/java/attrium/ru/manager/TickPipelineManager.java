@@ -66,6 +66,8 @@ public final class TickPipelineManager {
         }
         lastPhase1GameTime = gameTime;
 
+        // [ATTRIUM-STEP4-TICK-PROF]
+        long _profTickStart = PerformanceProfiler.beginTick();
         currentPhase = TickPhase.PHASE_1_TARGET_ACQUISITION;
         clearPostMotionQueue();
 
@@ -80,6 +82,7 @@ public final class TickPipelineManager {
 
         currentPhase = TickPhase.PHASE_2_PRE_MOTION;
         RotationManager.getInstance().onClientTick(mc);
+        PerformanceProfiler.endTick(_profTickStart);
     }
 
     public boolean enqueuePostMotionPacket(
