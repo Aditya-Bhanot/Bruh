@@ -195,6 +195,11 @@ public class MaceTarget extends Module {
         }
         private final List<LivingEntity> validTargetsMutable = new ArrayList<>(32);
         private List<LivingEntity> validTargetsView = Collections.emptyList();
+        private int lastSwapAdvancedTick = -100;
+        private int losCacheTick = -100;
+        private int losCacheCount = 0;
+        private final int[] losCacheIds = new int[24];
+        private final boolean[] losCacheVals = new boolean[24];
 
         private static final List<Item> CHESTPLATES = List.of(
                 Items.NETHERITE_CHESTPLATE,
@@ -233,7 +238,6 @@ public class MaceTarget extends Module {
             if (curPlayerTick != lastPreTickHandled) {
                 long nowNs = System.nanoTime();
                 long deltaNs = lastPreTickNanoTime == 0L ? 50_000_000L : (nowNs - lastPreTickNanoTime);
-                // Only defer on true same-frame catch-up bursts (<12ms) and never skip 2 ticks in a row
                 if (deltaNs < 12_000_000L && consecutiveCatchUpSkips < 1) {
                     catchUpTickActive = true;
                     consecutiveCatchUpSkips++;
@@ -244,6 +248,9 @@ public class MaceTarget extends Module {
                 clientTickCounter++;
                 lastPreTickNanoTime = nowNs;
                 lastPreTickHandled = curPlayerTick;
+                // Invalidate per-tick LOS cache on new tick (zero allocation)
+                losCacheTick = clientTickCounter;
+                losCacheCount = 0;
             }
 
             if (client.screen != null) {
@@ -251,15 +258,9 @@ public class MaceTarget extends Module {
                 return;
             }
             checkLockTimeouts();
-            int currentMask = MaceTarget.getTargetSelectionMask();
-            if (cachedTargetsTick != clientTickCounter || cachedTargetMask != currentMask) {
-                boolean newTick = (cachedTargetsTick != clientTickCounter);
-                cachedTargetsTick = clientTickCounter;
-                cachedTargetMask = currentMask;
-                rebuildValidTargetsCacheOncePerTick(client);
-                if (newTick) {
-                    advanceSwapBeforeKeybinds(client);
-                }
+            if (lastSwapAdvancedTick != clientTickCounter) {
+                lastSwapAdvancedTick = clientTickCounter;
+                advanceSwapBeforeKeybinds(client);
             }
             insideStartClientTick = true;
             try {
@@ -726,17 +727,52 @@ public class MaceTarget extends Module {
                 return;
             }
 
-            for (Entity entity : client.level.entitiesForRendering()) {
-                if (!(entity instanceof LivingEntity living)) {
-                    continue;
+            double px = client.player.getX();
+            double py = client.player.getY();
+            double pz = client.player.getZ();
+            final double maxScanDistSqr = 36.0D * 36.0D;
+
+            int mask = MaceTarget.getTargetSelectionMask();
+            boolean onlyPlayers = (mask & 1) != 0 && (mask & 6) == 0;
+
+            // Public-server fast path: iterate only client.level.players() instead of 500-2000+ world entities
+            if (onlyPlayers) {
+                var players = client.level.players();
+                for (int i = 0, size = players.size(); i < size; i++) {
+                    Player p = players.get(i);
+                    if (p == client.player || !p.isAlive() || p.getHealth() <= 0.0F) {
+                        continue;
+                    }
+                    double dx = p.getX() - px;
+                    double dy = p.getY() - py;
+                    double dz = p.getZ() - pz;
+                    if ((dx * dx + dy * dy + dz * dz) > maxScanDistSqr) {
+                        continue;
+                    }
+                    if (MaceTarget.isEntityAllowedByAutoMaceTargets(client, p)) {
+                        validTargetsMutable.add(p);
+                    }
                 }
-                if (!MaceTarget.isEntityAllowedByAutoMaceTargets(client, living)) {
-                    continue;
-                }
-                validTargetsMutable.add(living);
+                validTargetsView = validTargetsMutable;
+                return;
             }
 
-            validTargetsView = Collections.unmodifiableList(validTargetsMutable);
+            for (Entity entity : client.level.entitiesForRendering()) {
+                if (!(entity instanceof LivingEntity living) || living == client.player || !living.isAlive()) {
+                    continue;
+                }
+                double dx = living.getX() - px;
+                double dy = living.getY() - py;
+                double dz = living.getZ() - pz;
+                if ((dx * dx + dy * dy + dz * dz) > maxScanDistSqr) {
+                    continue;
+                }
+                if (MaceTarget.isEntityAllowedByAutoMaceTargets(client, living)) {
+                    validTargetsMutable.add(living);
+                }
+            }
+
+            validTargetsView = validTargetsMutable;
         }
 
         public List<LivingEntity> getValidTargets(Minecraft client) {
@@ -804,19 +840,48 @@ public class MaceTarget extends Module {
             if (client == null || client.player == null || client.level == null || target == null) {
                 return false;
             }
-            if (client.player.hasLineOfSight(target)) {
-                return true;
+            ActionManager mgr = INSTANCE;
+            int curTick = mgr.clientTickCounter;
+            int tid = target.getId();
+            if (mgr.losCacheTick == curTick) {
+                for (int i = 0; i < mgr.losCacheCount; i++) {
+                    if (mgr.losCacheIds[i] == tid) {
+                        return mgr.losCacheVals[i];
+                    }
+                }
+            } else {
+                mgr.losCacheTick = curTick;
+                mgr.losCacheCount = 0;
             }
+
             Vec3 eyePos = client.player.getEyePosition(1.0F);
-            Vec3 center = target.getBoundingBox().getCenter();
-            BlockHitResult hit = client.level.clip(new ClipContext(
-                    eyePos,
-                    center,
-                    ClipContext.Block.COLLIDER,
-                    ClipContext.Fluid.NONE,
-                    client.player
-            ));
-            return hit.getType() == HitResult.Type.MISS;
+            AABB box = target.getBoundingBox();
+            boolean visible;
+            if (box.contains(eyePos)) {
+                visible = true;
+            } else {
+                // Single fast COLLIDER raycast to upper-torso/center (checks head top only if center is blocked by low cover)
+                Vec3 center = new Vec3((box.minX + box.maxX) * 0.5D, box.minY + box.getYsize() * 0.65D, (box.minZ + box.maxZ) * 0.5D);
+                BlockHitResult hit = client.level.clip(new ClipContext(
+                        eyePos, center, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, client.player
+                ));
+                if (hit.getType() == HitResult.Type.MISS) {
+                    visible = true;
+                } else {
+                    Vec3 headTop = new Vec3(center.x, box.maxY - 0.12D, center.z);
+                    BlockHitResult headHit = client.level.clip(new ClipContext(
+                            eyePos, headTop, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, client.player
+                    ));
+                    visible = headHit.getType() == HitResult.Type.MISS;
+                }
+            }
+
+            if (mgr.losCacheCount < mgr.losCacheIds.length) {
+                mgr.losCacheIds[mgr.losCacheCount] = tid;
+                mgr.losCacheVals[mgr.losCacheCount] = visible;
+                mgr.losCacheCount++;
+            }
+            return visible;
         }
 
         public static boolean verifyStrict3mAttackRaycast(Minecraft client, LivingEntity target, double requestedReach) {
@@ -918,6 +983,9 @@ public class MaceTarget extends Module {
             lastInteractionTick = -100;
             lastSlotMutationTick = -100;
             cachedTargetsTick = -100;
+            lastSwapAdvancedTick = -100;
+            losCacheTick = -100;
+            losCacheCount = 0;
             lastPreTickHandled = -100;
             lastPreTickNanoTime = 0L;
             catchUpTickActive = false;
@@ -1140,6 +1208,11 @@ public class MaceTarget extends Module {
     private boolean hitboxLocked = false;
     private int hitboxLockedTargetId = -1;
     private long lastSmoothFrameNs = 0L;
+    private final BlockPos.MutableBlockPos cobwebScanCursor = new BlockPos.MutableBlockPos();
+    private int cachedLiquidCheckTick = -100;
+    private boolean cachedLiquidBlocked = false;
+    private int cachedUnderFeetCheckTick = -100;
+    private boolean cachedUnderFeetClear = false;
 
     private boolean wasTogglePressed = false;
     private boolean waitingForToggleMouseRelease = false;
@@ -1233,6 +1306,10 @@ public class MaceTarget extends Module {
                             && !ActionManager.getInstance().isSwapInProgress()
                             && getPrecisionDistanceToTarget(client, target) <= swingRange.getValue()
                             && cooldownTimer.finished(cooldownMs.getValue())) {
+                        if (!"Silent".equalsIgnoreCase(aimMode.getValue())
+                                && !ActionManager.verifyStrict3mAttackRaycast(client, target, swingRange.getValue(), client.player.getViewVector(1.0F))) {
+                            alignCameraOntoHitboxForStrike(client, target);
+                        }
                         initiateSmashSequence(client, target);
                         return;
                     }
@@ -1475,8 +1552,11 @@ public class MaceTarget extends Module {
         }
         double dist = getPrecisionDistanceToTarget(client, diveTarget);
         double speed = client.player.getDeltaMovement().length();
-        // On fast/close dives (<= 2.5 ticks to reach), hand off directly from Chestplate -> Mace on Tick 1
-        if (dist <= Math.max(4.8D, swingRange.getValue() + speed * 2.5D)) {
+        // Hand off directly from Chestplate -> Mace on Tick 1 for fast dives AND standing-player drops (<= 7.5m)
+        double handoffRange = diveTarget.onGround()
+                ? Math.max(7.5D, swingRange.getValue() + speed * 3.2D)
+                : Math.max(5.5D, swingRange.getValue() + speed * 2.8D);
+        if (dist <= handoffRange) {
             if (savedHotbarSlot == -1 && fallbackSlot >= 0 && fallbackSlot <= 8 && fallbackSlot != maceSlot) {
                 savedHotbarSlot = fallbackSlot;
             }
@@ -1785,8 +1865,8 @@ public class MaceTarget extends Module {
         Vec3 vel = client.player.getDeltaMovement();
         double dist = getPrecisionDistanceToTarget(client, candidate);
 
-        // Always allow targeting when within close strike/pre-hit range (<= 3.8m) unless pitching steeply into the sky
-        if (dist <= swingRange.getValue() + 0.85D) {
+        // Always allow targeting when within close strike/pre-hit range (<= 4.2m) unless pitching steeply into the sky
+        if (dist <= swingRange.getValue() + 1.25D) {
             return !(client.player.getXRot() < -25.0F && vel.y > 0.15D);
         }
 
@@ -1804,24 +1884,28 @@ public class MaceTarget extends Module {
         }
         Vec3 unitToTarget = toTarget.scale(1.0D / centerDist);
 
-        // Check horizontal look & velocity direction so looking horizontally while a standing enemy is below you
-        // NEVER drops target lock, while turning >75 deg horizontally away lets you fly away freely!
-        Vec3 horizToTarget = new Vec3(toTarget.x, 0.0D, toTarget.z);
-        double horizDist = horizToTarget.length();
-        if (horizDist > 0.25D) {
-            Vec3 unitHorizToTarget = horizToTarget.scale(1.0D / horizDist);
+        // Steep vertical dive over a standing/below target: vertical descent IS closing on the target even if
+        // small horizontal drift makes horizontal dot negative — never drop lock right above a standing enemy!
+        double horizDist = Math.hypot(toTarget.x, toTarget.z);
+        double verticalAbove = client.player.getY() - candidate.getY();
+        if (horizDist <= 2.6D && verticalAbove >= 0.4D && vel.y < -0.15D) {
+            return true;
+        }
+
+        if (horizDist > 0.45D) {
+            Vec3 unitHorizToTarget = new Vec3(toTarget.x / horizDist, 0.0D, toTarget.z / horizDist);
             Vec3 lookVec = client.player.getViewVector(1.0F);
             Vec3 horizLook = new Vec3(lookVec.x, 0.0D, lookVec.z);
             if (horizLook.lengthSqr() > 1.0E-4D) {
                 double horizLookDot = horizLook.normalize().dot(unitHorizToTarget);
-                if (horizLookDot < 0.20D) {
+                if (horizLookDot < 0.15D) {
                     return false;
                 }
             }
             Vec3 horizVel = new Vec3(vel.x, 0.0D, vel.z);
             if (horizVel.lengthSqr() > 0.01D) {
                 double horizClosing = horizVel.dot(unitHorizToTarget);
-                if (horizClosing < -0.05D) {
+                if (horizClosing < -0.10D) {
                     return false;
                 }
             }
@@ -2046,12 +2130,14 @@ public class MaceTarget extends Module {
         float yawDelta = Mth.wrapDegrees(centerAngle.getYaw() - currentYaw);
         float pitchDelta = centerAngle.getPitch() - currentPitch;
         double angularDist = Math.hypot(yawDelta, pitchDelta);
-        if (angularDist > 85.0D || angularDist < 0.02D) {
+        if (angularDist > 95.0D || angularDist < 0.02D) {
             return;
         }
 
-        double maxSnapDeg = 45.0D;
-        double scale = angularDist > maxSnapDeg ? (maxSnapDeg / angularDist) : 0.95D;
+        boolean steepAbove = client.player.getEyeY() > targetEntity.getBoundingBox().maxY + 0.2D
+                && getPrecisionDistanceToTarget(client, targetEntity) <= 3.6D;
+        double maxSnapDeg = steepAbove ? 65.0D : 45.0D;
+        double scale = angularDist > maxSnapDeg ? (maxSnapDeg / angularDist) : 1.0D;
         float nextYaw = currentYaw + (float) (yawDelta * scale);
         float nextPitch = Mth.clamp(currentPitch + (float) (pitchDelta * scale), -89.5F, 89.5F);
 
@@ -2460,17 +2546,24 @@ public class MaceTarget extends Module {
         AABB box = targetEntity.getBoundingBox();
         Vec3 anchor = getBetaDynamicAnchor(client, targetEntity);
 
+        double ex = eyePos.x, ey = eyePos.y, ez = eyePos.z;
+        double distToBox = getPrecisionDistanceToTarget(client, targetEntity);
+        boolean steepAboveStanding = ey > box.maxY + 0.25D && distToBox <= 4.8D;
+
+        // When diving steeply from above a standing target, bias anchor toward upper head-chest so 3.0m reach triggers immediately
+        double anchorX = anchor.x;
+        double anchorY = steepAboveStanding ? Math.max(anchor.y, box.maxY - 0.22D) : anchor.y;
+        double anchorZ = anchor.z;
+
         float currentYaw = client.player.getYRot();
         float currentPitch = client.player.getXRot();
         double gcd = MathUtils.computeGcd();
         float gcdStep = gcd > 0.0D ? (float) gcd : 0.05F;
 
-        // Compute normalized proximity to the edge of the target's hitbox (0.0 = anchor, 1.0 = edge, >1.0 = outside)
-        double ex = eyePos.x, ey = eyePos.y, ez = eyePos.z;
         double distToAnchor = Math.sqrt(
-                (anchor.x - ex) * (anchor.x - ex)
-                + (anchor.y - ey) * (anchor.y - ey)
-                + (anchor.z - ez) * (anchor.z - ez)
+                (anchorX - ex) * (anchorX - ex)
+                + (anchorY - ey) * (anchorY - ey)
+                + (anchorZ - ez) * (anchorZ - ez)
         );
         Vec3 lookDir = client.player.getViewVector(1.0F);
         double projX = ex + lookDir.x * distToAnchor;
@@ -2478,36 +2571,39 @@ public class MaceTarget extends Module {
         double projZ = ez + lookDir.z * distToAnchor;
 
         double halfW = Math.max(0.24D, (box.maxX - box.minX) * 0.5D);
-        double horizErr = Math.hypot(projX - anchor.x, projZ - anchor.z);
+        double horizErr = Math.hypot(projX - anchorX, projZ - anchorZ);
         double normH = horizErr / halfW;
 
         double normV;
-        if (projY >= anchor.y) {
-            double upperSpan = Math.max(0.22D, box.maxY - anchor.y);
-            normV = (projY - anchor.y) / upperSpan;
+        if (projY >= anchorY) {
+            double upperSpan = Math.max(0.20D, box.maxY - anchorY);
+            normV = (projY - anchorY) / upperSpan;
         } else {
-            double lowerSpan = Math.max(0.25D, anchor.y - box.minY);
-            normV = (anchor.y - projY) / lowerSpan;
+            double lowerSpan = Math.max(0.25D, anchorY - box.minY);
+            normV = (anchorY - projY) / lowerSpan;
         }
         double edgeRatio = Math.max(normH, normV);
 
-        // Organic floating target offset inside the hitbox so aim never freezes on one robotic point
-        double tSec = System.nanoTime() * 1.0E-9D;
-        double wanderScale = Mth.clamp(1.0D - Math.max(0.0D, edgeRatio - 0.55D) * 1.8D, 0.0D, 1.0D);
-        double wanderX = Math.sin(tSec * 2.4D) * (halfW * 0.28D) * wanderScale;
-        double wanderY = Math.cos(tSec * 1.85D + 0.9D) * (box.getYsize() * 0.10D) * wanderScale;
-        double wanderZ = Math.cos(tSec * 2.9D + 0.4D) * (halfW * 0.28D) * wanderScale;
+        // Smoothly fade organic wander to 0 inside 4.2m so aim never drifts off a standing 0.6m hitbox before impact
+        double distWanderFade = Mth.clamp((distToBox - 3.6D) / 2.4D, 0.0D, 1.0D);
+        double wanderScale = Mth.clamp(1.0D - Math.max(0.0D, edgeRatio - 0.55D) * 1.8D, 0.0D, 1.0D) * distWanderFade;
+        double aimX = anchorX;
+        double aimY = anchorY;
+        double aimZ = anchorZ;
+        if (wanderScale > 0.01D) {
+            double tSec = System.nanoTime() * 1.0E-9D;
+            aimX = Mth.clamp(anchorX + Math.sin(tSec * 2.4D) * (halfW * 0.26D) * wanderScale, box.minX + 0.08D, box.maxX - 0.08D);
+            aimY = Mth.clamp(anchorY + Math.cos(tSec * 1.85D + 0.9D) * (box.getYsize() * 0.09D) * wanderScale, box.minY + 0.12D, box.maxY - 0.08D);
+            aimZ = Mth.clamp(anchorZ + Math.cos(tSec * 2.9D + 0.4D) * (halfW * 0.26D) * wanderScale, box.minZ + 0.08D, box.maxZ - 0.08D);
+        }
 
-        double aimX = Mth.clamp(anchor.x + wanderX, box.minX + 0.08D, box.maxX - 0.08D);
-        double aimY = Mth.clamp(anchor.y + wanderY, box.minY + 0.12D, box.maxY - 0.08D);
-        double aimZ = Mth.clamp(anchor.z + wanderZ, box.minZ + 0.08D, box.maxZ - 0.08D);
-
-        // Keep aim point within 3.0m reach when diving directly above target
+        // Pure AABB reach check (zero level.clip per render frame!)
         double maxReach = Math.min(3.0D, swingRange.getValue());
-        double distToBox = getPrecisionDistanceToTarget(client, targetEntity);
         if (distToBox <= maxReach) {
-            Angle testAngle = MathAngle.fromTo(eyePos, new Vec3(aimX, aimY, aimZ)).adjustSensitivity();
-            if (!ActionManager.verifyStrict3mAttackRaycast(client, targetEntity, maxReach, testAngle.toVector())) {
+            double dxA = aimX - ex, dyA = aimY - ey, dzA = aimZ - ez;
+            double lenA = Math.sqrt(dxA * dxA + dyA * dyA + dzA * dzA);
+            if (lenA > maxReach) {
+                // Clamp directly to closest interior point inside the 3.0m sphere (crucial when diving over a standing head)
                 aimX = Mth.clamp(ex, box.minX + 0.08D, box.maxX - 0.08D);
                 aimY = Mth.clamp(ey, box.minY + 0.12D, box.maxY - 0.08D);
                 aimZ = Mth.clamp(ez, box.minZ + 0.08D, box.maxZ - 0.08D);
@@ -2522,7 +2618,7 @@ public class MaceTarget extends Module {
             return;
         }
 
-        // Nonlinear elastic restoring force: gentle inside interior, rapidly increasing pull near hitbox edge
+        // Elastic restoring force: light interior far out, strong parallax-proof lock inside final 4.6m strike zone
         double pullGain;
         if (edgeRatio < 0.35D) {
             pullGain = 0.09D;
@@ -2533,16 +2629,18 @@ public class MaceTarget extends Module {
             pullGain = 0.96D;
         }
 
-        // Boost responsiveness slightly in the final strike zone so high-speed dive parallax can't pull it out
-        if (distToBox <= 4.5D && edgeRatio >= 0.60D) {
-            pullGain = Math.min(1.0D, pullGain * 1.25D);
+        if (distToBox <= 4.6D) {
+            double closeFactor = Mth.clamp((4.6D - distToBox) / 1.8D, 0.0D, 1.0D);
+            double minClosePull = Mth.lerp(closeFactor, 0.32D, targetEntity.onGround() ? 0.86D : 0.68D);
+            pullGain = Math.max(pullGain, minClosePull);
         }
 
         double userSpeedRatio = Mth.clamp(aimSpeed.getValue() / 50.0D, 0.35D, 1.60D);
         double smoothDamp = 1.0D - Mth.clamp(aimSmooth.getValue() / 10.0D, 0.0D, 0.70D) * 0.45D;
-        double maxDegPerTick = Mth.lerp(Mth.clamp(edgeRatio, 0.0D, 1.0D), 14.0D, 66.0D) * userSpeedRatio;
+        double baseMaxDeg = distToBox <= 4.2D ? 72.0D : Mth.lerp(Mth.clamp(edgeRatio, 0.0D, 1.0D), 16.0D, 66.0D);
+        double maxDegPerTick = baseMaxDeg * userSpeedRatio;
 
-        double stepFactor = Mth.clamp(pullGain * smoothDamp * tickFraction * 2.1D, 0.04D, 1.0D);
+        double stepFactor = Mth.clamp(pullGain * smoothDamp * tickFraction * 2.2D, 0.05D, 1.0D);
         double stepYaw = yawError * stepFactor;
         double stepPitch = pitchError * stepFactor;
 
@@ -2577,15 +2675,23 @@ public class MaceTarget extends Module {
                 : getExactBoundingBoxCenter(box);
 
         double maxReach = Math.min(3.0D, swingRange.getValue());
-        if (getPrecisionDistanceToTarget(client, entity) <= maxReach) {
-            Angle centerAngle = MathAngle.fromTo(actualEye, exactCenter).adjustSensitivity();
-            if (ActionManager.verifyStrict3mAttackRaycast(client, entity, maxReach, centerAngle.toVector())) {
-                return centerAngle;
+        double dist = getPrecisionDistanceToTarget(client, entity);
+        if (actualEye.y > box.maxY + 0.25D && dist <= maxReach + 1.4D) {
+            exactCenter = new Vec3(exactCenter.x, Math.max(exactCenter.y, box.maxY - 0.18D), exactCenter.z);
+        }
+
+        if (dist <= maxReach) {
+            // Pure AABB clip check (zero world block raycast overhead; LOS is already tick-cached)
+            double dx = exactCenter.x - actualEye.x;
+            double dy = exactCenter.y - actualEye.y;
+            double dz = exactCenter.z - actualEye.z;
+            if ((dx * dx + dy * dy + dz * dz) <= (maxReach * maxReach)) {
+                return MathAngle.fromTo(actualEye, exactCenter).adjustSensitivity();
             }
             AABB safeCore = box.deflate(
-                    Math.min(0.12D, box.getXsize() * 0.20D),
-                    Math.min(0.12D, box.getYsize() * 0.10D),
-                    Math.min(0.12D, box.getZsize() * 0.20D)
+                    Math.min(0.10D, box.getXsize() * 0.16D),
+                    Math.min(0.10D, box.getYsize() * 0.08D),
+                    Math.min(0.10D, box.getZsize() * 0.16D)
             );
             Vec3 closestInCore = new Vec3(
                     Mth.clamp(actualEye.x, safeCore.minX, safeCore.maxX),
@@ -3902,7 +4008,14 @@ public class MaceTarget extends Module {
         if (client == null || client.player == null || client.level == null) {
             return true;
         }
+        int curTick = client.player.tickCount;
+        if (curTick == cachedLiquidCheckTick) {
+            return cachedLiquidBlocked;
+        }
+        cachedLiquidCheckTick = curTick;
+
         if (client.player.isInWater() || client.player.isInLava() || client.player.isUnderWater()) {
+            cachedLiquidBlocked = true;
             return true;
         }
         AABB box = client.player.getBoundingBox().inflate(0.05D);
@@ -3912,17 +4025,18 @@ public class MaceTarget extends Module {
         int maxY = Mth.floor(box.maxY);
         int minZ = Mth.floor(box.minZ);
         int maxZ = Mth.floor(box.maxZ);
-        BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
         for (int x = minX; x <= maxX; x++) {
             for (int y = minY; y <= maxY; y++) {
                 for (int z = minZ; z <= maxZ; z++) {
-                    cursor.set(x, y, z);
-                    if (client.level.getBlockState(cursor).is(Blocks.COBWEB)) {
+                    cobwebScanCursor.set(x, y, z);
+                    if (client.level.getBlockState(cobwebScanCursor).is(Blocks.COBWEB)) {
+                        cachedLiquidBlocked = true;
                         return true;
                     }
                 }
             }
         }
+        cachedLiquidBlocked = false;
         return false;
     }
 
@@ -3937,6 +4051,12 @@ public class MaceTarget extends Module {
         if (client.player.onGround()) {
             return false;
         }
+        int curTick = client.player.tickCount;
+        if (curTick == cachedUnderFeetCheckTick) {
+            return cachedUnderFeetClear;
+        }
+        cachedUnderFeetCheckTick = curTick;
+
         AABB box = client.player.getBoundingBox();
         AABB underBox = new AABB(
                 box.minX,
@@ -3946,7 +4066,8 @@ public class MaceTarget extends Module {
                 box.minY - 0.05D,
                 box.maxZ
         );
-        return client.level.noCollision(client.player, underBox);
+        cachedUnderFeetClear = client.level.noCollision(client.player, underBox);
+        return cachedUnderFeetClear;
     }
 
     /**

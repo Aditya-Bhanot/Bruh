@@ -64,6 +64,9 @@ public final class ElytraTarget extends Module {
     private static final float MIN_LEGAL_FALL_DISTANCE = 0.25F;
     private static final double MAX_LEGAL_GLIDE_VELOCITY_Y = -0.08D;
     private static final int HOTBAR_SCAN_INTERVAL_TICKS = 4;
+    private static final ItemStack WIND_CHARGE_PROBE = new ItemStack(Items.WIND_CHARGE);
+    private int cachedClearUnderFeetTick = -100;
+    private boolean cachedClearUnderFeetResult = false;
 
     private static final List<Item> CHESTPLATES = List.of(
             Items.NETHERITE_CHESTPLATE,
@@ -497,9 +500,11 @@ public final class ElytraTarget extends Module {
                 && autoMace.getTarget().isAlive()
                 && MaceTarget.isEntityAllowedByAutoMaceTargets(mc, autoMace.getTarget())) {
             cachedTarget = autoMace.getTarget();
-        } else {
+        } else if (wearingElytra || flightState != CombatFlightState.STATE_1_FLIGHT) {
             double searchRange = Math.max(20.0D, Math.max(heightRange.getValue(), macePreHitRange.getValue()) + 10.0D);
             cachedTarget = actionManager.getNearestVisibleTarget(mc, searchRange, true);
+        } else {
+            cachedTarget = null;
         }
 
         updateTrackedEnemyVelocity(cachedTarget);
@@ -891,7 +896,7 @@ public final class ElytraTarget extends Module {
             return;
         }
 
-        boolean onCooldownNow = mc.player.getCooldowns().isOnCooldown(new ItemStack(Items.WIND_CHARGE));
+        boolean onCooldownNow = mc.player.getCooldowns().isOnCooldown(WIND_CHARGE_PROBE);
         double currentVelY = mc.player.getDeltaMovement().y;
         double deltaVelY = currentVelY - prevTickVelY;
         prevTickVelY = currentVelY;
@@ -1240,6 +1245,7 @@ public final class ElytraTarget extends Module {
         double ex = mc.player.getX();
         double ey = mc.player.getEyeY();
         double ez = mc.player.getZ();
+        double eyeHeight = Math.max(0.6D, ey - mc.player.getY());
         AABB box = target.getBoundingBox();
 
         double cx = Mth.clamp(ex, box.minX, box.maxX);
@@ -1259,18 +1265,22 @@ public final class ElytraTarget extends Module {
         double relVy = pvy - evy;
         double relVz = pvz - evz;
         double relSpeed = Math.sqrt(relVx * relVx + relVy * relVy + relVz * relVz);
-        if (relSpeed < 0.22D) {
+        if (relSpeed < 0.20D) {
             return false;
         }
 
         double closingSpeed = (relVx * rx + relVy * ry + relVz * rz) / dist;
-        if (closingSpeed < 0.20D) {
+        if (closingSpeed < 0.18D) {
             return false;
         }
 
-        // Relaxed approach cone (0.55 ~ 56 deg) so curved Rocket-3 dives never delay unequip
+        boolean standingTarget = target.onGround() && (evx * evx + evz * evz) < 0.02D;
+        double horizDistNow = Math.hypot(cx - ex, cz - ez);
+
+        // Relax approach cone on curved dives and steep vertical drops over standing targets
         double alignment = closingSpeed / relSpeed;
-        if (alignment < 0.55D && dist > 4.5D) {
+        boolean steepOverStanding = standingTarget && horizDistNow <= 2.6D && pvy < -0.22D;
+        if (!steepOverStanding && alignment < 0.55D && dist > 4.5D) {
             return false;
         }
 
@@ -1281,21 +1291,23 @@ public final class ElytraTarget extends Module {
             return false;
         }
 
-        // Close-range emergency cancel: never fly past a target inside 3.6m while still gliding
-        if (dist <= 3.6D && closingSpeed >= 0.35D && (diveAngleDeg >= 15.0D || mc.player.fallDistance >= 1.5F)) {
+        // Close-range emergency cancel: never fly past (or slam into the ground next to) a target inside 3.8m
+        if (dist <= (standingTarget ? 4.1D : 3.6D) && closingSpeed >= 0.30D
+                && (diveAngleDeg >= 15.0D || mc.player.fallDistance >= 1.5F)) {
             return true;
         }
 
-        // Angle-, speed-, and ping-scaled lead window:
-        // Rocket 3 @ 70 deg -> ~6.2-7.0m; Rocket 3 @ 40 deg -> ~4.4-5.1m; Elytra head-on -> ~8.0-9.0m
+        // Angle-, speed-, ping-, and standing-floor-scaled lead window:
+        // Standing targets sit on solid ground (box.minY), so add +0.45t lead to guarantee 1-2 airborne smash ticks before landing
         double sinDive = Mth.clamp(Math.sin(Math.toRadians(Math.max(0.0D, diveAngleDeg))), 0.0D, 1.0D);
-        double speedBonus = Mth.clamp((relSpeed - 1.15D) * 0.45D, 0.0D, 0.65D);
+        double speedBonus = Mth.clamp((relSpeed - 1.10D) * 0.45D, 0.0D, 0.65D);
         double pingTicks = Mth.clamp(getLocalPingMs() / 100.0D, 0.0D, 1.4D);
-        double leadTicks = 0.45D + 1.05D * sinDive + speedBonus + pingTicks;
+        double standingFloorLead = standingTarget ? 0.45D : 0.0D;
+        double leadTicks = 0.45D + 1.05D * sinDive + speedBonus + pingTicks + standingFloorLead;
         int fullTicks = Math.min(5, (int) Math.floor(leadTicks));
         double fracTick = leadTicks - Math.floor(leadTicks);
 
-        // Vanilla travelFallFlying() clamps fal
+        // Vanilla travelFallFlying() clamps fallDistance to 1.0 whenever vy > -0.5 b/t
         double simFallDist = (pvy <= -0.5D) ? Math.max(mc.player.fallDistance, 1.0D) : 1.0D;
 
         double simPx = ex, simPy = ey, simPz = ez;
@@ -1303,7 +1315,7 @@ public final class ElytraTarget extends Module {
         double simOffX = 0.0D, simOffY = 0.0D, simOffZ = 0.0D;
         double simEvx = evx, simEvy = evy, simEvz = evz;
         double enemyDrag = target.isFallFlying() ? 0.99D : 0.91D;
-        double strikeRadius = 2.55D;
+        double strikeRadius = standingTarget ? 2.75D : 2.55D;
 
         for (int t = 1; t <= fullTicks + 1; t++) {
             double stepFraction = (t <= fullTicks) ? 1.0D : fracTick;
@@ -1326,7 +1338,7 @@ public final class ElytraTarget extends Module {
             simOffY += simEvy * stepFraction;
             simOffZ += simEvz * stepFraction;
 
-            // 4-substep swept check per tick: prevents high-speed tunneling AND checks floor height per substep
+            // 4-substep swept check per tick: checks both 3D reach AND ground-floor arrival for standing targets
             for (int s = 1; s <= 4; s++) {
                 double f = s * 0.25D;
                 double subPx = prevPx + (simPx - prevPx) * f;
@@ -1337,8 +1349,24 @@ public final class ElytraTarget extends Module {
                 double subOffZ = prevOffZ + (simOffZ - prevOffZ) * f;
                 double subFall = prevFall + (simFallDist - prevFall) * f;
 
+                if (subFall < 1.48D) {
+                    continue;
+                }
+
+                // Standing-target ground guard: unequip before simulated feet hit box.minY while within horizontal smash range
+                if (standingTarget) {
+                    double subFeetY = subPy - eyeHeight;
+                    double subHorizDist = Math.hypot(
+                            subPx - Mth.clamp(subPx, box.minX + subOffX, box.maxX + subOffX),
+                            subPz - Mth.clamp(subPz, box.minZ + subOffZ, box.maxZ + subOffZ)
+                    );
+                    if (subFeetY <= (box.minY + subOffY + 0.25D) && subHorizDist <= 3.15D) {
+                        return true;
+                    }
+                }
+
                 boolean aboveEnemyFloor = subPy >= (box.minY + subOffY - 0.55D);
-                if (!aboveEnemyFloor || subFall < 1.50D) {
+                if (!aboveEnemyFloor) {
                     continue;
                 }
                 double subDist = distPointToShiftedBox(subPx, subPy, subPz, box, subOffX, subOffY, subOffZ);
@@ -1627,6 +1655,12 @@ public final class ElytraTarget extends Module {
         if (mc.player.onGround()) {
             return false;
         }
+        int curTick = mc.player.tickCount;
+        if (curTick == cachedClearUnderFeetTick) {
+            return cachedClearUnderFeetResult;
+        }
+        cachedClearUnderFeetTick = curTick;
+
         AABB box = mc.player.getBoundingBox();
         AABB checkArea = new AABB(
                 box.minX - horizRadius,
@@ -1636,7 +1670,8 @@ public final class ElytraTarget extends Module {
                 box.minY - 0.05D,
                 box.maxZ + horizRadius
         );
-        return mc.level.noCollision(mc.player, checkArea);
+        cachedClearUnderFeetResult = mc.level.noCollision(mc.player, checkArea);
+        return cachedClearUnderFeetResult;
     }
 
 }
